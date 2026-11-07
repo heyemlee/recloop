@@ -5,7 +5,8 @@
      1M items (ml/ann/vectors.py). User vectors are recency-weighted history averages.
   2. Benchmark at each size: Flat, IVF-Flat (nlist x nprobe), HNSW (M x efConstruction x
      efSearch) and, at 1M, IVF-PQ (ml/ann/bench.py).
-  3. Index updates: incremental adds with distribution drift vs. full rebuilds, HNSW deletions
+  3. Top-100 vs top-200 (the retrieval stage asks for 200) on the same 1M indexes.
+  4. Index updates: incremental adds with distribution drift vs. full rebuilds, HNSW deletions
      (ml/ann/incremental.py).
 
 Latency is measured one query per call on one thread (median of 3 runs of P50 / P99); builds
@@ -13,6 +14,7 @@ use --build-threads threads. Run on an otherwise idle machine for final numbers:
 marked preliminary when --preliminary is given or the load average is high at the start.
 
 Usage: python -m ml.ann.run [--preliminary] [--quick] [--source-emb PATH] [--render-only]
+                            [--only ksweep]
 """
 
 from __future__ import annotations
@@ -71,6 +73,8 @@ QUICK_SCALES = (
     Scale("real", 3_459, "real", bench.Grid(ivf_nlists=(16,), **QUICK_GRID)),
     Scale("20K", 20_000, "mixture", bench.Grid(ivf_nlists=(128,), ivfpq_nlist=128, **QUICK_GRID)),
 )
+KSWEEP = bench.KSweep()
+QUICK_KSWEEP = bench.KSweep(nlist=128, nprobes=(8, 16), hnsw=(16, 40), ef_searches=(128, 256))
 QUICK_PLAN = incremental.Plan(
     initial=20_000,
     batches=2,
@@ -200,15 +204,21 @@ def prepare_vectors(args, log) -> tuple[vectors.Mixture, dict, np.ndarray | None
     )
 
 
-def run_scale(scale: Scale, mix, real, args, run: bench.Run, log) -> dict:
+def scale_data(scale: Scale, mix, real, args) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """(items, their components, queries) of a catalog; the same seeds give the same arrays."""
     if scale.source == "real":
-        if real is None:
-            return {"name": scale.name, "skipped": "no source embeddings"}
         data = vectors.normalize(real)
         labels = mix.predict(data)
     else:
         data, labels = vectors.make_catalog(mix, scale.n, SEED + scale.n)
     queries, _ = vectors.make_queries(data, labels, args.queries, SEED + scale.n + 1)
+    return data, labels, queries
+
+
+def run_scale(scale: Scale, mix, real, args, run: bench.Run, log) -> dict:
+    if scale.source == "real" and real is None:
+        return {"name": scale.name, "skipped": "no source embeddings"}
+    data, labels, queries = scale_data(scale, mix, real, args)
     log(f"[{scale.name}] {len(data):,} items, {len(queries):,} queries")
     t0 = time.perf_counter()
     b = bench.Bench(data, queries, run, labels)
@@ -227,6 +237,43 @@ def run_scale(scale: Scale, mix, real, args, run: bench.Run, log) -> dict:
     }
 
 
+def run_ksweep(scale: Scale, sweep: bench.KSweep, mix, real, args, run: bench.Run, log) -> dict:
+    data, _, queries = scale_data(scale, mix, real, args)
+    log(f"[k sweep] {scale.name}: k = {', '.join(map(str, sweep.ks))}")
+    load = os.getloadavg()
+    t0 = time.perf_counter()
+    rows = bench.k_sweep(data, queries, run, sweep)
+    return {
+        "scale": scale.name,
+        "n": len(data),
+        "queries": len(queries),
+        "digest": vectors.array_digest(data),
+        "sweep": asdict(sweep),
+        "load_average_start": list(load),
+        "rows": rows,
+        "seconds": time.perf_counter() - t0,
+    }
+
+
+def merge_ksweep(args, ksweep: dict, log) -> None:
+    """Add a separately run k sweep to an existing ann.json and re-render the report."""
+    out = json.loads(args.json.read_text())
+    same = [x for x in out["scales"] if x.get("name") == ksweep["scale"]]
+    if not same or same[0]["digest"] != ksweep["digest"]:
+        raise SystemExit(f"{args.json} has no {ksweep['scale']} catalog with the same vectors")
+    out["ksweep"] = ksweep
+    setup = out["setup"]
+    load = ksweep["load_average_start"][0]
+    reasons = [r for r in setup["status_reasons"] if not r.startswith("k sweep run separately")]
+    if args.preliminary or load > BUSY_LOAD:
+        setup["status"] = "preliminary"
+        reasons.append(f"k sweep run separately, load average {load:.1f} at its start")
+    setup["status_reasons"] = reasons
+    args.json.write_text(json.dumps(out, indent=1) + "\n")
+    args.report.write_text(report.render(out))
+    log(f"merged the k sweep into {args.json} and wrote {args.report}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     ap.add_argument("--source-emb", type=Path, default=DEFAULT_EMB)
@@ -237,6 +284,11 @@ def main() -> None:
     ap.add_argument("--build-threads", type=int, default=8)
     ap.add_argument("--machine", default=None, help="label for the report, e.g. 'M4 Pro'")
     ap.add_argument("--skip-incremental", action="store_true")
+    ap.add_argument(
+        "--only",
+        choices=("ksweep",),
+        help="run only this part and merge it into the existing --json (then re-render)",
+    )
     ap.add_argument("--render-only", action="store_true", help="re-render ann.md from ann.json")
     ap.add_argument("--json", type=Path, default=JSON_PATH)
     ap.add_argument("--report", type=Path, default=REPORT)
@@ -264,7 +316,12 @@ def main() -> None:
 
     mix, data_info, real = prepare_vectors(args, log)
     scales = QUICK_SCALES if args.quick else FULL_SCALES
+    sweep = QUICK_KSWEEP if args.quick else KSWEEP
+    if args.only == "ksweep":
+        merge_ksweep(args, run_ksweep(scales[-1], sweep, mix, real, args, run, log), log)
+        return
     results = [run_scale(s, mix, real, args, run, log) for s in scales]
+    ksweep = run_ksweep(scales[-1], sweep, mix, real, args, run, log)
 
     inc = None
     if not args.skip_incremental:
@@ -307,6 +364,7 @@ def main() -> None:
         },
         "data": data_info,
         "scales": results,
+        "ksweep": ksweep,
         "incremental": inc,
     }
     args.json.parent.mkdir(parents=True, exist_ok=True)

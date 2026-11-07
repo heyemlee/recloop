@@ -133,6 +133,8 @@ def render(out: dict) -> str:
     lines += _vectors(out, scales)
     lines += _switch(out, scales)
     lines += _recommendations(scales)
+    if out.get("ksweep"):
+        lines += _ksweep(out["ksweep"])
     if out.get("incremental"):
         lines += _updates(out["incremental"], s)
     lines += _sweeps(scales)
@@ -176,6 +178,8 @@ def _summary(out: dict, scales: list[dict]) -> list[str]:
                     f"(5th percentile over users {best['recall_p5']:.2f})."
                 )
         lines.append(_ivf_vs_hnsw(largest, out["setup"]["k"]))
+    if out.get("ksweep"):
+        lines.append(_ksweep_summary(out["ksweep"]))
     inc = out.get("incremental")
     if inc:
         cps = inc["checkpoints"]
@@ -228,8 +232,8 @@ def _ivf_vs_hnsw(scale: dict, k: int) -> str:
             best = max((r for r in rows if r["index"] == "HNSW"), key=lambda r: r["recall"])
             parts.append(
                 f"for recall ≥ {target} IVF-Flat needs P99 {_us(ivf['p99_us'])}, while no HNSW "
-                f"setting gets there (best {best['recall']:.3f} at {_settings(best)}, P99 "
-                f"{_us(best['p99_us'])})"
+                f"setting in the sweep gets there (best {np.floor(best['recall'] * 1e4) / 1e4:.4f} at "
+                f"{_settings(best)}, P99 {_us(best['p99_us'])})"
             )
     if not parts:
         return ""
@@ -691,6 +695,133 @@ def _rules(scales: list[dict]) -> list[str]:
             "(IndexRefineFlat) recovers IVF-Flat's recall but keeps the full vectors in memory, "
             "so PQ pays only when memory is the constraint."
         )
+    return lines + [""]
+
+
+def _ksweep_reach(rows: list[dict], k: int, family: str, target: float) -> dict | None:
+    return cheapest([r for r in rows if r["k"] == k], target, family)
+
+
+def _ksweep_summary(ks: dict) -> str:
+    rows, k_lo, k_hi = ks["rows"], min(ks["sweep"]["ks"]), max(ks["sweep"]["ks"])
+    target = TARGETS[-1]
+    parts = []
+    for family, knob in (("IVF-Flat", "nprobe"), ("HNSW", "efSearch")):
+        lo = _ksweep_reach(rows, k_lo, family, target)
+        hi = _ksweep_reach(rows, k_hi, family, target)
+        if lo and hi and hi["params"][knob] == lo["params"][knob]:
+            parts.append(
+                f"{family} gets there at the same {knob} {hi['params'][knob]} as for top-{k_lo} "
+                f"(P99 {_us(hi['p99_us'])} vs {_us(lo['p99_us'])})"
+            )
+        elif lo and hi:
+            parts.append(
+                f"{family} needs {knob} {hi['params'][knob]} instead of {lo['params'][knob]} "
+                f"(P99 {_us(hi['p99_us'])} vs {_us(lo['p99_us'])})"
+            )
+        elif hi:
+            parts.append(
+                f"{family} gets there at {knob} {hi['params'][knob]} (P99 {_us(hi['p99_us'])})"
+            )
+        else:
+            best = max((r for r in rows if r["k"] == k_hi and r["index"] == family),
+                       key=lambda r: r["recall"])  # fmt: skip
+            parts.append(
+                f"{family} does not get there (best {best['recall']:.3f} at {knob} "
+                f"{best['params'][knob]}, P99 {_us(best['p99_us'])})"
+            )
+    flat = next((r for r in rows if r["index"] == "Flat" and r["k"] == k_hi), None)
+    hnsw = _ksweep_reach(rows, k_hi, "HNSW", target)
+    slower = (
+        f", slower than exact search (Flat P99 {_us(flat['p99_us'])})"
+        if flat and hnsw and hnsw["p99_us"] > flat["p99_us"]
+        else ""
+    )
+    return (
+        f"- **Top-{k_hi}** (what the retrieval stage asks for), {_n(ks['n'])} items: for recall@"
+        f"{k_hi} ≥ {target}, " + "; ".join(parts) + slower + "."
+    )
+
+
+def _ksweep(ks: dict) -> list[str]:
+    rows, sweep = ks["rows"], ks["sweep"]
+    k_lo, k_hi = min(sweep["ks"]), max(sweep["ks"])
+    by = {}
+    for r in rows:
+        by.setdefault((r["index"], tuple(sorted(r["params"].items()))), {})[r["k"]] = r
+    table = []
+    for (index, _), per_k in by.items():
+        lo, hi = per_k[k_lo], per_k[k_hi]
+        table.append(
+            [index, _settings(lo), _rec(lo), _us(lo["p50_us"]), _us(lo["p99_us"]),
+             _rec(hi), _us(hi["p50_us"]), _us(hi["p99_us"])]
+        )  # fmt: skip
+    lines = [
+        f"## Top-{k_hi}",
+        "",
+        f"The retrieval stage asks FAISS for the top {k_hi} items; the sweeps above use k = "
+        f"{k_lo}. Here the same {_n(ks['n'])}-item indexes (the catalog of the sweep above) are "
+        f"searched with k = {k_lo} and k = {k_hi} in turn for every setting, so both columns "
+        f"come from the same index under the same conditions. Recall@k is against the exact "
+        f"top-k.",
+        "",
+        *_table(
+            [
+                "Index",
+                "Settings",
+                f"k = {k_lo}: recall",
+                "P50",
+                "P99",
+                f"k = {k_hi}: recall",
+                "P50",
+                "P99",
+            ],
+            table,
+        ),  # fmt: skip
+        "",
+    ]
+    for target in TARGETS:
+        parts = []
+        for family, knob in (("IVF-Flat", "nprobe"), ("HNSW", "efSearch")):
+            got = [(k, _ksweep_reach(rows, k, family, target)) for k in (k_lo, k_hi)]
+            parts.append(
+                f"{family}: "
+                + ", ".join(
+                    f"k = {k} at {knob} {r['params'][knob]} (P99 {_us(r['p99_us'])})"
+                    if r
+                    else f"k = {k} not reached"
+                    for k, r in got
+                )
+            )
+        lines.append(f"- Recall ≥ {target}: " + "; ".join(parts) + ".")
+    flat = by.get(("Flat", ()), {})
+    if flat:
+        lines.append(
+            f"- Flat: P50 {_us(flat[k_lo]['p50_us'])} at k = {k_lo}, "
+            f"{_us(flat[k_hi]['p50_us'])} at k = {k_hi} (the scan is the same; only the "
+            "result heap grows)."
+        )
+    for family, knob in (("IVF-Flat", "nprobe"), ("HNSW", "efSearch")):
+        pairs = [(v[k_lo], v[k_hi]) for (index, _), v in by.items() if index == family]
+        if not pairs:
+            continue
+        drop = max(lo["recall"] - hi["recall"] for lo, hi in pairs)
+        time = float(np.median([hi["p50_us"] / lo["p50_us"] for lo, hi in pairs]))
+        line = (
+            f"- {family} at equal settings: recall@{k_hi} trails recall@{k_lo} by at most "
+            f"{drop:.3f}, and P50 changes by {time - 1:+.0%} (median over settings): the work is "
+            "the scan or the walk, not the longer result list."
+        )
+        if family == "HNSW":
+            short = [(lo, hi) for lo, hi in pairs if lo["params"][knob] < k_hi]
+            if short:
+                lo, hi = min(short, key=lambda x: x[0]["params"][knob])
+                line += (
+                    f" With efSearch below k the candidate list is shorter than the result: at "
+                    f"efSearch {lo['params'][knob]}, recall@{k_hi} is {hi['recall']:.3f} against "
+                    f"{lo['recall']:.3f} at k = {k_lo}; keep efSearch ≥ k."
+                )
+        lines.append(line)
     return lines + [""]
 
 

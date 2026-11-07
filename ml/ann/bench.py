@@ -8,7 +8,7 @@ training / build time (`build_threads` threads).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -157,6 +157,47 @@ class Bench:
         if grid.ivfpq_nlist:
             self.ivf_pq(grid.ivfpq_nlist, grid.ivfpq_m, grid.ivfpq_nprobes, grid.ivfpq_k_factors)
         return self.rows
+
+
+@dataclass(frozen=True)
+class KSweep:
+    """The same indexes measured at several result sizes k (the retrieval stage asks for 200)."""
+
+    ks: tuple[int, ...] = (100, 200)
+    nlist: int = 4096
+    nprobes: tuple[int, ...] = (32, 64, 128, 256)
+    hnsw: tuple[int, int] = (32, 200)  # (M, efConstruction)
+    ef_searches: tuple[int, ...] = (128, 256, 512, 1024, 2048)
+
+
+def k_sweep(data: np.ndarray, queries: np.ndarray, run: Run, sweep: KSweep) -> list[dict]:
+    """Flat, one IVF-Flat and one HNSW index; every search setting is measured at each k in
+    turn, so the k = 100 and k = 200 numbers come from the same index under the same load."""
+    _, scores = metrics.exact_topk(data, queries, max(sweep.ks))
+    kth = {k: scores[:, k - 1] for k in sweep.ks}
+    rows: list[dict] = []
+
+    def at_each_k(index, family: str, params: dict, built: dict) -> None:
+        for k in sweep.ks:
+            res = evaluate(index, data, queries, kth[k], replace(run, k=k))
+            rows.append({"index": family, "params": params, "k": k, **res, **built})
+
+    flat = build_with(run, indexes.build_flat, data)
+    at_each_k(flat.index, "Flat", {}, Bench.built_info(flat, indexes.index_bytes(flat.index)))
+    del flat
+    ivf = build_with(run, indexes.build_ivf_flat, data, sweep.nlist, run.seed)
+    info = Bench.built_info(ivf, indexes.index_bytes(ivf.index))
+    for nprobe in sweep.nprobes:
+        indexes.set_param(ivf.index, "nprobe", nprobe)
+        at_each_k(ivf.index, "IVF-Flat", {"nlist": sweep.nlist, "nprobe": nprobe}, info)
+    del ivf
+    m, efc = sweep.hnsw
+    hnsw = build_with(run, indexes.build_hnsw, data, m, efc)
+    info = Bench.built_info(hnsw, indexes.index_bytes(hnsw.index))
+    for ef in sweep.ef_searches:
+        indexes.set_param(hnsw.index, "efSearch", ef)
+        at_each_k(hnsw.index, "HNSW", {"M": m, "efC": efc, "efSearch": ef}, info)
+    return rows
 
 
 def cheapest(rows: list[dict], target: float, key: str = "p99_us") -> dict | None:

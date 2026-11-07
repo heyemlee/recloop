@@ -202,6 +202,19 @@ def test_hnsw_and_refined_pq_reach_high_recall():
     assert bench.evaluate(pq.index, data, q, kth, run)["recall"] > max(plain, 0.9)
 
 
+def test_k_sweep_measures_every_setting_at_each_k():
+    rng = np.random.default_rng(20)
+    data, q = _unit(rng, 3000), _unit(rng, 25)
+    run = bench.Run(runs=1, warmup=0, build_threads=2)
+    sweep = bench.KSweep(ks=(10, 20), nlist=8, nprobes=(2, 8), hnsw=(8, 40), ef_searches=(32,))
+    rows = bench.k_sweep(data, q, run, sweep)
+    assert len(rows) == 2 * (1 + 2 + 1)
+    assert {(r["index"], r["k"]) for r in rows} >= {("Flat", 10), ("Flat", 20), ("HNSW", 20)}
+    exhaustive = [r for r in rows if r["index"] == "IVF-Flat" and r["params"]["nprobe"] == 8]
+    assert [r["recall"] for r in exhaustive] == [1.0, 1.0]
+    assert all(r["recall"] == 1.0 for r in rows if r["index"] == "Flat")
+
+
 def test_bench_selection_helpers():
     rows = [
         {"index": "A", "recall": 0.96, "p99_us": 50.0, "p50_us": 10.0},
@@ -267,6 +280,7 @@ def test_quick_run_renders_a_report(tmp_path, monkeypatch):
     text = out_md.read_text()
     assert text.startswith("# ANN benchmark and index updates")
     assert "Preliminary numbers" in text
+    assert "## Top-200" in text and out["ksweep"]["rows"]
     assert report.render(out) == text  # rendering is deterministic
 
 
