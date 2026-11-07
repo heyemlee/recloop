@@ -157,8 +157,8 @@ test-go:
 		if [ -n "$$unformatted" ]; then echo "gofmt needed: $$unformatted"; exit 1; fi
 	cd serving && GOFLAGS=-modcacherw go vet ./... && GOFLAGS=-modcacherw go test ./...
 
-test-web: ## Type-check and lint the web app
-	cd web && npx tsc --noEmit && npm run lint
+test-web: ## Type-check and lint the web app (next typegen first: tsc needs the route types)
+	cd web && npx next typegen && npx tsc --noEmit && npm run lint
 
 e2e: ## Browser check (needs the three servers): click an item, reload, recommendations change
 	cd web && RECLOOP_WEB_URL=http://localhost:$(WEB_PORT) npx playwright test
