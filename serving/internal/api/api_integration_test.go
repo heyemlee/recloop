@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
+	"maps"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -317,5 +320,79 @@ func TestServedLogsAndPaging(t *testing.T) {
 	bad, _ := events.Served(3, uuid.Must(uuid.NewV7()), []byte(`{"exp": {}}`))
 	if err := f.st.InsertServed(context.Background(), []db.InsertEventParams{events.Params(bad)}); err == nil {
 		t.Fatal("served event without model_ver was accepted")
+	}
+}
+
+// The default recall-layer experiment (migration 00003) has to reach fusion: each variant's
+// rrf_weights replace the surface defaults, and the fused scores are computed with them.
+// Neither the SRM check nor an A/A test would notice variant parameters that are silently
+// ignored; the A/B would then compare two identical arms.
+func TestRecallVariantsFuseWithTheirWeights(t *testing.T) {
+	f := newFixture(t)
+	var raw []byte
+	if err := f.st.Pool.QueryRow(context.Background(),
+		"SELECT variants FROM experiments WHERE exp_id = 'recall-rrf-weights-v1'").Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	var variants []struct {
+		Name   string `json:"name"`
+		Params struct {
+			RRFWeights map[string]float64 `json:"rrf_weights"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(raw, &variants); err != nil {
+		t.Fatal(err)
+	}
+	defaults := map[string]float64{"sasrec": 1, "itemcf": 1, "pop": 0.3} // the fixture's home weights
+	want := map[string]map[string]float64{}
+	for _, v := range variants {
+		w := maps.Clone(defaults)
+		for src := range w {
+			if x, ok := v.Params.RRFWeights[src]; ok {
+				w[src] = x
+			}
+		}
+		want[v.Name] = w
+	}
+	if len(want) != 2 || maps.Equal(want["control"], want["sasrec_heavy"]) {
+		t.Fatalf("the default experiment should compare two different weightings: %v", want)
+	}
+
+	checked := map[string]bool{}
+	for uid := 100; len(checked) < len(want) && uid < 200; uid++ {
+		f.post(event("click", uid, 5, "")) // a history, so that ItemCF (weighted differently) contributes
+		var r recResp
+		f.get(fmt.Sprintf("/v1/recommendations?user_id=%d&limit=20&debug=1", uid), &r)
+		variant := r.Experiments["recall"].Variant
+		w, ok := want[variant]
+		if !ok {
+			t.Fatalf("user %d: variant %q is not in the experiment", uid, variant)
+		}
+		if !maps.Equal(r.Debug.Weights, w) {
+			t.Fatalf("user %d (%s): weights %v, want %v", uid, variant, r.Debug.Weights, w)
+		}
+		fromItemCF := 0
+		for _, it := range r.Items {
+			if it.Slot != "organic" {
+				continue
+			}
+			score := 0.0
+			for _, h := range it.Sources {
+				score += w[h.Source] / float64(mixer.RRFK+h.Rank)
+				if h.Source == "itemcf" {
+					fromItemCF++
+				}
+			}
+			if math.Abs(it.Score-score) > 1e-12 {
+				t.Fatalf("user %d (%s): item %d scored %v, want %v from %+v", uid, variant, it.ItemID, it.Score, score, it.Sources)
+			}
+		}
+		if fromItemCF == 0 {
+			t.Fatalf("user %d: no ItemCF candidates on the page", uid)
+		}
+		checked[variant] = true
+	}
+	if len(checked) != len(want) {
+		t.Fatalf("users 100-199 only reached %v", checked)
 	}
 }
