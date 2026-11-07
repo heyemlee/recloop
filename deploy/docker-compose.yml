@@ -1,7 +1,20 @@
-# Local development stack. `make up` starts it and applies the migrations.
-# Host ports are bound to 127.0.0.1 and default to non-standard numbers so they do not clash
-# with other local stacks; override them in .env (see .env.example).
+# Local stack. `make up` starts the default services and applies the migrations; `make bench-up`
+# adds the bench profile (the api and the model server as CPU- and memory-limited containers
+# behind Toxiproxy) for the latency experiments (docs/design.md §5.2).
+# Host ports are bound to 127.0.0.1 and use 1xxxx numbers so they do not clash with other
+# local stacks; override them in .env (see .env.example).
 name: recloop
+
+x-go-image: &go-image
+  # The Go services (api, aggregator) as static binaries on an empty image. `make images`
+  # cross-compiles them on the host into .cache/linux (same module cache, no network here).
+  image: recloop/go:dev
+  build:
+    context: ../.cache/linux
+    dockerfile_inline: |
+      FROM scratch
+      COPY api aggregator /usr/local/bin/
+      USER 65534:65534
 
 services:
   postgres:
@@ -29,7 +42,10 @@ services:
   redis:
     image: redis:8.10.3-alpine
     # Redis holds derived state only (rebuilt from the event log, design §7.2): no persistence.
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    # Bounded memory: when full, evict the keys closest to expiry first (candidate cache, then
+    # pages, then the 7-day dedup markers); user history has no TTL and is never evicted.
+    command: ["redis-server", "--save", "", "--appendonly", "no",
+              "--maxmemory", "384mb", "--maxmemory-policy", "volatile-ttl"]
     ports:
       - "127.0.0.1:${RECLOOP_REDIS_PORT:-16390}:6379"
     healthcheck:
@@ -41,7 +57,263 @@ services:
       resources:
         limits:
           cpus: "1"
+          memory: 512m
+
+  # Event log (design §7.2, §12.3). One broker: replication factor 1, acks=all is still the
+  # durability point of POST /v1/events. Two listeners: containers use redpanda:9092, processes
+  # on the host localhost:19092.
+  redpanda:
+    image: redpandadata/redpanda:v26.2.6
+    command:
+      - redpanda
+      - start
+      - --mode=dev-container
+      - --smp=1
+      - --memory=768M
+      - --reserve-memory=0M
+      - --overprovisioned
+      - --node-id=0
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:${RECLOOP_KAFKA_PORT:-19092}
+      - --rpc-addr=redpanda:33145
+      - --advertise-rpc-addr=redpanda:33145
+    ports:
+      - "127.0.0.1:${RECLOOP_KAFKA_PORT:-19092}:19092"
+      - "127.0.0.1:${RECLOOP_REDPANDA_ADMIN_PORT:-19644}:9644"
+    volumes:
+      - redpanda:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true'"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1g
+
+  # Creates the topics once (design §12.3): events, 6 partitions, key = user_id, 7 days; and
+  # turns off auto-creation, so a typo in a topic name fails instead of creating a topic.
+  redpanda-init:
+    image: redpandadata/redpanda:v26.2.6
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - >-
+        rpk -X admin.hosts=redpanda:9644 cluster config set auto_create_topics_enabled false &&
+        (rpk -X brokers=redpanda:9092 topic describe events >/dev/null 2>&1 ||
+        rpk -X brokers=redpanda:9092 topic create events --partitions 6 --replicas 1
+        --topic-config retention.ms=604800000 --topic-config cleanup.policy=delete)
+    restart: "no"
+
+  # events -> PostgreSQL events_raw (Redpanda Connect, deploy/connect/log-sink.yaml).
+  log-sink:
+    image: redpandadata/connect:4.115.1
+    command: ["run", "/config/log-sink.yaml"]
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+      DATABASE_URL: postgres://recloop:recloop@postgres:5432/recloop?sslmode=disable
+      # Go programs do not see the container's memory limit: make the GC work harder below it.
+      GOMEMLIMIT: 440MiB
+    volumes:
+      - ./connect/log-sink.yaml:/config/log-sink.yaml:ro
+    ports:
+      - "127.0.0.1:${RECLOOP_LOG_SINK_PORT:-14195}:4195"
+    depends_on:
+      redpanda-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512m
+
+  # events -> per-user state in Redis (serving/cmd/aggregator).
+  aggregator:
+    <<: *go-image
+    entrypoint: ["/usr/local/bin/aggregator"]
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgres://recloop:recloop@postgres:5432/recloop?sslmode=disable
+      AGGREGATOR_METRICS_ADDR: 0.0.0.0:18090
+      GOMEMLIMIT: 220MiB
+    ports:
+      - "127.0.0.1:${RECLOOP_AGGREGATOR_PORT:-18090}:18090"
+    depends_on:
+      redpanda-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
           memory: 256m
+
+  prometheus:
+    image: prom/prometheus:v3.15.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus:/prometheus
+    ports:
+      - "127.0.0.1:${RECLOOP_PROMETHEUS_PORT:-19090}:9090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512m
+
+  grafana:
+    image: grafana/grafana:13.2.4
+    environment:
+      # Local development only: no login, everyone is an editor.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Editor
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/recloop.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_SECURITY_ALLOW_EMBEDDING: "true"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "127.0.0.1:${RECLOOP_GRAFANA_PORT:-13001}:3000"
+    depends_on:
+      - prometheus
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.163.2
+    command: ["--config=/etc/otelcol/collector.yaml"]
+    volumes:
+      - ./otel/collector.yaml:/etc/otelcol/collector.yaml:ro
+    ports:
+      - "127.0.0.1:${RECLOOP_OTLP_GRPC_PORT:-14317}:4317"
+      - "127.0.0.1:${RECLOOP_OTLP_HTTP_PORT:-14318}:4318"
+    depends_on:
+      - jaeger
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
+
+  jaeger:
+    image: jaegertracing/jaeger:2.22.0
+    command: ["--config=/etc/jaeger/config.yaml"]
+    volumes:
+      - ./jaeger/config.yaml:/etc/jaeger/config.yaml:ro
+    ports:
+      - "127.0.0.1:${RECLOOP_JAEGER_PORT:-16686}:16686"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512m
+
+  # ---------------------------------------------------------------- bench profile (§5.2)
+
+  # Every connection of the bench api to the model server and to Redis goes through here, so a
+  # fault can cut it (proxy disabled) or slow it (latency toxic). The api reaches the model
+  # server at toxiproxy:18091 and Redis at toxiproxy:16391 in every run, faulty or not.
+  toxiproxy:
+    profiles: [bench]
+    image: ghcr.io/shopify/toxiproxy:2.13.0
+    command: ["-host=0.0.0.0", "-config=/config/toxiproxy.json"]
+    volumes:
+      - ./toxiproxy/toxiproxy.json:/config/toxiproxy.json:ro
+    ports:
+      - "127.0.0.1:${RECLOOP_TOXIPROXY_PORT:-18474}:8474"
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 128m
+
+  model-server:
+    profiles: [bench]
+    image: recloop/model-server:dev
+    build:
+      context: ../model_server
+      dockerfile: ../deploy/model-server.Dockerfile
+    command: ["--bundle", "/bundles/current", "--host", "0.0.0.0", "--port", "18081", "--admin-port", "18082"]
+    environment:
+      MODEL_SERVER_WORKERS: "32"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_EXPORTER_OTLP_INSECURE: "true"
+    volumes:
+      - ../artifacts/bundles:/bundles:ro
+    ports:
+      - "127.0.0.1:${RECLOOP_BENCH_MS_ADMIN_PORT:-18182}:18082"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18082/healthz', timeout=2)"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 1g
+
+  api:
+    profiles: [bench]
+    <<: *go-image
+    entrypoint: ["/usr/local/bin/api"]
+    environment:
+      API_ADDR: 0.0.0.0:18080
+      DATABASE_URL: postgres://recloop:recloop@postgres:5432/recloop?sslmode=disable
+      REDIS_URL: ${BENCH_REDIS_URL:-redis://toxiproxy:16391/0}
+      MODEL_SERVER_ADDR: ${BENCH_MODEL_SERVER_ADDR:-toxiproxy:18091}
+      KAFKA_BROKERS: redpanda:9092
+      RECLOOP_BUNDLE: /bundles/current
+      RECLOOP_RESILIENCE: ${RECLOOP_RESILIENCE:-full}
+      CANDIDATE_CACHE: ${CANDIDATE_CACHE:-on}
+      BREAKER_WINDOW: ${BREAKER_WINDOW:-time:10s:20:10}
+      ACCESS_LOG: "0"
+      GOMEMLIMIT: 440MiB
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_EXPORTER_OTLP_INSECURE: "true"
+      OTEL_TRACES_SAMPLER: parentbased_traceidratio
+      OTEL_TRACES_SAMPLER_ARG: ${OTEL_SAMPLE:-0.01}
+    volumes:
+      - ../artifacts/bundles:/bundles:ro
+    ports:
+      - "127.0.0.1:${RECLOOP_BENCH_API_PORT:-18180}:18080"
+    depends_on:
+      toxiproxy:
+        condition: service_started
+      model-server:
+        condition: service_healthy
+      redpanda-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 512m
 
 volumes:
   pgdata:
+  redpanda:
+  prometheus:

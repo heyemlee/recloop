@@ -1,7 +1,7 @@
 // Package userstate is the per-user state in Redis (design §12.2): recent history, history
-// version, purchases and recent impressions. The api reads it on every request; in M1 the api
-// also applies events to it directly (the aggregator takes this over in M2 with the same
-// script).
+// version, purchases and recent impressions. The api reads it on every request; the aggregator
+// applies the events from the event log to it (the api itself only on the synchronous path,
+// EVENTS_MODE=direct). Both use the same script and the same dedup group.
 package userstate
 
 import (
@@ -21,8 +21,10 @@ const (
 	SeenWindow = 24 * time.Hour
 	// DedupTTL keeps the "already applied" marker of an event (design §7.3: 7 days).
 	DedupTTL = 7 * 24 * time.Hour
-	// DedupGroup is this writer's consumer group in dedup:{group}:{event_id}.
-	DedupGroup = "api"
+	// DedupGroup is the consumer group in dedup:{group}:{event_id} of everything that applies
+	// events to user state: the aggregator, a rebuild from events_raw and the synchronous path
+	// share it, so an event applied by one is not applied again by another.
+	DedupGroup = "aggregator"
 )
 
 // Keys of one user.
@@ -45,8 +47,18 @@ type Context struct {
 	Seen    map[int32]bool // impressions in the last SeenWindow
 }
 
-// Store reads and updates user state.
-type Store struct{ R redis.UniversalClient }
+// Store reads and updates user state. Group is the dedup group (DedupGroup when empty).
+type Store struct {
+	R     redis.UniversalClient
+	Group string
+}
+
+func (s Store) group() string {
+	if s.Group == "" {
+		return DedupGroup
+	}
+	return s.Group
+}
 
 // Read fetches the user's context in one pipeline round trip.
 func (s Store) Read(ctx context.Context, uid int64, now time.Time) (Context, error) {
@@ -103,17 +115,59 @@ type Change struct {
 	At      time.Time // event time (from the UUIDv7 event_id)
 }
 
-// Apply applies the change exactly once: the dedup marker and the update run in one Lua script,
-// so a retried or redelivered event changes nothing (design §7.3). Reports whether it applied.
-func (s Store) Apply(ctx context.Context, c Change, now time.Time) (bool, error) {
+func (s Store) scriptArgs(c Change, now time.Time) ([]string, []any) {
 	keys := []string{
-		DedupKey(DedupGroup, c.EventID), HistKey(c.UserID), HVKey(c.UserID),
+		DedupKey(s.group(), c.EventID), HistKey(c.UserID), HVKey(c.UserID),
 		BoughtKey(c.UserID), SeenKey(c.UserID),
 	}
 	args := []any{
 		c.Kind, c.ItemID, c.At.UnixMilli(), now.UnixMilli(),
 		HistoryMax, SeenWindow.Milliseconds(), DedupTTL.Milliseconds(),
 	}
+	return keys, args
+}
+
+// Apply applies the change exactly once: the dedup marker and the update run in one Lua script,
+// so a retried or redelivered event changes nothing (design §7.3). Reports whether it applied.
+func (s Store) Apply(ctx context.Context, c Change, now time.Time) (bool, error) {
+	keys, args := s.scriptArgs(c, now)
 	n, err := applyScript.Run(ctx, s.R, keys, args...).Int()
 	return n == 1, err
+}
+
+// ApplyBatch applies changes in order in one pipeline round trip (each change is still its own
+// atomic script call). Reports per change whether it applied (false: a duplicate). On error some
+// changes may have been applied; retrying the batch is safe, the dedup markers skip them.
+func (s Store) ApplyBatch(ctx context.Context, cs []Change, now time.Time) ([]bool, error) {
+	if len(cs) == 0 {
+		return nil, nil
+	}
+	for attempt := 0; ; attempt++ {
+		pipe := s.R.Pipeline()
+		cmds := make([]*redis.Cmd, len(cs))
+		for i, c := range cs {
+			keys, args := s.scriptArgs(c, now)
+			cmds[i] = applyScript.EvalSha(ctx, pipe, keys, args...)
+		}
+		_, err := pipe.Exec(ctx)
+		if err != nil && attempt == 0 && redis.HasErrorPrefix(err, "NOSCRIPT") {
+			// First use, or Redis restarted: load the script and run the batch again.
+			if err := applyScript.Load(ctx, s.R).Err(); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		out := make([]bool, len(cs))
+		for i, cmd := range cmds {
+			n, err := cmd.Int()
+			if err != nil {
+				return nil, err
+			}
+			out[i] = n == 1
+		}
+		return out, nil
+	}
 }

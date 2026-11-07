@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"runtime/debug"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -18,7 +19,9 @@ import (
 	"github.com/heyemlee/recloop/serving/internal/catalog"
 	"github.com/heyemlee/recloop/serving/internal/events"
 	"github.com/heyemlee/recloop/serving/internal/experiment"
+	"github.com/heyemlee/recloop/serving/internal/metrics"
 	"github.com/heyemlee/recloop/serving/internal/mixer"
+	"github.com/heyemlee/recloop/serving/internal/resilience"
 	"github.com/heyemlee/recloop/serving/internal/userstate"
 )
 
@@ -28,17 +31,42 @@ type Server struct {
 	Bundle  *bundle.Bundle
 	Users   userstate.Store
 	Pages   cache.Pages
+	Cands   *cache.CandidateCache // nil: candidate cache off
 	Exps    *experiment.Loader
-	Events  *events.Service
+	Events  events.Publisher
 	Served  *events.ServedWriter
 	Redis   redis.UniversalClient
+	// Campaigns is the advertiser api's store; nil leaves its routes out.
+	Campaigns CampaignStore
 	// Sources per surface, and the default RRF weights per surface (an experiment variant's
 	// "rrf_weights" param overrides them).
 	Sources map[string][]mixer.Spec
 	Weights map[string]map[string]float64
-	Ready   func(ctx context.Context) map[string]string // dependency -> "ok" or an error
-	Log     *slog.Logger
-	Now     func() time.Time
+	// Plan is the request budget. RedisBreaker, if set, guards user state, pages and the
+	// candidate cache (cmd/api leaves it nil); the model server's and PostgreSQL's breakers
+	// sit in their Specs.
+	Plan         resilience.Plan
+	RedisBreaker *resilience.Breaker
+	// Naive turns off the request deadline, the stage budgets, the breakers and degradation:
+	// the baseline of the fault experiments (design §5.2). Never for real traffic.
+	Naive     bool
+	AccessLog bool
+	Ready     func(ctx context.Context) map[string]string // dependency -> "ok" or an error
+	Log       *slog.Logger
+	Now       func() time.Time
+
+	warned sync.Map // warning key -> unix second of its last log line
+}
+
+// warn logs at most one line per second per key: under a dependency failure every request
+// fails the same way, and the metrics already count each one.
+func (s *Server) warn(key, msg string, args ...any) {
+	now := time.Now().Unix()
+	if last, ok := s.warned.Load(key); ok && last.(int64) == now {
+		return
+	}
+	s.warned.Store(key, now)
+	s.Log.Warn(msg, args...)
 }
 
 // Handler routes the api.
@@ -49,10 +77,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/items/{id}", s.getItem)
 	mux.HandleFunc("GET /v1/users/{id}/context", s.userContext)
 	mux.HandleFunc("GET /v1/demo/users", s.demoUsers)
+	if s.Campaigns != nil {
+		s.campaignRoutes(mux)
+	}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	mux.HandleFunc("GET /readyz", s.readyz)
+	mux.Handle("GET /metrics", metrics.Handler())
 	return s.middleware(mux)
 }
 
@@ -75,9 +107,18 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 				s.Log.Error("panic", "path", r.URL.Path, "panic", p, "stack", string(debug.Stack()))
 				writeError(rec, http.StatusInternalServerError, "internal error")
 			}
-			if r.URL.Path != "/healthz" {
-				s.Log.Info("http", "method", r.Method, "path", r.URL.Path, "status", rec.status,
-					"ms", float64(time.Since(t0).Microseconds())/1000)
+			took := time.Since(t0)
+			route := r.Pattern // set by the mux on the request it routed
+			if route == "" {
+				route = "unmatched"
+			}
+			if route != "GET /metrics" && route != "GET /healthz" {
+				metrics.HTTPRequests.WithLabelValues(route, strconv.Itoa(rec.status)).Inc()
+				metrics.HTTPDuration.WithLabelValues(route).Observe(took.Seconds())
+				if s.AccessLog {
+					s.Log.Info("http", "method", r.Method, "path", r.URL.Path, "status", rec.status,
+						"ms", float64(took.Microseconds())/1000)
+				}
 			}
 		}()
 		next.ServeHTTP(rec, r)
@@ -103,7 +144,13 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 	if deps["postgres"] != "ok" {
 		status = http.StatusServiceUnavailable
 	}
-	writeJSON(w, status, map[string]any{"bundle": s.Bundle.Version, "dependencies": deps})
+	mode := "resilient"
+	if s.Naive {
+		mode = "naive"
+	}
+	writeJSON(w, status, map[string]any{
+		"bundle": s.Bundle.Version, "dependencies": deps, "mode": mode, "candidate_cache": s.Cands != nil,
+	})
 }
 
 // ---------------------------------------------------------------- items and users
@@ -153,7 +200,9 @@ func (s *Server) userContext(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "user id must be a non-negative integer")
 		return
 	}
-	uc, err := s.Users.Read(r.Context(), uid, s.Now())
+	ctx, cancel := context.WithTimeout(r.Context(), 200*time.Millisecond)
+	defer cancel()
+	uc, err := s.Users.Read(ctx, uid, s.Now())
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "user state unavailable: "+err.Error())
 		return
@@ -179,7 +228,9 @@ func (s *Server) userContext(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) demoUsers(w http.ResponseWriter, r *http.Request) {
-	raw, err := s.Redis.Get(r.Context(), userstate.DemoUsersKey).Bytes()
+	ctx, cancel := context.WithTimeout(r.Context(), 200*time.Millisecond)
+	defer cancel()
+	raw, err := s.Redis.Get(ctx, userstate.DemoUsersKey).Bytes()
 	if errors.Is(err, redis.Nil) {
 		writeJSON(w, http.StatusOK, []any{})
 		return

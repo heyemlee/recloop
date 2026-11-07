@@ -1,15 +1,21 @@
-// Package testutil gives integration tests a real PostgreSQL test database and a Redis
-// database, and skips the test when they are not reachable (run `make up`).
+// Package testutil gives integration tests a real PostgreSQL test database, a Redis database
+// and the Redpanda broker, and skips the test when they are not reachable (run `make up`).
+//
+// Each test binary (package) gets its own database, recloop_test_<package>: `go test ./...`
+// runs packages in parallel processes, and two of them migrating or emptying one database
+// would race.
 package testutil
 
 import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,13 +34,28 @@ const (
 	testRedisDB     = 15
 )
 
+// TestDB is the database of this test binary: recloop_test_<package>.
+func TestDB() string {
+	name := strings.TrimSuffix(filepath.Base(os.Args[0]), ".test")
+	name = strings.Map(func(r rune) rune {
+		switch {
+		case 'a' <= r && r <= 'z', '0' <= r && r <= '9':
+			return r
+		case 'A' <= r && r <= 'Z':
+			return r + 'a' - 'A'
+		}
+		return '_'
+	}, name)
+	return testDB + "_" + name
+}
+
 func migrationsDir() string {
 	_, file, _, _ := runtime.Caller(0)
 	return filepath.Join(filepath.Dir(file), "..", "..", "migrations")
 }
 
-// PG returns a store on the recloop_test database, created if needed and migrated to the
-// latest version, with the event, order and item tables emptied.
+// PG returns a store on this package's test database, created if needed and migrated to the
+// latest version, with the ad, event, order and item tables emptied.
 func PG(t *testing.T) *store.Store {
 	t.Helper()
 	admin := os.Getenv("DATABASE_URL")
@@ -45,7 +66,8 @@ func PG(t *testing.T) *store.Store {
 	if err != nil {
 		t.Fatal(err)
 	}
-	u.Path = "/" + testDB
+	name := TestDB()
+	u.Path = "/" + name
 	testURL := u.String()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -55,11 +77,11 @@ func PG(t *testing.T) *store.Store {
 		t.Skipf("PostgreSQL not reachable (%v): run `make up`", err)
 	}
 	var exists bool
-	if err := conn.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)", testDB).Scan(&exists); err != nil {
+	if err := conn.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)", name).Scan(&exists); err != nil {
 		t.Fatal(err)
 	}
 	if !exists {
-		if _, err := conn.Exec(ctx, "CREATE DATABASE "+testDB); err != nil {
+		if _, err := conn.Exec(ctx, "CREATE DATABASE "+name); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -75,14 +97,15 @@ func PG(t *testing.T) *store.Store {
 		t.Fatal(err)
 	}
 	if err := goose.Up(db, migrationsDir()); err != nil {
-		t.Fatalf("migrating %s: %v", testDB, err)
+		t.Fatalf("migrating %s: %v", name, err)
 	}
 	st, err := store.Open(ctx, testURL)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(st.Close)
-	if _, err := st.Pool.Exec(ctx, "TRUNCATE events_raw, orders, model_versions; DELETE FROM items; DELETE FROM users"); err != nil {
+	if _, err := st.Pool.Exec(ctx, `TRUNCATE ad_clicks, ad_charges, campaign_budget_daily, campaign_items,
+		campaigns, advertisers, events_raw, orders, model_versions; DELETE FROM items; DELETE FROM users`); err != nil {
 		t.Fatal(err)
 	}
 	return st
@@ -104,6 +127,13 @@ func SeedItems(t *testing.T, st *store.Store, n int, stock func(i int) int) {
 // Redis returns a client on database 15 of the dev Redis, flushed.
 func Redis(t *testing.T) *redis.Client {
 	t.Helper()
+	return RedisDB(t, testRedisDB)
+}
+
+// RedisDB returns a client on database db of the dev Redis, flushed. Packages whose tests may
+// run at the same time use different databases.
+func RedisDB(t *testing.T, db int) *redis.Client {
+	t.Helper()
 	raw := os.Getenv("REDIS_URL")
 	if raw == "" {
 		raw = defaultRedisURL
@@ -112,7 +142,7 @@ func Redis(t *testing.T) *redis.Client {
 	if err != nil {
 		t.Fatal(err)
 	}
-	opts.DB = testRedisDB
+	opts.DB = db
 	c := redis.NewClient(opts)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -124,4 +154,21 @@ func Redis(t *testing.T) *redis.Client {
 	}
 	t.Cleanup(func() { c.Close() })
 	return c
+}
+
+// Brokers returns the dev Redpanda's seed brokers, or skips the test when it is not reachable.
+func Brokers(t *testing.T) []string {
+	t.Helper()
+	raw := os.Getenv("KAFKA_BROKERS")
+	if raw == "" {
+		raw = "localhost:19092"
+	}
+	brokers := strings.Split(raw, ",")
+	d := net.Dialer{Timeout: time.Second}
+	conn, err := d.Dial("tcp", brokers[0])
+	if err != nil {
+		t.Skipf("Redpanda not reachable (%v): run `make up`", err)
+	}
+	conn.Close()
+	return brokers
 }

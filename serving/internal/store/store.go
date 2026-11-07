@@ -174,20 +174,115 @@ func (s *Store) EnsurePartition(ctx context.Context, day time.Time) error {
 	return nil
 }
 
-// EventRow is one event to store; Order is set for purchases.
-type EventRow struct {
-	Params db.InsertEventParams
-	Order  *db.InsertOrderParams
+// EnsurePartitions creates the events_raw partitions of every UTC day in [from, to].
+func (s *Store) EnsurePartitions(ctx context.Context, from, to time.Time) error {
+	for d := from.UTC(); !d.After(to.UTC()); d = d.AddDate(0, 0, 1) {
+		if err := s.EnsurePartition(ctx, d); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-// WriteResult reports which events were new and the stock left after new purchases.
+// PartitionWindow is the range of days that can receive events: the api accepts events up to
+// events.MaxAge (7 days) old and a few minutes ahead, so [today - 7, today + 1].
+func PartitionWindow(now time.Time) (time.Time, time.Time) {
+	return now.UTC().AddDate(0, 0, -7), now.UTC().AddDate(0, 0, 1)
+}
+
+// MaintainPartitions keeps the partitions of PartitionWindow in place (at start and every
+// `every`), so the log-sink never inserts into a missing day. Errors are logged by the caller.
+func (s *Store) MaintainPartitions(ctx context.Context, every time.Duration, onErr func(error)) {
+	ensure := func() {
+		from, to := PartitionWindow(time.Now())
+		if err := s.EnsurePartitions(ctx, from, to); err != nil && ctx.Err() == nil {
+			onErr(err)
+		}
+	}
+	ensure()
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			ensure()
+		}
+	}
+}
+
+// PartitionDays lists the days that have an events_raw partition, oldest first.
+func (s *Store) PartitionDays(ctx context.Context) ([]time.Time, error) {
+	rows, err := s.Pool.Query(ctx, `
+		SELECT c.relname FROM pg_inherits AS i JOIN pg_class AS c ON c.oid = i.inhrelid
+		WHERE i.inhparent = 'events_raw'::regclass ORDER BY c.relname`)
+	if err != nil {
+		return nil, err
+	}
+	names, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, err
+	}
+	var out []time.Time
+	for _, n := range names {
+		d, err := time.Parse("20060102", n[len("events_raw_"):])
+		if err == nil {
+			out = append(out, d)
+		}
+	}
+	return out, nil
+}
+
+// ReplayRow is a client event read back from events_raw.
+type ReplayRow = db.ReplayEventsRow
+
+// Replay calls fn with the client events of events_raw in event order (day by day, by
+// event_id within a day, i.e. UUIDv7 time), in pages of `page` rows.
+func (s *Store) Replay(ctx context.Context, page int, fn func([]ReplayRow) error) error {
+	days, err := s.PartitionDays(ctx)
+	if err != nil {
+		return err
+	}
+	for _, d := range days {
+		after := pgtype.UUID{Valid: true} // the zero UUID sorts first
+		for {
+			rows, err := s.Q.ReplayEvents(ctx, db.ReplayEventsParams{
+				EventDay: pgtype.Date{Time: d, Valid: true}, After: after, N: int32(page),
+			})
+			if err != nil {
+				return err
+			}
+			if len(rows) == 0 {
+				break
+			}
+			if err := fn(rows); err != nil {
+				return err
+			}
+			after = rows[len(rows)-1].EventID
+			if len(rows) < page {
+				break
+			}
+		}
+	}
+	return nil
+}
+
+// EventRow is one event to store.
+type EventRow struct {
+	Params db.InsertEventParams
+}
+
+// WriteResult reports which events were new and the stock left of the items new purchases
+// took (the purchase trigger, migration 00005, creates the order and takes the stock).
 type WriteResult struct {
 	Inserted []bool
 	Stock    map[int32]int32
 }
 
-// WriteEvents inserts the events (duplicates of an earlier event_id are skipped) and, in the
-// same transaction, creates an order and takes one unit of stock for every new purchase.
+// WriteEvents inserts the events in one transaction; duplicates of an earlier event_id are
+// skipped. This is the synchronous path (EVENTS_MODE=direct, tests); with Redpanda the
+// log-sink does the same insert.
 func (s *Store) WriteEvents(ctx context.Context, rows []EventRow) (WriteResult, error) {
 	res := WriteResult{Inserted: make([]bool, len(rows)), Stock: map[int32]int32{}}
 	if len(rows) == 0 {
@@ -223,25 +318,21 @@ func (s *Store) WriteEvents(ctx context.Context, rows []EventRow) (WriteResult, 
 		if batchErr != nil {
 			return batchErr
 		}
+		var bought []int32
 		for i, r := range rows {
-			if !res.Inserted[i] || r.Order == nil {
-				continue
+			if res.Inserted[i] && r.Params.Type == "purchase" && r.Params.ItemID.Valid {
+				bought = append(bought, r.Params.ItemID.Int32)
 			}
-			if _, err := q.InsertOrder(ctx, *r.Order); err != nil {
-				if errors.Is(err, pgx.ErrNoRows) {
-					continue // the order of this event exists already
-				}
-				return err
-			}
-			left, err := q.DecrementStock(ctx, r.Order.ItemID)
-			switch {
-			case err == nil:
-				res.Stock[r.Order.ItemID] = left
-			case errors.Is(err, pgx.ErrNoRows):
-				res.Stock[r.Order.ItemID] = 0 // already sold out
-			default:
-				return err
-			}
+		}
+		if len(bought) == 0 {
+			return nil
+		}
+		left, err := q.StockOf(ctx, bought)
+		if err != nil {
+			return err
+		}
+		for _, l := range left {
+			res.Stock[l.ItemID] = l.Stock
 		}
 		return nil
 	})

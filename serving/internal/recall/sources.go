@@ -87,6 +87,9 @@ type SASRec struct{ Client pb.ModelServerClient }
 
 func (SASRec) Name() string { return "sasrec" }
 
+// Applicable: a cold-start user has no history to encode, so there is no call to make.
+func (SASRec) Applicable(req Request) bool { return len(req.History) > 0 }
+
 func (s SASRec) Recall(ctx context.Context, req Request) (Output, error) {
 	history := Recent(req.History, HistoryWindow)
 	if len(history) == 0 {
@@ -118,6 +121,9 @@ type Text struct {
 }
 
 func (Text) Name() string { return "text" }
+
+// Applicable: only the item surface has a current item to search around.
+func (Text) Applicable(req Request) bool { return req.Surface == SurfaceItem && req.Seed >= 0 }
 
 func (t Text) Recall(ctx context.Context, req Request) (Output, error) {
 	if req.Surface != SurfaceItem || req.Seed < 0 {

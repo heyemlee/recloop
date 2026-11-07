@@ -1,0 +1,30 @@
+# Scrapes the services of deploy/docker-compose.yml. The api and the model server run either
+# on the host (`make serve-api`, `make serve-model`: job label mode=dev) or as containers of the
+# bench profile (`make bench-up`: mode=bench); whichever is running answers.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: api
+    static_configs:
+      - targets: ["api:18080"]
+        labels: {mode: bench}
+      - targets: ["host.docker.internal:18080"]
+        labels: {mode: dev}
+  - job_name: model-server
+    static_configs:
+      - targets: ["model-server:18082"]
+        labels: {mode: bench}
+      - targets: ["host.docker.internal:18082"]
+        labels: {mode: dev}
+  - job_name: aggregator
+    static_configs:
+      - targets: ["aggregator:18090"]
+  - job_name: log-sink
+    static_configs:
+      - targets: ["log-sink:4195"]
+  - job_name: redpanda
+    metrics_path: /public_metrics
+    static_configs:
+      - targets: ["redpanda:9644"]

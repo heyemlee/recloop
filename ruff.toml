@@ -1,0 +1,2 @@
+# Python outside ml/ and model_server/ (sim/, loadtest/, analysis/) uses the ml settings.
+extend = "ml/pyproject.toml"

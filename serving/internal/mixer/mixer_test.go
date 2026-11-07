@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/heyemlee/recloop/serving/internal/recall"
+	"github.com/heyemlee/recloop/serving/internal/resilience"
 )
 
 func ids(fs []Fused) []int32 {
@@ -177,7 +178,7 @@ func TestFanOutReturnsPartialResults(t *testing.T) {
 		{Source: fakeSource{name: "failing", err: errors.New("boom")}, Timeout: 50 * time.Millisecond, K: 10},
 	}
 	t0 := time.Now()
-	res := FanOut(context.Background(), specs, recall.Request{})
+	res := FanOut(context.Background(), specs, recall.Request{}, time.Second)
 	if took := time.Since(t0); took > 200*time.Millisecond {
 		t.Fatalf("fan-out waited %v for slow sources", took)
 	}
@@ -185,15 +186,68 @@ func TestFanOutReturnsPartialResults(t *testing.T) {
 		t.Fatalf("fast: %+v", res[0])
 	}
 	for _, i := range []int{1, 2} {
-		if !errors.Is(res[i].Err, ErrTimeout) || len(res[i].Items) != 0 {
+		if !errors.Is(res[i].Err, ErrTimeout) || len(res[i].Items) != 0 || res[i].Status != StatusTimeout {
 			t.Fatalf("%s: %+v", res[i].Source, res[i])
 		}
 	}
-	if res[3].Err == nil || errors.Is(res[3].Err, ErrTimeout) || res[3].Items != nil {
+	if res[3].Err == nil || errors.Is(res[3].Err, ErrTimeout) || res[3].Items != nil || res[3].Status != StatusError {
 		t.Fatalf("failing: %+v", res[3])
 	}
 	fused := RRF(res, map[string]float64{"fast": 1, "slow": 1, "stuck": 1, "failing": 1})
 	if !equal(ids(fused), []int32{1, 2}) {
 		t.Fatalf("merged %v", ids(fused))
+	}
+}
+
+func TestFanOutTakesTheStageBudget(t *testing.T) {
+	specs := []Spec{
+		{Source: fakeSource{name: "remote", delay: 30 * time.Millisecond, items: cands(1)}, Timeout: 35 * time.Millisecond, MinTimeout: 5 * time.Millisecond, K: 10},
+		{Source: fakeSource{name: "local", items: cands(2)}, Timeout: 10 * time.Millisecond, K: 10},
+	}
+	// Only 12 ms are left for recall: the 30 ms source times out at 12 ms, not at its own 35.
+	t0 := time.Now()
+	res := FanOut(context.Background(), specs, recall.Request{}, 12*time.Millisecond)
+	if took := time.Since(t0); took > 25*time.Millisecond {
+		t.Fatalf("waited %v with a 12ms budget", took)
+	}
+	if res[0].Status != StatusTimeout || res[1].Status != StatusOK {
+		t.Fatalf("statuses %s %s", res[0].Status, res[1].Status)
+	}
+	// 3 ms left: below the remote source's minimum, it is not called at all.
+	res = FanOut(context.Background(), specs, recall.Request{}, 3*time.Millisecond)
+	if res[0].Status != StatusSkipped || res[1].Status != StatusOK {
+		t.Fatalf("statuses %s %s", res[0].Status, res[1].Status)
+	}
+}
+
+func TestOpenBreakerSkipsTheSource(t *testing.T) {
+	b := resilience.NewBreaker("remote", resilience.BreakerConfig{Window: 4, FailureRatio: 0.5, OpenFor: time.Minute, HalfOpenProbes: 1}, nil)
+	failing := []Spec{{Source: fakeSource{name: "remote", err: errors.New("unavailable")}, Timeout: 20 * time.Millisecond, K: 10, Breaker: b}}
+	for i := 0; i < 4; i++ {
+		FanOut(context.Background(), failing, recall.Request{}, time.Second)
+	}
+	if b.State() != resilience.Open {
+		t.Fatalf("breaker %v after 4 failures", b.State())
+	}
+	t0 := time.Now()
+	slow := []Spec{{Source: fakeSource{name: "remote", delay: time.Second}, Timeout: 30 * time.Millisecond, K: 10, Breaker: b}}
+	res := FanOut(context.Background(), slow, recall.Request{}, time.Second)
+	if res[0].Status != StatusOpen || time.Since(t0) > 5*time.Millisecond {
+		t.Fatalf("open breaker: %+v after %v", res[0], time.Since(t0))
+	}
+}
+
+func TestNaiveFanOutWaitsForEverySource(t *testing.T) {
+	specs := []Spec{
+		{Source: fakeSource{name: "slow", delay: 60 * time.Millisecond, items: cands(1)}, Timeout: 10 * time.Millisecond, K: 10},
+		{Source: fakeSource{name: "failing", err: errors.New("boom")}, Timeout: 10 * time.Millisecond, K: 10},
+	}
+	t0 := time.Now()
+	res := FanOutNaive(context.Background(), specs, recall.Request{})
+	if took := time.Since(t0); took < 60*time.Millisecond {
+		t.Fatalf("naive fan-out returned after %v, before the slow source", took)
+	}
+	if res[0].Status != StatusOK || len(res[0].Items) != 1 || res[1].Status != StatusError {
+		t.Fatalf("results %+v", res)
 	}
 }

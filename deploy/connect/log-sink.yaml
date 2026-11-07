@@ -1,0 +1,81 @@
+# log-sink (docs/design.md §7.2, §21.1): raw events from the `events` topic into PostgreSQL
+# events_raw, in batches. Only configuration, no code.
+#
+# At-least-once: the input commits a partition's offset only up to the last record the output
+# has acknowledged, so a crash redelivers the uncommitted tail. The insert is idempotent:
+# ON CONFLICT (event_id, event_day) DO NOTHING (event_day comes from the UUIDv7 event_id, so a
+# redelivered event always hits the same partition and the same primary key). A purchase row
+# also creates its order and takes stock in the same transaction (trigger, migration 00005);
+# a duplicate inserts no row and fires nothing.
+#
+# A failed batch (PostgreSQL down, a day without a partition) is retried until it goes in;
+# the consumer group's lag grows meanwhile and the api is not affected.
+
+http:
+  address: 0.0.0.0:4195   # /metrics, /ping, /ready
+
+input:
+  redpanda:
+    seed_brokers: ["${KAFKA_BROKERS:redpanda:9092}"]
+    topics: ["events"]
+    consumer_group: log-sink
+    client_id: recloop-log-sink
+    # Static membership: after a crash the restarted sink takes its old place in the group at
+    # once instead of waiting for the dead member's session to time out.
+    instance_id: log-sink-0
+    session_timeout: 15s
+    rebalance_timeout: 15s
+    start_offset: earliest
+    commit_period: 1s
+    # Rows are independent and the insert is idempotent, so a partition's records need not go
+    # in order: up to checkpoint_limit of them are in flight at once and the committed offset
+    # only moves past records the output acknowledged. In order, one batch per partition at a
+    # time, the sink topped out at ~1,400 rows/s with PostgreSQL and itself mostly idle.
+    max_yield_batch_bytes: 1MB
+    partition_buffer_bytes: 2MB
+    unordered_processing:
+      enabled: true
+      checkpoint_limit: 4096
+      batching:
+        count: 1000
+        period: 100ms
+
+output:
+  sql_insert:
+    driver: postgres
+    dsn: "${DATABASE_URL}"
+    table: events_raw
+    columns: [event_id, event_day, type, user_id, request_id, impression_id, item_id, payload, client_ts, server_ts]
+    # The record format is serving/internal/events.Record: the same names as the columns; the
+    # ad_token of a sponsored click is kept inside payload (events_raw has no column for it).
+    args_mapping: |
+      let payload = if this.ad_token.or("") != "" {
+        this.payload.or({}).merge({"ad_token": this.ad_token})
+      } else {
+        this.payload.or(null)
+      }
+      root = [
+        this.event_id,
+        this.event_day,
+        this.type,
+        this.user_id,
+        this.request_id.or(null),
+        this.impression_id.or(null),
+        this.item_id.or(null),
+        if $payload == null { null } else { $payload.format_json(no_indent: true) },
+        this.client_ts.or(null),
+        this.server_ts,
+      ]
+    suffix: ON CONFLICT (event_id, event_day) DO NOTHING
+    max_in_flight: 8
+    conn_max_open: 8
+    batching:
+      count: 1000
+      period: 100ms
+
+logger:
+  level: INFO
+  format: logfmt
+
+metrics:
+  prometheus: {}

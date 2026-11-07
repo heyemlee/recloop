@@ -13,7 +13,7 @@ The store with the debug panel on: every request shows its recall sources, fusio
 model version and experiment groups. Two dataset users get different feeds; after a click on a
 binder, the next feed includes items recalled via that binder (outlined in the GIF).
 
-**Status: work in progress.** Milestones M0 and M1 are done:
+**Status: work in progress.** Milestones M0, M1 and M2 are done:
 
 - a reproducible data pipeline, the catalog in PostgreSQL, and offline evaluation of Pop,
   ItemCF and SASRec with bootstrap intervals and a comparison with the published SASRec
@@ -23,24 +23,45 @@ binder, the next feed includes items recalled via that binder (outlined in the G
   filters, brand diversity, paging, layered experiment assignment, served-event logging,
   idempotent event ingestion into PostgreSQL and Redis) and a Next.js store with a debug panel.
   A click changes the next page's recommendations.
+- latency and events: every recommendation request has a 100 ms budget that each stage draws
+  from (the gRPC deadline travels to the model server), a degradation chain that answers with
+  what is left instead of failing, a circuit breaker in front of the model server and a
+  candidate cache keyed by the user's history version. Events go through a Redpanda log to an
+  aggregator (Redis state) and a Redpanda Connect sink (PostgreSQL), each idempotent; a drill
+  with duplicate deliveries, `kill -9` of the consumers and a broker restart ends with every
+  event applied exactly once. A traffic simulator drives the load tests and an SRM check of the
+  experiment split. Prometheus, Grafana and OpenTelemetry traces (Jaeger) show it per stage.
+  On a laptop (8-vCPU Docker VM, api and model server limited to 2 CPUs each) every run met
+  the SLO (P99 ≤ 100 ms, at most 1 % degraded) up to 1,200 requests/s, and the median P99 stays
+  under 10 ms up to 1,500/s, the top of the test ladder; with the model server disconnected the
+  API still answers every request (degraded), where the naive version fails 83 % of them
+  ([results](docs/results/latency.md),
+  [ADR-0003](docs/adr/0003-when-to-add-a-message-queue.md)).
 
 Ahead of M4, an ANN benchmark compares exact search with IVF, HNSW and IVF-PQ on synthetic
-catalogs of up to 1M items, and studies incremental index updates against full rebuilds
-([results](docs/results/ann.md); the latencies are preliminary until a run on an idle machine).
+catalogs of up to 1M items, and studies incremental index updates against full rebuilds. Exact
+search is enough until it needs about 1 ms of CPU per query (about 250K items); at 1M items
+IVF-Flat reaches recall@100 0.995 at a P99 of 152 µs ([results](docs/results/ann.md)).
 
-Next up: latency budgets, degradation and an event log with Redpanda (M2).
+Next up: sponsored items, the auction and correct billing (M3).
 
 ## Run
 
 Needs Docker, Go, Node and [uv](https://docs.astral.sh/uv/).
 
 ```
-make setup        # PostgreSQL + Redis, data, catalog, SASRec training, eval, bundle, Redis seed
+make setup        # the stack (PostgreSQL, Redis, Redpanda, consumers, monitoring), data, catalog,
+                  # SASRec training, eval, bundle, Redis seed
 make serve-model  # gRPC model server   :18081
 make serve-api    # Go API              :18080
 make serve-web    # web store           http://localhost:13000
 make test         # Python and Go tests; make e2e runs the browser check
+make drill        # duplicates + consumer crashes under simulated traffic, then a consistency check
+make load         # latency experiments on CPU-limited containers -> docs/results/latency.md
 ```
+
+Grafana (dashboard "RecLoop") is at http://localhost:13001, Jaeger at http://localhost:16686,
+Prometheus at http://localhost:19090.
 
 ## Data
 

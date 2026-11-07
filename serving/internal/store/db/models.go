@@ -9,6 +9,63 @@ import (
 	"github.com/pgvector/pgvector-go"
 )
 
+type AdCharge struct {
+	ImpressionID string
+	ClickEventID pgtype.UUID
+	CampaignID   int64
+	Day          pgtype.Date
+	PriceCents   int32
+	BilledCents  int32
+	CreatedAt    pgtype.Timestamptz
+}
+
+type AdClick struct {
+	EventID      pgtype.UUID
+	ImpressionID string
+	UserID       int64
+	ItemID       int32
+	TokenStatus  string
+	CampaignID   pgtype.Int8
+	Day          pgtype.Date
+	ReceivedAt   pgtype.Timestamptz
+	ProcessedAt  pgtype.Timestamptz
+}
+
+type Advertiser struct {
+	AdvertiserID int32
+	Name         string
+	Brand        pgtype.Text
+	CreatedAt    pgtype.Timestamptz
+}
+
+type Campaign struct {
+	CampaignID       int64
+	AdvertiserID     int32
+	Name             string
+	Status           string
+	DailyBudgetCents int32
+	BidCpcCents      int32
+	FreqCapPerDay    int32
+	StartAt          pgtype.Timestamptz
+	EndAt            pgtype.Timestamptz
+	Targeting        []byte
+	Version          int32
+	CreatedAt        pgtype.Timestamptz
+	UpdatedAt        pgtype.Timestamptz
+}
+
+type CampaignBudgetDaily struct {
+	CampaignID  int64
+	Day         pgtype.Date
+	BudgetCents int32
+	SpentCents  int32
+}
+
+type CampaignItem struct {
+	CampaignID int64
+	ItemID     int32
+}
+
 type EventsRaw struct {
 	EventID      pgtype.UUID
 	EventDay     pgtype.Date
