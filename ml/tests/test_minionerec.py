@@ -216,6 +216,15 @@ def test_build_and_render_end_to_end(tmp_path):
         assert heading in text
     assert "Preliminary" not in text
     assert "Findings (HR@10" in text and "Between the two groups" in text
+    for inside, want in (
+        ((True, True), "the paper's HR@10 and NDCG@10 are both inside our 95% intervals."),
+        ((False, False), "the paper's HR@10 and NDCG@10 are both outside our 95% intervals."),
+        ((True, False), "the paper's HR@10 is inside and its NDCG@10 is outside our 95%"),
+    ):
+        main["reproduction"]["paper_inside_interval"] = dict(
+            zip(("HR@10", "NDCG@10"), inside, strict=True)
+        )
+        assert want in minionerec_report.render(out)
 
 
 def test_group_contrast():
@@ -373,7 +382,11 @@ def test_agreement_pairs_runs_on_shared_samples(tmp_path):
     # row 1's target (item 2) moves from rank 2 to 3: a hit at 10 in both runs
     assert a["difference"]["HR@10"]["value"] == pytest.approx(0.0)
     assert a["difference"]["NDCG@10"]["value"] < 0
-    assert "## Other settings on the same samples" in minionerec_report.render(out)
+    text = minionerec_report.render(out)
+    assert "## Other settings on the same samples" in text
+    # the same settings on a subset: the note puts the changes down to the batches
+    assert "- `beam10` has the settings of `test`; only the batches differ" in text
+    assert "changes 50.0% of the top-10 lists, while 95.0% of the top-10 SIDs stay" in text
 
 
 def test_runs_differing_in_one_setting_are_compared_with_each_other(tmp_path):
@@ -403,7 +416,9 @@ def test_runs_differing_in_one_setting_are_compared_with_each_other(tmp_path):
     )
     dtype_pair = next(a for a in out["agreement"] if a["reference"] == "bf16-b4")
     assert dtype_pair["run"] == "fp32-b4" and dtype_pair["identical_top10"] == 1.0
-    assert "| fp32-b4 | 10 / 4 / float32 | bf16-b4 |" in minionerec_report.render(out)
+    text = minionerec_report.render(out)
+    assert "| fp32-b4 | 10 / 4 / float32 | bf16-b4 |" in text
+    assert "has the settings of" not in text  # every pair differs in a setting
 
 
 def test_smoke_runs_are_left_out(tmp_path):

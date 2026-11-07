@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from ml.eval import metrics
 from ml.eval.machine import BUSY_LOAD
-from ml.eval.minionerec import NAME, REFERENCES, SEGMENT_METRICS
+from ml.eval.minionerec import NAME, REFERENCES, SEGMENT_METRICS, SETTINGS_COMPARED
 from ml.eval.report import _ci, _signed, _table
 
 METRIC_NAMES = [f"HR@{k}" for k in metrics.KS] + [f"NDCG@{k}" for k in metrics.KS]
@@ -189,14 +189,17 @@ def _repro_section(out: dict, main: dict) -> list[str]:
     inside = r["paper_inside_interval"]
     check = main["calc_py"]
     if full:
+        where = {m: "inside" if inside[m] else "outside" for m in ("HR@10", "NDCG@10")}
         verdict = (
             ("**Reproduced.**" if r["reproduced"] else "**Not reproduced.**")
             + f" calc.py on our generations differs from the paper by {hr_d:+.4f} HR@10 and "
+            + f"{nd_d:+.4f} NDCG@10; the paper's "
             + (
-                f"{nd_d:+.4f} NDCG@10; the paper's HR@10 is "
-                f"{'inside' if inside['HR@10'] else 'outside'} and its NDCG@10 "
-                f"{'inside' if inside['NDCG@10'] else 'outside'} our 95% intervals."
+                f"HR@10 and NDCG@10 are both {where['HR@10']}"
+                if where["HR@10"] == where["NDCG@10"]
+                else f"HR@10 is {where['HR@10']} and its NDCG@10 is {where['NDCG@10']}"
             )
+            + " our 95% intervals."
         )
     else:
         verdict = (
@@ -654,7 +657,34 @@ def _agreement_section(out: dict) -> list[str]:
             rows,
         ),
         "",
+        *_same_settings_notes(out),
     ]
+
+
+def _same_settings_notes(out: dict) -> list[str]:
+    """Pairs that differ in no compared setting: what is left is how the samples were batched
+    (a subset batches its samples among themselves) or, on the same samples, run-to-run
+    variation."""
+    notes = []
+    for a in out["agreement"]:
+        s, r = a["settings"], a["reference_settings"]
+        if any(s.get(k) != r.get(k) for k in SETTINGS_COMPARED):
+            continue
+        n_run = out["runs"][a["run"]]["summary"]["samples"]
+        n_ref = out["runs"][a["reference"]]["summary"]["samples"]
+        cause = (
+            "only the batches differ: a subset forms its batches from its own samples, so most "
+            "batches hold other prompts with other left padding, and the kernels round "
+            "differently"
+            if n_run != n_ref
+            else "the samples are the same too, so what differs is run-to-run variation"
+        )
+        notes.append(
+            f"- `{a['run']}` has the settings of `{a['reference']}`; {cause}. That alone changes "
+            f"{1 - a['identical_top10']:.1%} of the top-10 lists, while {a['top10_overlap']:.1%} "
+            f"of the top-10 SIDs stay; HR@10 differs by {_signed(a['difference']['HR@10'])}."
+        )
+    return [*notes, ""] if notes else []
 
 
 def _runs_section(out: dict) -> list[str]:
