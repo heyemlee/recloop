@@ -411,12 +411,12 @@ def _cost_section(out: dict) -> list[str]:
             "",
         ]
         return lines
-    busy = [c for c in cost["configs"].values() if c["loadavg_start"] > BUSY_LOAD]
-    if busy:
+    flagged = [c for c in cost["configs"].values() if _busy(c) or _disturbed(c)]
+    if flagged:
         lines += [
-            f"> **Preliminary timings.** {len(busy)} of {len(cost['configs'])} configurations "
-            f"started with a load average above {BUSY_LOAD:g}; rerun `make minionerec-cost` on "
-            "an idle machine.",
+            f"> **Preliminary timings.** {len(flagged)} of {len(cost['configs'])} configurations "
+            f"started with a load average above {BUSY_LOAD:g} or ran while another Docker "
+            "container ran; rerun `make minionerec-cost` on an idle machine.",
             "",
         ]
     m = cost["machine"]
@@ -433,7 +433,10 @@ def _cost_section(out: dict) -> list[str]:
         "request at batch 1 is one user's recommendation; per-call times leave out each "
         "process's first calls (Metal kernel compilation). Memory is the process's physical "
         "footprint (Activity Monitor's figure, which includes what is allocated on the GPU), "
-        "with the model weights loaded.",
+        "with the model weights loaded. Each configuration started when the 1-minute load "
+        f"average was below {BUSY_LOAD:g} and no Docker container ran; `docker ps` was checked "
+        "every 10 s while it ran, and a configuration during which a container ran was run once "
+        "more. The load column is the 1-minute load average at its start and end.",
         "",
     ]
     rows = []
@@ -442,13 +445,14 @@ def _cost_section(out: dict) -> list[str]:
         pc = c["per_call"]
         rows.append(
             [
-                f"{NAME}, {c['num_beams']} beams",
+                f"{NAME}, {c['num_beams']} beams" + (" †" if _disturbed(c) else ""),
                 str(c["batch_size"]),
                 _ms(pc["p50"]),
                 _ms(pc["p90"]),
                 _ms(pc["p99"]),
                 f"{c['samples_per_second']:.2f}",
                 _gib(c["peak_footprint"]),
+                f"{c['loadavg_start']:.1f} / {c['loadavg_end']:.1f}",
             ]
         )
     sasrec = cost.get("sasrec")
@@ -457,19 +461,32 @@ def _cost_section(out: dict) -> list[str]:
             pc = r["per_call"]
             rows.append(
                 [
-                    f"SASRec, PyTorch CPU, {r['threads']} thread{'s' if r['threads'] > 1 else ''}",
+                    f"SASRec, PyTorch CPU, {r['threads']} thread{'s' if r['threads'] > 1 else ''}"
+                    + (" †" if _disturbed(sasrec) else ""),
                     str(r["batch_size"]),
                     _ms(pc["p50"]),
                     _ms(pc["p90"]),
                     _ms(pc["p99"]),
                     f"{r['samples_per_second']:,.0f}",
                     _gib((sasrec.get("footprint") or {}).get("peak")),
+                    f"{sasrec['loadavg_start'][0]:.1f} / {sasrec['loadavg_end'][0]:.1f}",
                 ]
             )
     lines += _table(
-        ["Model", "Batch", "P50 per call", "P90", "P99", "Users per second", "Peak memory"], rows
+        [
+            "Model",
+            "Batch",
+            "P50 per call",
+            "P90",
+            "P99",
+            "Users per second",
+            "Peak memory",
+            "Load, start / end",
+        ],
+        rows,
     )
     lines.append("")
+    lines += _quiet_notes(cost)
     prefill = cost["configs"].get("beam50_batch1_prefill")
     full = cost["configs"].get("beam50_batch1")
     if prefill and full:
@@ -495,6 +512,48 @@ def _cost_section(out: dict) -> list[str]:
             )
     lines.append("")
     return lines
+
+
+def _busy(c: dict) -> bool:
+    q = c.get("quiet")
+    return not q["quiet_start"] if q else c["loadavg_start"] > BUSY_LOAD
+
+
+def _disturbed(c: dict) -> bool:
+    return bool((c.get("quiet") or {}).get("disturbed"))
+
+
+def _quiet_notes(cost: dict) -> list[str]:
+    measured = dict(cost["configs"])
+    if cost.get("sasrec"):
+        measured["SASRec"] = cost["sasrec"]
+    notes = []
+    for name, c in measured.items():
+        attempts = (c.get("quiet") or {}).get("attempts", [])
+        if len(attempts) > 1:
+            first = ", ".join(attempts[0]["containers_during"])
+            notes.append(
+                f"- `{name}` was run a second time: other containers ran during the first "
+                f"attempt ({first})"
+                + (
+                    f", and during the second too ({', '.join(attempts[-1]['containers_during'])}"
+                    "); it is kept as measured (†)."
+                    if _disturbed(c)
+                    else "."
+                )
+            )
+        elif _disturbed(c):
+            notes.append(
+                f"- `{name}`: containers ran during it "
+                f"({', '.join(attempts[-1]['containers_during'])}) (†)."
+            )
+        if attempts and not attempts[-1]["start"]["load1"] < BUSY_LOAD:
+            notes.append(
+                f"- `{name}` started with a 1-minute load average of "
+                f"{attempts[-1]['start']['load1']:.1f} after waiting "
+                f"{attempts[-1]['waited_seconds'] / 60:.0f} min for a quiet machine."
+            )
+    return [*notes, ""] if notes else []
 
 
 def _agreement_section(out: dict) -> list[str]:

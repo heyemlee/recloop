@@ -1,8 +1,12 @@
 """Latency, throughput and memory of MiniOneRec generation on the Mac's GPU.
 
 `make minionerec-cost` runs this, then ml.eval.sasrec_cost for the SASRec side. Run it on an
-idle machine (no compose stack, no other measurement): timings taken under load are marked
-preliminary in the report.
+idle machine (no compose stack, no other measurement). Each configuration starts only when the
+1-minute load average is below 2 and no Docker container runs (ml.eval.machine.measure_quietly
+waits up to 20 min for that); `docker ps` is checked every 10 s while it runs, and a
+configuration during which a container ran is run once more. The manifest keeps the load and
+the containers at the start and the end of every attempt; the report marks what stayed
+disturbed or started busy.
 
 The workload is one test sample per user for USERS random test users (seeded; each user's
 sample is drawn at random too), so every request is a different user. Every configuration runs
@@ -27,6 +31,7 @@ Usage: python -m minionerec.cost [--users 96] [--dtype bfloat16] [--only beam50_
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import time
 from pathlib import Path
@@ -133,7 +138,9 @@ def main(argv: list[str] | None = None) -> None:
             base_model=args.base_model,
         )
         print(f"[{time.strftime('%H:%M:%S')}] {cfg['name']}: {len(cfg_rows)} users", flush=True)
-        res = upstream.run_logged(cmd, script.parent, out_dir / "evaluate.log")
+        res, quiet = machine.measure_quietly(
+            functools.partial(upstream.run_logged, cmd, script.parent, out_dir / "evaluate.log")
+        )
         if res["returncode"] != 0:
             raise SystemExit(f"{cfg['name']} failed; see {out_dir / 'evaluate.log'}")
         valid, invalid = generate.predictions_valid(out_dir / "result.json")
@@ -149,6 +156,7 @@ def main(argv: list[str] | None = None) -> None:
             "loadavg_end": res["loadavg_end"],
             "memory": res["memory"],
             "invalid_predictions": invalid if cfg["max_new_tokens"] > 1 else None,
+            "quiet": quiet,
         }
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
         seconds = [b["seconds"] for b in timing["batches"]]

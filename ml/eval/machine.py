@@ -1,4 +1,5 @@
-"""What a timing was measured on: chip, CPU / GPU cores, memory, OS, power source, load.
+"""What a timing was measured on: chip, CPU / GPU cores, memory, OS, power source, load; and the
+quiet-machine protocol of the cost runs (measure_quietly).
 
 Standard library only: imported by both the ml and the minionerec environments. Only these
 fields are kept from system_profiler, which also reports serial numbers and UUIDs. (ml/ann/run.py
@@ -12,8 +13,13 @@ import os
 import platform
 import subprocess
 import sys
+import threading
+import time
+from collections.abc import Callable
 
 BUSY_LOAD = 2.0  # 1-minute load average above which a timing is marked preliminary
+QUIET_WAIT = 20 * 60  # longest wait for a quiet machine before a measurement, seconds
+WATCH_INTERVAL = 10.0  # seconds between `docker ps` checks while a measurement runs
 
 
 def _run(cmd: list[str], timeout: float = 30) -> str | None:
@@ -81,3 +87,103 @@ def info() -> dict:
                 out["gpu_cores"] = int(gpu["sppci_cores"])
                 break
     return out
+
+
+# ----------------------------------------------------------------------------- quiet machine
+
+
+def containers() -> list[str] | None:
+    """Names of the running Docker containers; None when Docker does not answer."""
+    out = _run(["docker", "ps", "--format", "{{.Names}}"], timeout=30)
+    return None if out is None else sorted(out.split())
+
+
+def state() -> dict:
+    return {
+        "time": time.strftime("%H:%M:%S"),
+        "load1": round(os.getloadavg()[0], 2),
+        "containers": containers(),
+    }
+
+
+def is_quiet(s: dict) -> bool:
+    return s["load1"] < BUSY_LOAD and not s["containers"]
+
+
+def wait_quiet(
+    max_wait: float = QUIET_WAIT, poll: float = 10.0, log: Callable[[str], None] = print
+) -> tuple[dict, float]:
+    """Wait until the 1-minute load is below BUSY_LOAD and no container runs, for at most
+    `max_wait` seconds; return the state when the wait ended and the seconds waited."""
+    t0 = time.monotonic()
+    s = state()
+    if not is_quiet(s):
+        log(f"  waiting for a quiet machine: load {s['load1']}, containers {s['containers']}")
+    while not is_quiet(s) and time.monotonic() - t0 < max_wait:
+        time.sleep(poll)
+        s = state()
+    return s, time.monotonic() - t0
+
+
+class ContainerWatch:
+    """`docker ps` every `interval` seconds in a thread while a measurement runs, and once more
+    at its end; `seen` is every container name seen."""
+
+    def __init__(self, interval: float = WATCH_INTERVAL):
+        self.interval = interval
+        self.seen: set[str] = set()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+
+    def _loop(self) -> None:
+        while True:
+            self.seen.update(containers() or [])
+            if self._stop.wait(self.interval):
+                return
+
+    def __enter__(self) -> ContainerWatch:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._stop.set()
+        self._thread.join()
+        self.seen.update(containers() or [])
+
+
+def measure_quietly(
+    fn: Callable[[], object],
+    *,
+    max_wait: float = QUIET_WAIT,
+    log: Callable[[str], None] = print,
+) -> tuple[object, dict]:
+    """Run fn() under the cost runs' protocol: start only when the 1-minute load is below
+    BUSY_LOAD and no Docker container runs (waiting at most `max_wait`), record the load and the
+    containers at the start and the end, and watch `docker ps` meanwhile. If a container ran
+    during fn(), run it once more; if that is disturbed too, keep it and say so. Returns fn's
+    last result and the record of every attempt."""
+    attempts = []
+    for attempt in (1, 2):
+        start, waited = wait_quiet(max_wait, log=log)
+        with ContainerWatch() as watch:
+            result = fn()
+        attempts.append(
+            {
+                "waited_seconds": round(waited, 1),
+                "start": start,
+                "end": state(),
+                "containers_during": sorted(watch.seen),
+            }
+        )
+        if not watch.seen:
+            break
+        log(
+            f"  containers ran during the measurement: {', '.join(sorted(watch.seen))}; "
+            + ("running it once more" if attempt == 1 else "kept with a note")
+        )
+    last = attempts[-1]
+    return result, {
+        "attempts": attempts,
+        "quiet_start": is_quiet(last["start"]),
+        "disturbed": bool(last["containers_during"]),
+    }

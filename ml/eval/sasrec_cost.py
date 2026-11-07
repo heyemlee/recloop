@@ -6,7 +6,9 @@ with the selected SASRec checkpoint (PyTorch, CPU), score all 3,459 items, keep 
 Latency is per request (batch 1), once on one thread and once on all of PyTorch's default
 threads; throughput is at batch 8 and 256 on the default threads. Every setting is warmed up
 first. (Online, the model server runs the same encoder in ONNX Runtime and searches FAISS; one
-Retrieve took 1-3 ms including the local gRPC round trip in M1, docs/design.md §19.)
+Retrieve took 1-3 ms including the local gRPC round trip in M1, docs/design.md §19.) Like each
+MiniOneRec configuration, the measurement starts on a quiet machine and is repeated once if a
+Docker container ran during it (ml.eval.machine.measure_quietly).
 
 Writes artifacts/minionerec/sasrec_cost.json. Usage: python -m ml.eval.sasrec_cost
 """
@@ -85,10 +87,15 @@ def main(argv: list[str] | None = None) -> None:
     ids = encode_histories(test.history_matrix()[rows])
     default_threads = torch.get_num_threads()
 
-    load_start = os.getloadavg()
-    runs = [latency(model, items, ids, 1), latency(model, items, ids, default_threads)]
-    torch.set_num_threads(default_threads)
-    runs += [throughput(model, items, ids, b) for b in BATCH_SIZES]
+    def measure() -> tuple[list[dict], tuple]:
+        load_start = os.getloadavg()
+        runs = [latency(model, items, ids, 1), latency(model, items, ids, default_threads)]
+        torch.set_num_threads(default_threads)
+        runs += [throughput(model, items, ids, b) for b in BATCH_SIZES]
+        return runs, load_start
+
+    # the cost runs' protocol: a quiet machine at the start, once more if a container ran
+    (runs, load_start), quiet = machine.measure_quietly(measure)
     fp = footprint.read()
     out = {
         "checkpoint": str(train_sasrec.CHECKPOINT.relative_to(paths.ROOT)),
@@ -103,6 +110,7 @@ def main(argv: list[str] | None = None) -> None:
         "machine": machine.info(),
         "loadavg_start": list(load_start),
         "loadavg_end": list(os.getloadavg()),
+        "quiet": quiet,
         "footprint": None if fp is None else {"current": fp.current, "peak": fp.lifetime_max},
         "runs": runs,
     }

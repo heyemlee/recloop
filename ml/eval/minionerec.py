@@ -505,6 +505,8 @@ def cost_summary(
             "mps_driver_allocated_max": max(b.get("mps_driver_allocated", 0) for b in batches),
             "mps_allocated_max": max(b.get("mps_allocated", 0) for b in batches),
             "loadavg_start": cfg["loadavg_start"][0],
+            "loadavg_end": cfg["loadavg_end"][0],
+            "quiet": cfg.get("quiet"),
             "invalid_predictions": cfg["invalid_predictions"],
         }
     sasrec = None

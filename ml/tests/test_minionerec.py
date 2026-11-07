@@ -275,7 +275,24 @@ def test_cost_summary_leaves_out_warmup_calls(tmp_path):
                 "setup_seconds": 7.0,
                 "memory": {"lifetime_max_footprint": 100},
                 "loadavg_start": [0.5, 0, 0],
+                "loadavg_end": [0.7, 0, 0],
                 "invalid_predictions": 0,
+                "quiet": {
+                    "attempts": [
+                        {
+                            "waited_seconds": 0.0,
+                            "start": {"load1": 0.5, "containers": []},
+                            "containers_during": ["aihd-test-pg"],
+                        },
+                        {
+                            "waited_seconds": 30.0,
+                            "start": {"load1": 0.5, "containers": []},
+                            "containers_during": ["aihd-test-kafka"],
+                        },
+                    ],
+                    "quiet_start": True,
+                    "disturbed": True,
+                },
             }
         },
     }
@@ -285,6 +302,11 @@ def test_cost_summary_leaves_out_warmup_calls(tmp_path):
     assert c["warmup_calls"] == 2 and c["per_call"]["calls"] == 2
     assert c["per_call"]["p50"] == pytest.approx(1.5)
     assert c["samples_per_second"] == pytest.approx(2 / 3)
+    assert c["loadavg_end"] == 0.7 and c["quiet"]["disturbed"]
+    assert minionerec_report._disturbed(c) and not minionerec_report._busy(c)
+    notes = "\n".join(minionerec_report._quiet_notes(out))
+    assert "`beam10_batch1` was run a second time" in notes
+    assert "aihd-test-pg" in notes and "aihd-test-kafka" in notes and "(†)" in notes
 
 
 @pytest.mark.skipif(
