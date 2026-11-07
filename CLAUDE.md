@@ -18,8 +18,8 @@ write-ups in `docs/results/`.
 - Milestone sessions don't commit or push. As the user asked, the coordinating session commits
   each milestone after verifying it and pushes to `origin` (github.com/heyemlee/recloop). Check
   §22.4 before anything is made public.
-- `docs/results/*.md` are generated (`make eval` writes `offline.md`); change the generator, not
-  the file. The committed `offline.md` is `make setup`, then `make paper-sasrec`, then
+- `docs/results/*.md` are generated (`make eval` writes `offline.md`, `make ann` writes
+  `ann.md`); change the generator, not the file. The committed `offline.md` is `make setup`, then `make paper-sasrec`, then
   `make eval`. `make eval` re-runs give the same bytes; `make train` runs on the CPU with fixed
   seeds, and two runs with the same worker / thread counts gave identical weights.
 - Generated code is committed: `serving/gen` and `model_server/gen` (`make proto`),
@@ -46,6 +46,7 @@ ml/                         Python 3.12 uv project (own .venv); run modules from
   models/                   pop, itemcf, sasrec (+ train_sasrec)
   eval/                     splits, metrics, bootstrap, calc_check, report, run, minionerec_sasrec
   bundle/                   build (+ faiss_index, run in a torch-free subprocess)
+  ann/                      ANN benchmark (FAISS Flat / IVF / HNSW / IVF-PQ) and index updates
   experiment/               bucketing (Python twin of serving/internal/experiment)
   tests/
 web/                        Next.js 16 + shadcn/ui (:13000); /api/* is proxied to the Go api; e2e/
@@ -68,6 +69,8 @@ make ingest        # migrations + items (text_emb, simulated stock) / users into
 make train         # SASRec grid on train/valid (CPU, ~11 min) -> artifacts/models/sasrec
 make paper-sasrec  # re-run MiniOneRec's sasrec.py on the split (~18 min; make eval picks it up)
 make eval          # Pop / ItemCF / SASRec -> docs/results/offline.md (needs train; no database)
+make ann           # ANN benchmark + index updates -> docs/results/ann.md (~25 min; idle machine:
+                   # it marks the report preliminary when the load average is above 2 at the start)
 make bundle        # artifacts/bundles/<version> (ONNX encoder, FAISS, ItemCF/Pop tables), current ->
 make seed          # FLUSHDB Redis, load dataset users' train-period history + demo users
 make serve-model   # model server on :18081 (bundle: artifacts/bundles/current)
@@ -97,7 +100,8 @@ work inside it.
 
 torch and faiss-cpu each ship an OpenMP runtime and crash when loaded together on macOS: keep
 faiss out of torch processes (`ml/bundle/faiss_index.py` runs as a subprocess; the model server
-has faiss + onnxruntime only).
+has faiss + onnxruntime only; `make test-ml` runs `ml/tests/test_ann.py` in a pytest process of
+its own).
 
 ## Data (M0)
 

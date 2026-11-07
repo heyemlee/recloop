@@ -16,6 +16,10 @@ behavior, advertisers and budgets are all simulated.
   idempotent event ingestion into PostgreSQL and Redis) and a Next.js store with a debug panel.
   A click changes the next page's recommendations.
 
+Ahead of M4, an ANN benchmark compares exact search with IVF, HNSW and IVF-PQ on synthetic
+catalogs of up to 1M items, and studies incremental index updates against full rebuilds
+([results](docs/results/ann.md); the latencies are preliminary until a run on an idle machine).
+
 Next up: latency budgets, degradation and an event log with Redpanda (M2).
 
 ## Run

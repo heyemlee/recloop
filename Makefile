@@ -43,7 +43,7 @@ TOOL_PKGS := github.com/bufbuild/buf/cmd/buf google.golang.org/protobuf/cmd/prot
 	google.golang.org/grpc/cmd/protoc-gen-go-grpc github.com/sqlc-dev/sqlc/cmd/sqlc
 
 .PHONY: help setup up down down-volumes migrate migrate-status data data-weights ingest train \
-	paper-sasrec eval bundle seed tools proto sqlc generate build-api serve-model serve-api \
+	paper-sasrec eval ann bundle seed tools proto sqlc generate build-api serve-model serve-api \
 	serve-web web-install test lint test-ml test-model-server test-go test-web e2e fmt \
 	clean-processed clean-artifacts
 
@@ -91,6 +91,9 @@ paper-sasrec: ## Re-run MiniOneRec's own SASRec script on the split (~18 min; ma
 
 eval: ## Offline evaluation of Pop / ItemCF / SASRec -> docs/results/offline.md (no database)
 	$(PY) -m ml.eval.run
+
+ann: ## ANN benchmark + index updates -> docs/results/ann.md (~25 min; run on an idle machine)
+	$(PY) -m ml.ann.run $(ANN_FLAGS)
 
 bundle: ## Build artifacts/bundles/<version> and point artifacts/bundles/current at it
 	$(PY) -m ml.bundle.build
@@ -140,8 +143,11 @@ lint: ## ruff check + format check (ml, model_server)
 	$(MS) ruff check model_server
 	$(MS) ruff format --check model_server
 
+# test_ann.py loads faiss, so it gets a pytest process of its own: torch (test_sasrec.py) and
+# faiss in one process abort on macOS (two OpenMP runtimes).
 test-ml:
-	$(UV) pytest ml/tests
+	$(UV) pytest ml/tests --ignore=ml/tests/test_ann.py
+	$(UV) pytest ml/tests/test_ann.py
 
 test-model-server:
 	$(MS) pytest model_server/tests
