@@ -252,7 +252,11 @@ def test_subset_run_is_preliminary(tmp_path):
         calc_fn=_calc_from_formula,
     )
     assert out["main_run"] == "trial" and out["status"] == "preliminary"
-    assert "**Preliminary.**" in minionerec_report.render(out)
+    text = minionerec_report.render(out)
+    assert "**Preliminary.**" in text
+    # 6 samples at 1.5 s each, plus 8 processes of (30 - 4.5) s start-up each
+    assert "the full test split (6 samples as evaluate.sh's 8 shards, 26 s of start-up" in text
+    assert "takes about 0.1 h." in text
 
 
 def test_cost_summary_leaves_out_warmup_calls(tmp_path):

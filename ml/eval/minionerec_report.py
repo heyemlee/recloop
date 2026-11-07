@@ -398,15 +398,17 @@ def _cost_section(out: dict) -> list[str]:
         f"{main['samples']:,} samples in {_hours(main['generate_seconds'])} at "
         f"{main['settings']['num_beams']} beams and batch {main['settings']['batch_size']}: "
         f"{main['seconds_per_sample']:.2f} s per sample, i.e. "
-        f"{1000 * main['seconds_per_sample'] / 60:.0f} min of this Mac's GPU per 1,000 users; "
-        f"peak memory footprint {_gib(main['peak_footprint'])}. The 1-minute load average was "
-        f"at most {main['loadavg_start']:.1f} when a shard started"
+        f"{1000 * main['seconds_per_sample'] / 60:.0f} min of this Mac's GPU per 1,000 "
+        "recommendations (a test sample is one request); peak memory footprint "
+        f"{_gib(main['peak_footprint'])}. The 1-minute load average was at most "
+        f"{main['loadavg_start']:.1f} when a shard started"
         + (
             "."
             if main["loadavg_start"] <= BUSY_LOAD
             else f" (above {BUSY_LOAD:g}: the machine was busy, so these timings are indicative)."
         )
         + _swap_sentence(main.get("swapped_out_bytes"))
+        + _full_split_estimate(out, main)
     )
     lines.append("")
     if cost is None:
@@ -517,6 +519,24 @@ def _cost_section(out: dict) -> list[str]:
             )
     lines.append("")
     return lines
+
+
+FULL_RUN_SHARDS = 8  # evaluate.sh's shards: one process, one model load each
+
+
+def _full_split_estimate(out: dict, main: dict) -> str:
+    """For a subset main run: the full split at the same speed, with one process per shard."""
+    if main["selection"] == "all":
+        return ""
+    per_process = (main["wall_seconds"] - main["generate_seconds"]) / main["settings"].get(
+        "shards", 1
+    )
+    total = out["test_samples"] * main["seconds_per_sample"] + FULL_RUN_SHARDS * per_process
+    return (
+        f" At this speed the full test split ({out['test_samples']:,} samples as evaluate.sh's "
+        f"{FULL_RUN_SHARDS} shards, {per_process:.0f} s of start-up and model loading each) takes "
+        f"about {total / 3600:.1f} h."
+    )
 
 
 def _swap_sentence(swapped: int | None) -> str:
