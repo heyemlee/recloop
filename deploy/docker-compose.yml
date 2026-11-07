@@ -1,0 +1,47 @@
+# Local development stack. `make up` starts it and applies the migrations.
+# Host ports are bound to 127.0.0.1 and default to non-standard numbers so they do not clash
+# with other local stacks; override them in .env (see .env.example).
+name: recloop
+
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.7-pg18-trixie
+    environment:
+      POSTGRES_USER: recloop
+      POSTGRES_PASSWORD: recloop  # local development only
+      POSTGRES_DB: recloop
+    ports:
+      - "127.0.0.1:${RECLOOP_PG_PORT:-15432}:5432"
+    volumes:
+      # PostgreSQL 18 images keep PGDATA under /var/lib/postgresql/18/docker; mount the parent.
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U recloop -d recloop"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 1g
+
+  redis:
+    image: redis:8.10.3-alpine
+    # Redis holds derived state only (rebuilt from the event log, design §7.2): no persistence.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "127.0.0.1:${RECLOOP_REDIS_PORT:-16390}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 256m
+
+volumes:
+  pgdata:

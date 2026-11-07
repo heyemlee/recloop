@@ -1,0 +1,44 @@
+# Datasets, checkpoints, third-party clones and derived data are never committed; only the
+# scripts that fetch them (docs/design.md §22.4). The Amazon review data is for research use only.
+/data/
+/third_party/
+/artifacts/
+
+# Safety net: data and model files stay out wherever they end up. Add a `!path` line for a
+# deliberate, licence-compatible exception.
+*.json.gz
+*.parquet
+*.safetensors
+*.npy
+*.pt
+*.faiss
+*.log
+
+# Local environments and caches
+.venv/
+.cache/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+node_modules/
+.next/
+
+# Secrets and local overrides: only .env.example is committed
+.env
+.env.*
+!.env.example
+
+# Claude Code: everything under .claude/ is local except explicitly shared project config
+/.claude/*
+!/.claude/settings.json
+!/.claude/commands/
+!/.claude/agents/
+!/.claude/skills/
+!/.claude/hooks/
+!/.claude/launch.json
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
