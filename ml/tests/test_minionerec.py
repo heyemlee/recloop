@@ -382,3 +382,103 @@ def test_smoke_runs_are_left_out(tmp_path):
     assert [p.name for p in minionerec.finished_runs(tmp_path / "runs")] == ["real"]
     names = [p.name for p in minionerec.finished_runs(tmp_path / "runs", include_test_models=True)]
     assert names == ["real", "smoke"]
+
+
+def _write_cost(cost, sasrec_json, disturbed="beam50_batch8"):
+    """A cost directory like minionerec.cost writes, and a sasrec_cost.json."""
+    configs = {}
+    for beams in (10, 20, 50):
+        for batch in (1, 8):
+            configs[f"beam{beams}_batch{batch}"] = (beams, batch, 256, 4)
+    configs["beam50_batch1_prefill"] = (50, 1, 1, 2)
+    manifest = {
+        "checkpoint": minionerec.CHECKPOINT,
+        "users": 4,
+        "dtype": "bfloat16",
+        "versions": {},
+        "machine": {
+            "chip": "Apple M4 Pro",
+            "gpu_cores": 16,
+            "performance_cores": "8",
+            "efficiency_cores": "4",
+        },
+        "configs": {},
+    }
+    for name, (beams, batch, new_tokens, samples) in configs.items():
+        (cost / name).mkdir(parents=True)
+        per_call = beams / 10 * (0.2 if new_tokens == 1 else 1.0) * batch
+        calls = max(1, samples // batch) + 1
+        timing = {"batches": [{"size": batch, "seconds": per_call} for _ in range(calls)]}
+        (cost / name / "timing.json").write_text(json.dumps(timing))
+        attempts = [{"waited_seconds": 0.0, "start": {"load1": 1.2, "containers": []}}]
+        attempts[0]["containers_during"] = ["aihd-test-pg"] if name == disturbed else []
+        if name == disturbed:
+            attempts.append(
+                {
+                    "waited_seconds": 40.0,
+                    "start": {"load1": 1.5, "containers": []},
+                    "containers_during": [],
+                }
+            )
+        manifest["configs"][name] = {
+            "num_beams": beams,
+            "batch_size": batch,
+            "max_new_tokens": new_tokens,
+            "samples": samples,
+            "setup_seconds": 5.0,
+            "device": "mps",
+            "memory": {"lifetime_max_footprint": 6 * 2**30},
+            "loadavg_start": [1.2, 0, 0],
+            "loadavg_end": [1.8, 0, 0],
+            "invalid_predictions": 0 if new_tokens > 1 else None,
+            "quiet": {"attempts": attempts, "quiet_start": True, "disturbed": False},
+        }
+    (cost / "manifest.json").write_text(json.dumps(manifest))
+    runs = [
+        {"batch_size": 1, "threads": 1, "seconds": [2e-4] * 10},
+        {"batch_size": 1, "threads": 12, "seconds": [3e-4] * 10},
+        {"batch_size": 256, "threads": 12, "seconds": [0.016] * 3},
+    ]
+    sasrec_json.write_text(
+        json.dumps(
+            {
+                "footprint": {"current": 2**30, "peak": 2**30},
+                "loadavg_start": [1.1, 0, 0],
+                "loadavg_end": [1.3, 0, 0],
+                "quiet": {
+                    "attempts": [
+                        {
+                            "waited_seconds": 0.0,
+                            "start": {"load1": 1.1, "containers": []},
+                            "containers_during": [],
+                        }
+                    ],
+                    "quiet_start": True,
+                    "disturbed": False,
+                },
+                "runs": runs,
+            }
+        )
+    )
+
+
+def test_cost_section_renders_load_and_reruns(tmp_path):
+    test = _toy_split()
+    _write_run(tmp_path / "runs" / "test", list(range(len(test))), [_beams(1, 0)] * 6, test)
+    _write_cost(tmp_path / "cost", tmp_path / "sasrec_cost.json")
+    cost = minionerec.cost_summary(tmp_path / "cost", tmp_path / "sasrec_cost.json")
+    out = minionerec.build(
+        minionerec.finished_runs(tmp_path / "runs"),
+        "test",
+        _toy_context(test),
+        cost,
+        np.array(["A"] * 12, dtype=object),
+        np.ones(len(test), dtype=bool),
+        calc_fn=_calc_from_formula,
+    )
+    text = minionerec_report.render(out)
+    assert "| Load, start / end |" in text and "| 1.2 / 1.8 |" in text and "| 1.1 / 1.3 |" in text
+    assert "`beam50_batch8` was run a second time" in text and "(aihd-test-pg)." in text
+    assert "†" not in text  # the second attempt was quiet
+    assert "**Where the time goes.**" in text and "**Against SASRec.**" in text
+    assert "Preliminary timings" not in text
