@@ -9,6 +9,7 @@ RAW = DATA / "raw"
 UCSD = RAW / "ucsd"
 HF = DATA / "hf"
 HF_CKPT = HF / "Office_ckpt"
+TEXT_MODEL = HF / "bge-small-en-v1.5"  # sentence encoder for items.text_emb (M1)
 PROCESSED = DATA / "processed"
 
 THIRD_PARTY = ROOT / "third_party"
@@ -44,4 +45,6 @@ CATALOG_PARQUET = PROCESSED / "items.parquet"
 USERS_PARQUET = PROCESSED / "users.parquet"
 INTERACTIONS_PARQUET = PROCESSED / "interactions.parquet"
 SAMPLES_PARQUET = PROCESSED / "samples.parquet"
+TEXT_EMB_NPY = PROCESSED / "text_emb.npy"  # (3459, 384) float32, row i = item_id i
+TEXT_EMB_JSON = PROCESSED / "text_emb.json"  # model, revision, text recipe, checksum
 VERIFY_JSON = PROCESSED / "verify.json"

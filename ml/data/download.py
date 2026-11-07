@@ -6,6 +6,7 @@ Sources (all pinned):
   * Amazon Review Data (2018), Office Products: 5-core reviews and product metadata from UCSD.
   * MiniOneRec Office checkpoint on Hugging Face: tokenizer/config files only by default.
     model.safetensors (3.56 GB) is needed from M7 on; pass --with-weights to fetch it.
+  * BAAI/bge-small-en-v1.5 (MIT) on Hugging Face: the sentence encoder of items.text_emb (M1).
 
 Every file is checked against a SHA-256 recorded on first download. Re-running is cheap: files
 that already verify are skipped.
@@ -103,6 +104,69 @@ HF_WEIGHTS = _hf(
 )
 
 
+TEXT_MODEL_REPO = "BAAI/bge-small-en-v1.5"
+TEXT_MODEL_REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"  # main, 2024-02-22
+
+
+def _text_model(name: str, size: int, sha256: str) -> Remote:
+    return Remote(
+        f"https://huggingface.co/{TEXT_MODEL_REPO}/resolve/{TEXT_MODEL_REVISION}/{name}",
+        paths.TEXT_MODEL / name,
+        size,
+        sha256,
+    )
+
+
+# Only what sentence-transformers needs (no pytorch_model.bin / onnx copies).
+TEXT_MODEL_FILES = [
+    _text_model(
+        "1_Pooling/config.json",
+        190,
+        "d1caf60c96f5fba2157c0c26b76d80818fad6cf0b8eb5e73ec372ff9818eba5c",
+    ),
+    _text_model(
+        "config.json", 743, "094f8e891b932f2000c92cfc663bac4c62069f5d8af5b5278c4306aef3084750"
+    ),
+    _text_model(
+        "config_sentence_transformers.json",
+        124,
+        "940d5f50db195fa6e5e6a4f122c095f77880de259d74b14a65779ed48bdd7c56",
+    ),
+    _text_model(
+        "modules.json", 349, "84e40c8e006c9b1d6c122e02cba9b02458120b5fb0c87b746c41e0207cf642cf"
+    ),
+    _text_model(
+        "sentence_bert_config.json",
+        52,
+        "84e39fda68ccbff05bfa723ae9c0e70e23e2ec373b76e0f8c6e71af72a693cbf",
+    ),
+    _text_model(
+        "special_tokens_map.json",
+        125,
+        "b6d346be366a7d1d48332dbc9fdf3bf8960b5d879522b7799ddba59e76237ee3",
+    ),
+    _text_model(
+        "tokenizer.json",
+        711_396,
+        "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
+    ),
+    _text_model(
+        "tokenizer_config.json",
+        366,
+        "9261e7d79b44c8195c1cada2b453e55b00aeb81e907a6664974b4d7776172ab3",
+    ),
+    _text_model(
+        "vocab.txt", 231_508, "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3"
+    ),
+    # LFS object: size and SHA-256 as listed by the Hub API.
+    _text_model(
+        "model.safetensors",
+        133_466_304,
+        "3c9f31665447c8911517620762200d2245a2518d6e7208acc78cd9db317e21ad",
+    ),
+]
+
+
 def sha256_file(path: Path, chunk: int = 1 << 20) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
@@ -192,7 +256,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     fetch_minionerec()
-    for remote in UCSD_FILES + HF_FILES:
+    for remote in UCSD_FILES + HF_FILES + TEXT_MODEL_FILES:
         fetch(remote)
     if args.with_weights:
         fetch(HF_WEIGHTS)

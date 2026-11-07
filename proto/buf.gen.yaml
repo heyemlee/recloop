@@ -1,0 +1,15 @@
+# Go code for the api. Python code is generated from the same buf image by grpcio-tools
+# (see the `proto` target in the Makefile), so buf is the single parser of the .proto files.
+version: v2
+managed:
+  enabled: true
+  override:
+    - file_option: go_package_prefix
+      value: github.com/heyemlee/recloop/serving/gen
+plugins:
+  - local: protoc-gen-go
+    out: ../serving/gen
+    opt: paths=source_relative
+  - local: protoc-gen-go-grpc
+    out: ../serving/gen
+    opt: paths=source_relative

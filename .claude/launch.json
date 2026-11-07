@@ -1,0 +1,23 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "model-server",
+      "runtimeExecutable": "make",
+      "runtimeArgs": ["serve-model"],
+      "port": 18081
+    },
+    {
+      "name": "api",
+      "runtimeExecutable": "make",
+      "runtimeArgs": ["serve-api"],
+      "port": 18080
+    },
+    {
+      "name": "web",
+      "runtimeExecutable": "make",
+      "runtimeArgs": ["serve-web"],
+      "port": 13000
+    }
+  ]
+}

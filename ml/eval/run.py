@@ -1,11 +1,18 @@
 """Offline evaluation: fit baselines on the train split, tune on valid, score test once.
 
-  * Pop and ItemCF are fitted on the training rows only (see splits.train_sequences).
-  * ItemCF's hyper-parameters are chosen on the validation split by NDCG@10.
+  * Pop and ItemCF are fitted on the training rows only (see splits.train_sequences); ItemCF's
+    hyper-parameters are chosen on the validation split by NDCG@10.
+  * SASRec is trained and tuned by `make train` (ml.models.train_sasrec: train rows only,
+    validation NDCG@10 for early stopping and model selection); here the selected checkpoint is
+    loaded and scored, together with the BCE ablation trained alongside it.
   * The test split (4,866 samples) is ranked once per model, over all 3,459 items.
   * HR / NDCG at K = 3, 5, 10 under the item rule (main) and the SID rule; 95% intervals from
-    a user-level bootstrap (B = 1000, fixed seed); paired ItemCF - Pop difference.
-  * The SID-rule numbers are cross-checked against MiniOneRec's calc.py.
+    a user-level bootstrap (B = 1000, fixed seed); paired differences between models.
+  * Every model is also reported separately on test targets reviewed on the same day as the
+    last history item and on the rest (51.5% / 48.5%).
+  * The SID-rule numbers are cross-checked against MiniOneRec's calc.py for every model.
+  * SASRec is compared with the paper's SASRec (MiniOneRec, Table 1) and, when
+    `make paper-sasrec` has run, with MiniOneRec's own SASRec script re-run on this split.
 
 Writes docs/results/offline.md (rendered by ml.eval.report) and artifacts/eval/offline.json.
 Does not touch the database.
@@ -24,10 +31,12 @@ import pandas as pd
 
 from ml import paths
 from ml.data import preprocess
-from ml.eval import bootstrap, calc_check, metrics, report
+from ml.eval import bootstrap, calc_check, metrics, minionerec_sasrec, report
 from ml.eval.splits import NUM_ITEMS, Split, item_sids, load_split, sid_codes, train_sequences
+from ml.models import train_sasrec
 from ml.models.itemcf import ItemCF, ItemCFParams, cooccurrence
 from ml.models.pop import Pop
+from ml.models.sasrec import SASRec
 
 EVAL_DIR = paths.ARTIFACTS / "eval"
 
@@ -38,6 +47,32 @@ ITEMCF_GRID = {
     "iuf": (True, False),
 }
 SELECT_BY = "NDCG@10"
+SEGMENT_METRICS = ("HR@5", "HR@10", "NDCG@5", "NDCG@10")
+
+# MiniOneRec (arXiv:2510.24431v1), Table 1, Office; read from the PDF, page 9.
+PAPER = {
+    "source": "MiniOneRec, arXiv:2510.24431v1, Table 1 (Office)",
+    "rows": {
+        "SASRec": {
+            "HR@3": 0.0861,
+            "NDCG@3": 0.0769,
+            "HR@5": 0.0949,
+            "NDCG@5": 0.0805,
+            "HR@10": 0.1120,
+            "NDCG@10": 0.0858,
+        },
+        "MiniOneRec": {
+            "HR@3": 0.1217,
+            "NDCG@3": 0.1088,
+            "HR@5": 0.1420,
+            "NDCG@5": 0.1172,
+            "HR@10": 0.1634,
+            "NDCG@10": 0.1242,
+        },
+    },
+    "baseline_training": "binary cross-entropy, Adam, lr in {1e-2, 1e-3, 1e-4}, weight decay "
+    "in {1e-2, ..., 1e-6}, batch 1024 (paper, Section 4)",
+}
 
 
 class Evaluator:
@@ -85,6 +120,9 @@ def same_day_as_last(split: Split) -> np.ndarray:
     return last == samples.ts.to_numpy()
 
 
+PAIRS = (("ItemCF", "Pop"), ("SASRec", "Pop"), ("SASRec", "ItemCF"))
+
+
 def segment_results(split: Split, test_values: dict) -> dict:
     mask = same_day_as_last(split)
     out = {}
@@ -94,8 +132,18 @@ def segment_results(split: Split, test_values: dict) -> dict:
             "samples": int(m.sum()),
             "share": float(m.mean()),
             "models": {
-                name: _with_ci({k: values["item"][k][m] for k in ("HR@10", "NDCG@10")}, resampler)
+                name: _with_ci({k: values["item"][k][m] for k in SEGMENT_METRICS}, resampler)
                 for name, values in test_values.items()
+            },
+            "pairs": {
+                f"{a} - {b}": _with_ci(
+                    {
+                        k: test_values[a]["item"][k][m] - test_values[b]["item"][k][m]
+                        for k in ("HR@10", "NDCG@10")
+                    },
+                    resampler,
+                )
+                for a, b in PAIRS
             },
         }
     return out
@@ -117,6 +165,51 @@ def tune_itemcf(sequences, valid: Split, ev: Evaluator) -> tuple[ItemCFParams, l
     return ItemCFParams(**best["params"]), trials
 
 
+def load_sasrec() -> tuple[SASRec, dict]:
+    if not train_sasrec.CHECKPOINT.exists() or not train_sasrec.TUNING_JSON.exists():
+        raise SystemExit("no SASRec checkpoint: run `make train` first")
+    return SASRec.load(train_sasrec.CHECKPOINT), json.loads(train_sasrec.TUNING_JSON.read_text())
+
+
+def sasrec_variants(tuning: dict, test: Split, ev: Evaluator, resampler) -> dict:
+    """Test metrics (item rule) of the extra configurations trained next to the grid (the
+    upstream BCE loss) and of their CE twins in the grid (same settings, only the loss differs),
+    for the comparison with the paper. Model selection never sees these numbers."""
+    trials = tuning["trials"]
+    n_grid = len(trials) - len(tuning["extra"])
+
+    def scored(i: int) -> dict:
+        model = SASRec.load(train_sasrec.trial_checkpoint(i))
+        values = ev.per_sample(model.score(test), test)["item"]
+        return {
+            "trial": i,
+            "config": trials[i]["config"],
+            "description": model.describe(),
+            "valid": trials[i]["valid"],
+            "test": _with_ci(values, resampler),
+        }
+
+    out = {}
+    for j, cfg in enumerate(tuning["extra"]):
+        out[f"loss={cfg['loss']}"] = scored(n_grid + j)
+        twin = {**cfg, "loss": "ce"}
+        k = next((t for t in range(n_grid) if trials[t]["config"] == twin), None)
+        if k is not None:
+            out[f"loss=ce twin of loss={cfg['loss']}"] = scored(k)
+    return out
+
+
+def paper_comparison(test_values: dict, variants: dict, resampler) -> dict:
+    out = {"paper": PAPER, "ours": {}, "variants": variants, "minionerec_script": None}
+    for name in ("SASRec", "ItemCF"):
+        out["ours"][name] = _with_ci(test_values[name]["item"], resampler)
+    if minionerec_sasrec.OUT_JSON.exists():
+        run = json.loads(minionerec_sasrec.OUT_JSON.read_text())
+        run.pop("per_sample", None)
+        out["minionerec_script"] = run
+    return out
+
+
 def main() -> None:
     t0 = time.monotonic()
     train, valid, test = (load_split(s) for s in paths.SPLITS)
@@ -130,7 +223,8 @@ def main() -> None:
 
     best_params, trials = tune_itemcf(sequences, valid, ev)
     itemcf = ItemCF(best_params).fit(sequences, NUM_ITEMS)
-    models = [pop, itemcf]
+    sasrec, tuning = load_sasrec()
+    models = [pop, itemcf, sasrec]
 
     resampler = bootstrap.Resampler.build(test.user)
     results, test_values, calc_checks = {}, {}, []
@@ -155,12 +249,18 @@ def main() -> None:
         )
         calc_checks.append(calc_check.check(model.name, test, top, sid_values, sids, EVAL_DIR))
 
-    base = test_values[pop.name]
-    diff = {
-        rule: _with_ci(
-            {k: test_values[itemcf.name][rule][k] - base[rule][k] for k in base[rule]}, resampler
-        )
-        for rule in base
+    pairs = {
+        f"{a} - {b}": {
+            rule: _with_ci(
+                {
+                    k: test_values[a][rule][k] - test_values[b][rule][k]
+                    for k in test_values[b][rule]
+                },
+                resampler,
+            )
+            for rule in ("item", "sid")
+        }
+        for a, b in PAIRS
     }
 
     verify = json.loads(paths.VERIFY_JSON.read_text())
@@ -179,9 +279,15 @@ def main() -> None:
             "select_by": SELECT_BY,
         },
         "models": results,
-        "itemcf_minus_pop": diff,
+        "pairs": pairs,
         "segments": segment_results(test, test_values),
+        "itemcf_params": best_params.__dict__,
         "itemcf_trials": trials,
+        "sasrec_tuning": {k: v for k, v in tuning.items() if k != "trials"}
+        | {"trials": [{k: v for k, v in t.items() if k != "curve"} for t in tuning["trials"]]},
+        "sasrec_vs_paper": paper_comparison(
+            test_values, sasrec_variants(tuning, test, ev, resampler), resampler
+        ),
         "calc_py": [{k: v for k, v in c.items() if k != "stdout"} for c in calc_checks],
         "verify": verify,
     }

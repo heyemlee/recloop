@@ -1,0 +1,14 @@
+# buf workspace for RecLoop's gRPC contracts (docs/design.md §13.2). `make proto` lints, checks
+# formatting and generates the Go (serving/gen) and Python (model_server/gen) code.
+version: v2
+modules:
+  - path: .
+lint:
+  use:
+    - STANDARD
+  except:
+    # The service keeps the name used throughout the design (ModelServer, §13.2).
+    - SERVICE_SUFFIX
+breaking:
+  use:
+    - FILE

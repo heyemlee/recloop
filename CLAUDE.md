@@ -19,46 +19,85 @@ write-ups in `docs/results/`.
   each milestone after verifying it and pushes to `origin` (github.com/heyemlee/recloop). Check
   §22.4 before anything is made public.
 - `docs/results/*.md` are generated (`make eval` writes `offline.md`); change the generator, not
-  the file.
+  the file. The committed `offline.md` is `make setup`, then `make paper-sasrec`, then
+  `make eval`. `make eval` re-runs give the same bytes; `make train` runs on the CPU with fixed
+  seeds, and two runs with the same worker / thread counts gave identical weights.
+- Generated code is committed: `serving/gen` and `model_server/gen` (`make proto`),
+  `serving/internal/store/db` (`make sqlc`). Edit the `.proto` / SQL, then regenerate.
+- Adapted third-party code keeps its licence: `licenses/` (SASRec.pytorch, Apache-2.0).
 
 ## Layout
 
 ```
 deploy/docker-compose.yml   PostgreSQL 18 + pgvector, Redis (ports 127.0.0.1:15432 / 16390)
-serving/                    Go module github.com/heyemlee/recloop/serving; goose migrations in serving/migrations
+proto/                      buf workspace; recloop/modelserver/v1/model_server.proto (design §13.2)
+serving/                    Go module github.com/heyemlee/recloop/serving
+  cmd/api/                  HTTP api (:18080): /v1/recommendations, /v1/events, /v1/items/{id}, ...
+  internal/                 api, mixer (fan-out, RRF, filters), recall, experiment, events,
+                            userstate (Redis + apply.lua), cache (pages), catalog, bundle, store
+  internal/store/db/        sqlc output; queries in internal/store/queries, schema = migrations/
+  migrations/               goose (00001 catalog, 00002 events/orders/experiments/models,
+                            00003 default experiment, 00004 text_emb stored inline)
+  gen/                      protoc-gen-go output
+model_server/               Python 3.12 uv project (own .venv): gRPC Retrieve over a bundle (:18081)
 ml/                         Python 3.12 uv project (own .venv); run modules from the repo root
-  data/                     download, prefilter_meta, preprocess, catalog, verify, ingest
-  models/                   pop, itemcf
-  eval/                     splits, metrics, bootstrap, calc_check, report, run
+  data/                     download, prefilter_meta, preprocess, catalog, verify, text_embed,
+                            ingest, seed_redis
+  models/                   pop, itemcf, sasrec (+ train_sasrec)
+  eval/                     splits, metrics, bootstrap, calc_check, report, run, minionerec_sasrec
+  bundle/                   build (+ faiss_index, run in a torch-free subprocess)
+  experiment/               bucketing (Python twin of serving/internal/experiment)
   tests/
-proto/ model_server/ agent/ web/ sim/ loadtest/ analysis/   later milestones
-data/        (ignored) raw/ downloads, hf/ checkpoint files, processed/ outputs of `make data`
-third_party/ (ignored) MiniOneRec clone, pinned
-artifacts/   (ignored) eval outputs, model bundles
+web/                        Next.js 16 + shadcn/ui (:13000); /api/* is proxied to the Go api; e2e/
+tools/                      go.mod pinning buf, protoc-gen-go(-grpc), sqlc (built into .cache/bin)
+testdata/                   bucket_vectors.json, shared by the Go and Python bucketing tests
+agent/ sim/ loadtest/ analysis/   later milestones
+data/        (ignored) raw/ downloads, hf/ model files, processed/ outputs of `make data`
+third_party/ (ignored) MiniOneRec and SASRec.pytorch clones
+artifacts/   (ignored) models/sasrec, bundles/<version> + bundles/current, eval/, e2e/, logs/
 ```
 
 ## Commands
 
 ```
+make setup         # up, data, ingest, train, eval, bundle, seed, web-install: clean checkout -> demo
 make up            # compose up --wait + goose migrations
-make data          # fetch + checksum inputs, re-run MiniOneRec preprocessing, export, verify
-make ingest        # migrations + load items/users into PostgreSQL
-make eval          # Pop / ItemCF -> docs/results/offline.md (no database)
-make test          # ruff + pytest (data and DB tests skip with a reason when unavailable)
+make data          # fetch + checksum inputs, re-run MiniOneRec preprocessing, export, verify,
+                   # text embeddings (bge-small-en-v1.5)
+make ingest        # migrations + items (text_emb, simulated stock) / users into PostgreSQL
+make train         # SASRec grid on train/valid (CPU, ~11 min) -> artifacts/models/sasrec
+make paper-sasrec  # re-run MiniOneRec's sasrec.py on the split (~18 min; make eval picks it up)
+make eval          # Pop / ItemCF / SASRec -> docs/results/offline.md (needs train; no database)
+make bundle        # artifacts/bundles/<version> (ONNX encoder, FAISS, ItemCF/Pop tables), current ->
+make seed          # FLUSHDB Redis, load dataset users' train-period history + demo users
+make serve-model   # model server on :18081 (bundle: artifacts/bundles/current)
+make serve-api     # Go api on :18080
+make serve-web     # Next.js dev server on :13000
+make test          # ruff + pytest (ml, model_server) + go vet/test; DB/Redis tests skip when down
+make test-web      # tsc + eslint for web/
+make e2e           # Playwright (local Chrome): click an item, reload, the feed follows (servers up)
+make proto / sqlc  # regenerate gRPC / SQL code (tools built once into .cache/bin)
 make down          # stop the stack; `make down-volumes` also deletes the database volume
-make clean-processed   # rm -rf data/processed (downloads stay)
+make clean-processed / clean-artifacts   # rm data/processed / artifacts/{models,bundles,eval}
 make data-weights  # 3.56 GB MiniOneRec weights, only needed from M7
 ```
 
 Python: `uv run --project ml --frozen python -m ml.<package>.<module>` from the repo root (the
-Makefile's `PY`). Go: `cd serving && go ...`; goose is a Go tool (`go tool goose`), built with
-build tags that drop every driver but Postgres (`GOOSE_TAGS` in the Makefile).
+Makefile's `PY`); the model server is `uv run --project model_server ...` (`MS`). Go:
+`cd serving && go ...`; goose is a Go tool (`go tool goose`), built with tags that drop every
+driver but Postgres (`GOOSE_TAGS`). `.claude/launch.json` starts the three servers for the
+preview browser. Ports and URLs are in `.env.example`.
 
-Caches (`UV_CACHE_DIR`, `GOMODCACHE`, `GOCACHE`) default to `.cache/` in the repo. When running
-inside the Claude Code sandbox: docker commands, connections to localhost:15432, `git clone` (it
-writes `.git/config`), and Go module downloads (TLS verification fails) must run outside the
-sandbox. Everything else (`make data` once inputs exist, `make eval`, `make test` minus the DB
-tests) works inside it.
+Caches (`UV_CACHE_DIR`, `GOMODCACHE`, `GOCACHE`, `BUF_CACHE_DIR`, npm) default to `.cache/` in
+the repo. Inside the Claude Code sandbox these must run outside it: docker, anything that
+connects to localhost (PostgreSQL, Redis, the servers), anything that binds a local port (the
+servers, the model_server gRPC tests, Go httptest), `git clone`, downloads (Go modules, npm, uv,
+Hugging Face), MPS (Metal) and Playwright. `make eval`, `make train` and the non-network tests
+work inside it.
+
+torch and faiss-cpu each ship an OpenMP runtime and crash when loaded together on macOS: keep
+faiss out of torch processes (`ml/bundle/faiss_index.py` runs as a subprocess; the model server
+has faiss + onnxruntime only).
 
 ## Data (M0)
 
@@ -70,9 +109,28 @@ tests) works inside it.
 - `make data` re-runs `amazon18_data_process.py` unmodified with `TZ=UTC` (it converts month
   bounds in local time) on metadata pre-filtered to the review ASINs, then rebuilds the
   published CSVs with the release-time converter and checks they are byte-identical. All pins
-  (commits, SHA-256s) are in `ml/data/download.py`.
+  (commits, SHA-256s, the text model's revision) are in `ml/data/download.py`.
 - 15 pairs of items share a semantic ID. 51.5% of test targets were reviewed on the same day as
   the last history item (order inside a day is file order); see `docs/results/offline.md`.
+
+## Online loop (M1)
+
+- `GET /v1/recommendations?user_id&surface=home|item&item_id&limit&cursor&debug=1`: Redis user
+  context -> concurrent recall (home: sasrec via gRPC, itemcf, pop; item: itemcf, text via
+  pgvector) with per-source timeouts and partial merge -> weighted RRF (k = 60, weights from the
+  recall-layer experiment) -> filters (bought, seen in 24 h, sold out, current item) -> at most 2
+  per brand in the top 10 -> pop backfill -> 200 items kept in `page:{request_id}` (10 min).
+- Every response is logged as a `served` event (async batch insert into `events_raw`); a CHECK
+  constraint rejects served rows without `model_ver`, `exp.recall` and `config_version`.
+- `POST /v1/events` ({"events": [...]}, <= 100): UUIDv7 `event_id`, `event_day` from its time
+  (partition key; partitions created on demand). PostgreSQL dedups on (event_id, event_day);
+  Redis applies each event once (`userstate/apply.lua`, `dedup:api:{event_id}`). Click /
+  add_to_cart / purchase -> history + hv; purchase -> bought, order, stock - 1; all three and
+  impressions -> seen.
+- Experiments: `bucket = xxhash64(salt + ":" + user_id) % 1000` per layer (salts `<layer>-v1`);
+  config in the `experiments` table, reloaded every 10 s.
+- Bundle versions look like `2026-11-07-sasrec64-<content hash>`; the api registers the one it
+  serves in `model_versions` (status active).
 
 ## Evaluation protocol
 
@@ -80,6 +138,10 @@ tests) works inside it.
 - HR / NDCG @ {3, 5, 10}; hit rule "item" (main) and "sid" (any item with the target's SID, what
   MiniOneRec's calc.py does). Ties: training popularity, then item_id.
 - Fit on train rows only (`splits.train_sequences`), tune on valid, score test once.
+- Every model is also reported on two segments: target reviewed on the same day as the last
+  history item, and later.
 - 95% CI: user-level bootstrap, B = 1000, seed 20261106 (`ml/eval/bootstrap.py`).
 - To add a model: a class with `name`, `fit(sequences, num_items)`, `score(split) -> (n, 3459)`,
-  `describe()`; add it to `models` in `ml/eval/run.py`. The calc.py cross-check runs for every model.
+  `describe()`; add it to `models` in `ml/eval/run.py`. The calc.py cross-check runs for every
+  model. Models that are expensive to train (SASRec) are trained by their own make target and
+  loaded by `make eval`.

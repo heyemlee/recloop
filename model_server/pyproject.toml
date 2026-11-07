@@ -1,0 +1,39 @@
+[project]
+name = "recloop-model-server"
+version = "0.1.0"
+description = "RecLoop model server: gRPC Retrieve over a versioned bundle (SASRec encoder + FAISS)"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "faiss-cpu>=1.9",
+    "grpcio>=1.68",
+    "grpcio-health-checking>=1.68",
+    "numpy>=2.1",
+    "onnxruntime>=1.20",
+    "protobuf>=5.29",
+]
+
+[dependency-groups]
+dev = [
+    "grpcio-tools>=1.68",  # Python stubs from the buf image (`make proto`)
+    "pytest>=8.3",
+    "ruff>=0.8",
+]
+
+[tool.uv]
+# Not an installable package: run from the repo root as `python -m model_server`.
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = [".."]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["gen"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "NPY"]
+ignore = ["E501"]

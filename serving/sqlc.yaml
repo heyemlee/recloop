@@ -1,0 +1,12 @@
+# Type-safe Go for the api's SQL (docs/design.md §21.2). `make sqlc` regenerates
+# internal/store/db from the goose migrations (schema) and internal/store/queries.
+version: "2"
+sql:
+  - engine: postgresql
+    schema: migrations
+    queries: internal/store/queries
+    gen:
+      go:
+        package: db
+        out: internal/store/db
+        sql_package: pgx/v5

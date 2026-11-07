@@ -1,0 +1,41 @@
+// Model server contract (docs/design.md §13.2). The model server is stateless: callers pass the
+// user's history in; it never reads Redis. Every response names the bundle version that produced
+// it, so a user encoder and an item index from different versions are never mixed (§6).
+syntax = "proto3";
+
+package recloop.modelserver.v1;
+
+service ModelServer {
+  // Encodes the history into a user vector and returns the top-k organic candidates from the
+  // item index; also scores the eligible ad items (M3).
+  rpc Retrieve(RetrieveRequest) returns (RetrieveResponse);
+  // M3: pCTR for ad candidates; M4: LightGBM ranking of organic candidates. Not implemented yet.
+  rpc Rank(RankRequest) returns (RankResponse);
+}
+
+message RetrieveRequest {
+  // Most recent item_ids, oldest first; the encoder uses the last 10.
+  repeated int32 history = 1;
+  // Number of organic candidates; 0 means the server default (200).
+  int32 k = 2;
+  // Ad items that already passed eligibility filtering; scored, not retrieved (M3).
+  repeated int32 ad_item_ids = 3;
+  // Bundle version to serve the request with (canary, §6); empty means the active version.
+  string pin_version = 4;
+}
+
+message RetrieveResponse {
+  string model_version = 1;
+  repeated Scored organic = 2;
+  repeated Scored ads = 3;
+}
+
+message Scored {
+  int32 item_id = 1;
+  float score = 2;
+}
+
+// Defined in M3 (ads pCTR) and M4 (organic ranking).
+message RankRequest {}
+
+message RankResponse {}
