@@ -44,7 +44,7 @@
  
      from tqdm import tqdm
      outputs = []
-@@ -230,9 +237,16 @@
+@@ -230,9 +237,17 @@
          new_encodings.append(encodings[i * batch_size: (i + 1) * batch_size])
  
      
@@ -57,11 +57,12 @@
 +        if device == "mps":
 +            batch["mps_allocated"] = torch.mps.current_allocated_memory()
 +            batch["mps_driver_allocated"] = torch.mps.driver_allocated_memory()
++            torch.mps.empty_cache()  # batch lengths differ: cached blocks would pile up
 +        batches.append(batch)
          
          outputs = outputs + output
         
-@@ -245,6 +259,9 @@
+@@ -245,6 +260,9 @@
              test_data[i].pop('dedup')  
      with open(result_json_data, 'w') as f:
          json.dump(test_data, f, indent=4)

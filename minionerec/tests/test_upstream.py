@@ -24,6 +24,7 @@ def test_patch_applies_to_the_pinned_evaluate_py(tmp_path):
     assert 'device = "mps"' in text
     assert "torch_dtype=getattr(torch, dtype)" in text and 'device_map="auto"' not in text
     assert "attn_implementation=attn_implementation or None" in text
+    assert "torch.mps.empty_cache()" in text
     # the generation itself is untouched
     original = (paths.MINIONEREC / "evaluate.py").read_text()
     start = original.index("    def evaluate(")

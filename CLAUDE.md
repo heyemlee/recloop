@@ -163,15 +163,22 @@ its own).
 
 - Generation is MiniOneRec's own `evaluate.py`, staged from the pinned clone into
   `artifacts/minionerec/upstream/` with `minionerec/evaluate.py.patch` (mps device, no
-  bitsandbytes import, `--dtype`, per-batch timing); prompts, SID prefix tree and constrained
-  beam search are upstream's. `third_party/` stays untouched; `calc.py` and `merge.py` run
-  unmodified. The environment pins MiniOneRec's versions (torch 2.6.0, transformers 4.57.1).
+  bitsandbytes import, `--dtype`, `--attn_implementation`, per-batch timing); prompts, SID
+  prefix tree and constrained beam search are upstream's. `third_party/` stays untouched;
+  `calc.py` and `merge.py` run unmodified. The environment pins MiniOneRec's versions (torch
+  2.6.0, transformers 4.57.1).
+- Attention is transformers' eager implementation (`upstream.ATTN_IMPLEMENTATION`): on MPS,
+  torch 2.6's SDPA returns NaN for query rows that attend to nothing (a batch's left padding),
+  and every padded sample then decodes token ids 0, 1, 2, ... instead of SIDs, in any dtype.
+  `minionerec/tests/test_mps.py` pins this (it runs only where torch sees MPS).
 - Scoring is ml/eval's metric code: item rule = each generated SID expands to its items in tie
   order; SID rule = beam position of the target's SID, which must equal calc.py at every K.
   Pop / ItemCF / SASRec are refitted as in `make eval` on the same samples; same bootstrap.
 - Segments: history 1-3 / 4-10; target head (top 20% of items by training count) / tail;
   cross-category (level-2 category not in the history) / same; same day / later.
 - Any MPS run (generation, cost, even a trial) waits for an idle machine: no compose stack, no
-  other measurement. MPS is invisible inside the Claude Code sandbox (torch falls back to the
-  CPU), so real runs go outside it. `--base-model` runs (tests, smoke checks with a tiny
+  other measurement. The cost runs start each configuration only when the 1-minute load is
+  below 2 and no Docker container runs, and re-run it once if a container appears meanwhile
+  (`ml.eval.machine.measure_quietly`). MPS is invisible inside the Claude Code sandbox (torch
+  falls back to the CPU), so real runs go outside it. `--base-model` runs (tests, smoke checks with a tiny
   random Qwen2) are left out of the report.

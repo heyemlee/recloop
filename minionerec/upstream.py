@@ -14,7 +14,10 @@ The patch changes only what a Mac needs, plus timing:
   * --attn_implementation picks transformers' attention code (empty: transformers' choice,
     sdpa); RecLoop passes eager, see ATTN_IMPLEMENTATION below;
   * the seconds and the MPS memory of every generate() batch, and the setup time, go to the JSON
-    file given by --timing_json.
+    file given by --timing_json; on MPS the allocator's cache is emptied after each batch. One
+    batch at evaluate.sh's settings (8 prompts x 50 beams) needs about 14 GB on the GPU in
+    bfloat16, and batches have different lengths: without the flush the cached blocks of
+    earlier shapes piled up to 21 GB within five batches, past this 24 GB Mac's free memory.
 
 Prompts (data.EvalSidDataset), the SID prefix tree, the constrained beam search
 (LogitProcessor.ConstrainedLogitsProcessor) and the generation settings run as published.
@@ -45,7 +48,7 @@ UPSTREAM_SHA256 = {
     "LogitProcessor.py": "13ab33ff0ed3f769370478a86624499ccc0f8813de9d63e3dc4e2fa25ec59eb8",
     "npu_support.py": "3202621f37b5e3c96bb147eaeddb16102009f398d47617091a313d67777328b0",
 }
-PATCHED_EVALUATE_SHA256 = "3afc92329b0a6dc19b93c2f63e780966071f70f1b742aa26ade2dc83317c34df"
+PATCHED_EVALUATE_SHA256 = "83cc4e207f4e3a9197bb54e7fc0bf0c8593d6fc325b360265f56c251b12f5339"
 # On MPS, torch 2.6.0's scaled_dot_product_attention returns NaN for a query row that attends
 # to no key, in every dtype (the CPU and CUDA's kernels return finite values, and transformers
 # relies on that from torch 2.5 on). Left padding makes such rows: each prompt shorter than the
