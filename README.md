@@ -43,6 +43,15 @@ catalogs of up to 1M items, and studies incremental index updates against full r
 search is enough until it needs about 1 ms of CPU per query (about 250K items); at 1M items
 IVF-Flat reaches recall@100 0.995 at a P99 of 152 µs ([results](docs/results/ann.md)).
 
+M7, done ahead of M3–M6: MiniOneRec, a generative recommender (Qwen2.5-1.5B fine-tuned to
+emit an item's semantic ID, decoded with beam search constrained to the catalog), was re-run
+with its published Office checkpoint on this Mac's GPU. Its result reproduces: its own calc.py
+gives HR@10 0.1570 and NDCG@10 0.1237 against the paper's 0.1634 and 0.1242, both inside our
+95 % intervals, and every generated ID is in the catalog. On the same samples it ties SASRec
+(HR@10 −0.0051 [−0.0134, +0.0027]) with no significant edge in any user segment, while a
+50-beam request takes 3.1 s on the GPU against 0.15 ms for SASRec on one CPU thread
+([results](docs/results/minionerec.md)).
+
 Next up: sponsored items, the auction and correct billing (M3).
 
 ## Run
@@ -78,6 +87,9 @@ not redistributed here; `make data` downloads it and checks every file.
 The code is under the [MIT License](LICENSE). Code adapted from other projects keeps its
 original license notice: the SASRec model is adapted from
 [pmixer/SASRec.pytorch](https://github.com/pmixer/SASRec.pytorch) (Apache-2.0, see
-[licenses/](licenses/)). The text embeddings use
+[licenses/](licenses/)). MiniOneRec's code (Apache-2.0, see [licenses/](licenses/)) runs from
+an unmodified clone with [a patch for Apple Silicon](minionerec/evaluate.py.patch); its
+checkpoint (Apache-2.0, base model Qwen2.5-1.5B-Instruct, Apache-2.0) is downloaded by
+`make data-weights` and not redistributed. The text embeddings use
 [BAAI/bge-small-en-v1.5](https://huggingface.co/BAAI/bge-small-en-v1.5) (MIT). The dataset is
 not part of this repository and has its own terms.
