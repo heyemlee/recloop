@@ -11,6 +11,8 @@ The patch changes only what a Mac needs, plus timing:
   * the model is loaded on the CPU in the dtype given by --dtype (default bfloat16, the
     checkpoint's dtype) instead of device_map="auto"; the script itself then moves it to the
     device, as before;
+  * --attn_implementation picks transformers' attention code (empty: transformers' choice,
+    sdpa); RecLoop passes eager, see ATTN_IMPLEMENTATION below;
   * the seconds and the MPS memory of every generate() batch, and the setup time, go to the JSON
     file given by --timing_json.
 
@@ -43,7 +45,17 @@ UPSTREAM_SHA256 = {
     "LogitProcessor.py": "13ab33ff0ed3f769370478a86624499ccc0f8813de9d63e3dc4e2fa25ec59eb8",
     "npu_support.py": "3202621f37b5e3c96bb147eaeddb16102009f398d47617091a313d67777328b0",
 }
-PATCHED_EVALUATE_SHA256 = "f2a58de389c5cc5ac1b28f5dd4b93bbd8a2b9a2dae3aba80aa7190e7a43784ff"
+PATCHED_EVALUATE_SHA256 = "3afc92329b0a6dc19b93c2f63e780966071f70f1b742aa26ade2dc83317c34df"
+# On MPS, torch 2.6.0's scaled_dot_product_attention returns NaN for a query row that attends
+# to no key, in every dtype (the CPU and CUDA's kernels return finite values, and transformers
+# relies on that from torch 2.5 on). Left padding makes such rows: each prompt shorter than the
+# longest in its batch starts with pad positions that attend to nothing. Their NaN reaches the
+# real positions through the values of the next layer, the sample's logits become NaN, and
+# beam search emits token ids 0, 1, 2, ... instead of SIDs (the first trial: 7 of the 8
+# samples of a batch, in bfloat16, float16 and float32 alike). Eager attention adds a large
+# negative number for masked keys and takes the softmax in float32, so padded rows stay
+# finite and the real rows never see them.
+ATTN_IMPLEMENTATION = "eager"
 # Scripts run unmodified from the clone.
 TOOLS_SHA256 = {
     "calc.py": "3e5dc6bf10c2e23f50180f520993462c7756b717dd60d646d8b540274a3fce82",
@@ -106,6 +118,7 @@ def evaluate_command(
     length_penalty: float,
     dtype: str,
     base_model: Path = paths.HF_CKPT,
+    attn_implementation: str = ATTN_IMPLEMENTATION,
 ) -> list[str]:
     """The evaluate.sh invocation for one process (no CUDA_VISIBLE_DEVICES, no split)."""
     return [
@@ -132,6 +145,8 @@ def evaluate_command(
         str(length_penalty),
         "--dtype",
         dtype,
+        "--attn_implementation",
+        attn_implementation,
         "--timing_json",
         str(timing_json),
     ]

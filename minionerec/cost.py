@@ -101,6 +101,7 @@ def main(argv: list[str] | None = None) -> None:
             "seed": args.seed,
             "rows": rows.tolist(),
             "dtype": args.dtype,
+            "attn_implementation": upstream.ATTN_IMPLEMENTATION,
             "checkpoint": (
                 "data/hf/Office_ckpt (ml/data/download.py pins revision and SHA-256)"
                 if args.base_model == paths.HF_CKPT

@@ -66,6 +66,28 @@ def render(out: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _shards_text(st: dict) -> str:
+    n = st.get("shards", 1)
+    if n > 1:
+        return (
+            f"Shards: evaluate.sh's {n} (split.py's boundaries), one after another on the one "
+            "GPU, joined by merge.py. "
+        )
+    return "Shards: one (evaluate.sh runs 8, one per GPU). "
+
+
+def _attention_text(st: dict) -> str:
+    impl = st.get("attn_implementation") or "transformers' default (sdpa)"
+    if impl != "eager":
+        return f"Attention: {impl}"
+    return (
+        "Attention: transformers' eager implementation. On MPS, PyTorch's "
+        "scaled_dot_product_attention returns NaN for the pad rows of a left-padded batch, and "
+        "the NaN spreads to the whole sample, which then decodes no SID (see "
+        "`minionerec/upstream.py`)"
+    )
+
+
 def _setup_section(out: dict, main: dict) -> list[str]:
     s = main["summary"]
     st, v, m = s["settings"], s["versions"], s["machine"]
@@ -94,9 +116,11 @@ def _setup_section(out: dict, main: dict) -> list[str]:
                     "MiniOneRec's own `evaluate.py` (third_party/MiniOneRec @ 0cbd94de) with "
                     "[a patch for Apple Silicon](../../minionerec/evaluate.py.patch): the device "
                     "is `mps` when there is no CUDA, `import bitsandbytes` (CUDA-only, unused) is "
-                    "dropped, the model is loaded in a dtype given on the command line, and every "
-                    "batch is timed. Prompts, the SID prefix tree and the constrained beam search "
-                    "run as published; one process instead of evaluate.sh's 8 GPU shards",
+                    "dropped, the model is loaded in a dtype and with an attention implementation "
+                    "given on the command line, and every batch is timed. Prompts, the SID prefix "
+                    "tree and the constrained beam search run as published. "
+                    + _shards_text(st)
+                    + _attention_text(st),
                 ],
                 [
                     "Generation",
@@ -112,7 +136,8 @@ def _setup_section(out: dict, main: dict) -> list[str]:
                     "Hardware",
                     f"{m['chip']}, {m['gpu_cores']}-core GPU, {m['memory_gib']:.0f} GB unified "
                     f"memory, {m['os']}; device `{s['device']}`; PyTorch {v['torch']}, transformers "
-                    f"{v['transformers']} (MiniOneRec's pinned versions); {st['dtype']}",
+                    f"{v['transformers']} (MiniOneRec's pinned versions); {st['dtype']}, "
+                    f"{st.get('attn_implementation') or 'sdpa'} attention",
                 ],
                 ["Samples", samples],
                 [

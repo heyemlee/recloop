@@ -16,26 +16,27 @@
  else:
      device = "cpu"
  P = 998244353
-@@ -49,6 +51,8 @@
+@@ -49,6 +51,9 @@
      length_penalty: float=0.0,
      max_new_tokens: int = 256,
      num_beams: int = 50,
 +    dtype: str = "bfloat16",
++    attn_implementation: str = "",
 +    timing_json: str = "",
  ):
      random.seed(seed)
      set_seed(seed)
-@@ -57,7 +61,8 @@
+@@ -57,7 +62,8 @@
      category = category_dict[category]
      print(category)
  
 -    model = AutoModelForCausalLM.from_pretrained(base_model, torch_dtype=torch.bfloat16, device_map="auto")
 +    setup_start = time.perf_counter()
-+    model = AutoModelForCausalLM.from_pretrained(base_model, torch_dtype=getattr(torch, dtype))
++    model = AutoModelForCausalLM.from_pretrained(base_model, torch_dtype=getattr(torch, dtype), attn_implementation=attn_implementation or None)
      model.eval()
      with open(info_file, 'r') as f:
          info = f.readlines()
-@@ -221,6 +226,7 @@
+@@ -221,6 +227,7 @@
          return real_outputs
      
      model = model.to(device)
@@ -43,7 +44,7 @@
  
      from tqdm import tqdm
      outputs = []
-@@ -230,9 +236,16 @@
+@@ -230,9 +237,16 @@
          new_encodings.append(encodings[i * batch_size: (i + 1) * batch_size])
  
      
@@ -60,13 +61,13 @@
          
          outputs = outputs + output
         
-@@ -245,6 +258,9 @@
+@@ -245,6 +259,9 @@
              test_data[i].pop('dedup')  
      with open(result_json_data, 'w') as f:
          json.dump(test_data, f, indent=4)
 +    if timing_json:
 +        with open(timing_json, 'w') as f:
-+            json.dump({"device": device, "dtype": dtype, "setup_seconds": setup_seconds, "batches": batches}, f, indent=1)
++            json.dump({"device": device, "dtype": dtype, "attn_implementation": model.config._attn_implementation, "setup_seconds": setup_seconds, "batches": batches}, f, indent=1)
  
  if __name__ == '__main__':
      fire.Fire(main)

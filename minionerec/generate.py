@@ -221,6 +221,7 @@ def main(argv: list[str] | None = None) -> None:
         "max_new_tokens": args.max_new_tokens,
         "length_penalty": args.length_penalty,
         "dtype_requested": args.dtype,
+        "attn_implementation": upstream.ATTN_IMPLEMENTATION,
         "shards": args.shards,
         "base_model": str(args.base_model),
     }

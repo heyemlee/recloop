@@ -23,6 +23,7 @@ def test_patch_applies_to_the_pinned_evaluate_py(tmp_path):
     assert "bitsandbytes" not in text
     assert 'device = "mps"' in text
     assert "torch_dtype=getattr(torch, dtype)" in text and 'device_map="auto"' not in text
+    assert "attn_implementation=attn_implementation or None" in text
     # the generation itself is untouched
     original = (paths.MINIONEREC / "evaluate.py").read_text()
     start = original.index("    def evaluate(")
@@ -52,6 +53,7 @@ def test_evaluate_command_uses_evaluate_sh_settings(tmp_path):
     assert args["--num_beams"] == "50" and args["--batch_size"] == "8"
     assert args["--max_new_tokens"] == "256" and args["--length_penalty"] == "0.0"
     assert args["--category"] == "Office_Products" and args["--dtype"] == "bfloat16"
+    assert args["--attn_implementation"] == "eager"  # see upstream.ATTN_IMPLEMENTATION
 
 
 def _toy_csv(path):
