@@ -44,18 +44,22 @@ ml/                         Python 3.12 uv project (own .venv); run modules from
   data/                     download, prefilter_meta, preprocess, catalog, verify, text_embed,
                             ingest, seed_redis
   models/                   pop, itemcf, sasrec (+ train_sasrec)
-  eval/                     splits, metrics, bootstrap, calc_check, report, run, minionerec_sasrec
+  eval/                     splits, metrics, bootstrap, calc_check, report, run, minionerec_sasrec,
+                            minionerec (+ _report), sasrec_cost, footprint, machine
   bundle/                   build (+ faiss_index, run in a torch-free subprocess)
   ann/                      ANN benchmark (FAISS Flat / IVF / HNSW / IVF-PQ) and index updates
   experiment/               bucketing (Python twin of serving/internal/experiment)
   tests/
+minionerec/                 Python 3.12 uv project (own .venv, Apple Silicon only): MiniOneRec's
+                            evaluate.py + evaluate.py.patch on MPS (upstream, generate, cost)
 web/                        Next.js 16 + shadcn/ui (:13000); /api/* is proxied to the Go api; e2e/
 tools/                      go.mod pinning buf, protoc-gen-go(-grpc), sqlc (built into .cache/bin)
 testdata/                   bucket_vectors.json, shared by the Go and Python bucketing tests
 agent/ sim/ loadtest/ analysis/   later milestones
 data/        (ignored) raw/ downloads, hf/ model files, processed/ outputs of `make data`
 third_party/ (ignored) MiniOneRec and SASRec.pytorch clones
-artifacts/   (ignored) models/sasrec, bundles/<version> + bundles/current, eval/, e2e/, logs/
+artifacts/   (ignored) models/sasrec, bundles/<version> + bundles/current, eval/, e2e/, logs/,
+             minionerec/ (runs/<name>/, cost/, upstream/ = the staged, patched evaluate.py)
 ```
 
 ## Commands
@@ -82,11 +86,16 @@ make e2e           # Playwright (local Chrome): click an item, reload, the feed 
 make proto / sqlc  # regenerate gRPC / SQL code (tools built once into .cache/bin)
 make down          # stop the stack; `make down-volumes` also deletes the database volume
 make clean-processed / clean-artifacts   # rm data/processed / artifacts/{models,bundles,eval}
-make data-weights  # 3.56 GB MiniOneRec weights, only needed from M7
+make data-weights  # 3.56 GB MiniOneRec weights + the rest of its tokenizer (M7)
+make minionerec-gen   # MiniOneRec on MPS over the test split, evaluate.sh's 8 shards one after
+                      # another (~5 h; resumable); MINIONEREC_ARGS="--name trial --users 200"
+make minionerec-cost  # latency / memory at 10, 20, 50 beams (MPS) + SASRec on the CPU (idle machine)
+make minionerec       # score the runs like make eval -> docs/results/minionerec.md (no GPU)
 ```
 
 Python: `uv run --project ml --frozen python -m ml.<package>.<module>` from the repo root (the
-Makefile's `PY`); the model server is `uv run --project model_server ...` (`MS`). Go:
+Makefile's `PY`); the model server is `uv run --project model_server ...` (`MS`), MiniOneRec
+`uv run --project minionerec ...` (`MR`). Go:
 `cd serving && go ...`; goose is a Go tool (`go tool goose`), built with tags that drop every
 driver but Postgres (`GOOSE_TAGS`). `.claude/launch.json` starts the three servers for the
 preview browser. Ports and URLs are in `.env.example`.
@@ -149,3 +158,20 @@ its own).
   `describe()`; add it to `models` in `ml/eval/run.py`. The calc.py cross-check runs for every
   model. Models that are expensive to train (SASRec) are trained by their own make target and
   loaded by `make eval`.
+
+## MiniOneRec (M7)
+
+- Generation is MiniOneRec's own `evaluate.py`, staged from the pinned clone into
+  `artifacts/minionerec/upstream/` with `minionerec/evaluate.py.patch` (mps device, no
+  bitsandbytes import, `--dtype`, per-batch timing); prompts, SID prefix tree and constrained
+  beam search are upstream's. `third_party/` stays untouched; `calc.py` and `merge.py` run
+  unmodified. The environment pins MiniOneRec's versions (torch 2.6.0, transformers 4.57.1).
+- Scoring is ml/eval's metric code: item rule = each generated SID expands to its items in tie
+  order; SID rule = beam position of the target's SID, which must equal calc.py at every K.
+  Pop / ItemCF / SASRec are refitted as in `make eval` on the same samples; same bootstrap.
+- Segments: history 1-3 / 4-10; target head (top 20% of items by training count) / tail;
+  cross-category (level-2 category not in the history) / same; same day / later.
+- Any MPS run (generation, cost, even a trial) waits for an idle machine: no compose stack, no
+  other measurement. MPS is invisible inside the Claude Code sandbox (torch falls back to the
+  CPU), so real runs go outside it. `--base-model` runs (tests, smoke checks with a tiny
+  random Qwen2) are left out of the report.

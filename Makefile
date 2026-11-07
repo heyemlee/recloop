@@ -32,6 +32,7 @@ COMPOSE := docker compose -f deploy/docker-compose.yml
 UV := uv run --project ml --frozen
 PY := $(UV) python
 MS := uv run --project model_server --frozen
+MR := uv run --project minionerec --frozen
 # goose's CLI links every SQL driver it supports; build it with Postgres only.
 GOOSE_TAGS := no_clickhouse,no_libsql,no_mssql,no_mysql,no_sqlite3,no_vertica,no_ydb
 GOOSE := cd serving && GOFLAGS="-modcacherw -tags=$(GOOSE_TAGS)" \
@@ -45,7 +46,7 @@ TOOL_PKGS := github.com/bufbuild/buf/cmd/buf google.golang.org/protobuf/cmd/prot
 .PHONY: help setup up down down-volumes migrate migrate-status data data-weights ingest train \
 	paper-sasrec eval ann bundle seed tools proto sqlc generate build-api serve-model serve-api \
 	serve-web web-install test lint test-ml test-model-server test-go test-web e2e fmt \
-	clean-processed clean-artifacts
+	clean-processed clean-artifacts minionerec-gen minionerec-cost minionerec test-minionerec
 
 help: ## List targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) \
@@ -95,6 +96,19 @@ eval: ## Offline evaluation of Pop / ItemCF / SASRec -> docs/results/offline.md 
 ann: ## ANN benchmark + index updates -> docs/results/ann.md (~25 min; run on an idle machine)
 	$(PY) -m ml.ann.run $(ANN_FLAGS)
 
+# MiniOneRec (M7): generation runs natively on the Mac's GPU (MPS) in its own environment
+# (minionerec/); scoring and the report use the ml environment. Needs `make data-weights`.
+MINIONEREC_ARGS ?= --name test
+minionerec-gen: ## MiniOneRec on MPS over the test split (~5 h; MINIONEREC_ARGS="--name trial --users 200")
+	$(MR) python -m minionerec.generate $(MINIONEREC_ARGS)
+
+minionerec-cost: ## MiniOneRec latency / memory at 10, 20, 50 beams (MPS) and SASRec on the CPU (~25 min, idle machine)
+	$(MR) python -m minionerec.cost $(MINIONEREC_COST_ARGS)
+	$(PY) -m ml.eval.sasrec_cost
+
+minionerec: ## Score MiniOneRec's generations like make eval -> docs/results/minionerec.md (no GPU)
+	$(PY) -m ml.eval.minionerec
+
 bundle: ## Build artifacts/bundles/<version> and point artifacts/bundles/current at it
 	$(PY) -m ml.bundle.build
 
@@ -135,13 +149,15 @@ serve-web: ## Next.js web app on WEB_PORT (proxies /api to the Go api)
 web-install: ## Install the web app's dependencies (npm ci)
 	cd web && npm ci --no-audit --no-fund
 
-test: lint test-ml test-model-server test-go ## Lint and run the Python and Go tests (DB / Redis tests skip when the stack is down)
+test: lint test-ml test-model-server test-minionerec test-go ## Lint and run the Python and Go tests (DB / Redis tests skip when the stack is down)
 
 lint: ## ruff check + format check (ml, model_server)
 	$(UV) ruff check ml
 	$(UV) ruff format --check ml
 	$(MS) ruff check model_server
 	$(MS) ruff format --check model_server
+	$(UV) ruff check minionerec
+	$(UV) ruff format --check minionerec
 
 # test_ann.py loads faiss, so it gets a pytest process of its own: torch (test_sasrec.py) and
 # faiss in one process abort on macOS (two OpenMP runtimes).
@@ -151,6 +167,11 @@ test-ml:
 
 test-model-server:
 	$(MS) pytest model_server/tests
+
+# The minionerec environment is locked for Apple Silicon only (MPS); elsewhere its tests skip.
+test-minionerec:
+	@if [ "$$(uname -sm)" = "Darwin arm64" ]; then $(MR) pytest minionerec/tests; \
+	else echo "skip minionerec tests: the environment is Apple Silicon only"; fi
 
 test-go:
 	@cd serving && unformatted="$$(gofmt -l cmd internal)" && \
@@ -168,6 +189,8 @@ fmt: ## Format and auto-fix
 	$(UV) ruff check --fix ml
 	$(MS) ruff format model_server
 	$(MS) ruff check --fix model_server
+	$(UV) ruff format minionerec
+	$(UV) ruff check --fix minionerec
 	cd serving && gofmt -w cmd internal
 
 clean-processed: ## Delete data/processed (keeps downloads and third_party/)

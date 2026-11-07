@@ -1,0 +1,53 @@
+[project]
+name = "recloop-minionerec"
+version = "0.1.0"
+description = "RecLoop M7: MiniOneRec's own evaluation on Apple Silicon (MPS), and its cost"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+# The versions that MiniOneRec's requirements.txt (third_party/MiniOneRec @ 0cbd94de) pins for
+# every package its evaluation imports (evaluate.py, data.py, LogitProcessor.py, calc.py), and
+# nothing else from that file: no CUDA wheels, deepspeed, bitsandbytes, trl or wandb.
+dependencies = [
+    "accelerate==1.10.1",       # imported (unused) by evaluate.py
+    "fire==0.7.1",
+    "huggingface-hub==0.35.3",
+    "numpy==1.26.3",
+    "pandas==2.2.2",
+    "safetensors==0.6.2",
+    "tokenizers==0.22.1",
+    "torch==2.6.0",
+    "tqdm==4.67.1",
+    "transformers==4.57.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",              # ruff comes from the ml environment (`make lint`)
+]
+
+[tool.uv]
+# Not an installable package: run from the repo root as `python -m minionerec.<module>`.
+package = false
+# Generation runs on the Mac's GPU (MPS) only: resolve for Apple Silicon macOS, so the lockfile
+# has no Linux CUDA wheels.
+environments = ["sys_platform == 'darwin' and platform_machine == 'arm64'"]
+# Unpinned (transitive) dependencies: releases at least two weeks old when this was locked.
+exclude-newer = "2026-10-23T00:00:00Z"
+
+[tool.pytest.ini_options]
+# rootdir is minionerec/; ".." puts the repo root on sys.path so `import minionerec...` works.
+pythonpath = [".."]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "NPY"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+# ml.paths and ml.eval's footprint / machine helpers (standard library only) are shared.
+known-first-party = ["minionerec", "ml"]
