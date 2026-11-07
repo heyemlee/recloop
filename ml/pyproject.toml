@@ -5,6 +5,7 @@ description = "RecLoop offline side: data preparation, baselines and evaluation"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "faiss-cpu>=1.9",
     "fire>=0.7",              # MiniOneRec's calc.py
     "numpy>=2.1",
     "pandas>=2.2",

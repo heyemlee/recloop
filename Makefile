@@ -26,7 +26,7 @@ GOOSE_TAGS := no_clickhouse,no_libsql,no_mssql,no_mysql,no_sqlite3,no_vertica,no
 GOOSE := cd serving && GOFLAGS="-modcacherw -tags=$(GOOSE_TAGS)" \
 	go tool goose -dir migrations postgres "$(DATABASE_URL)"
 
-.PHONY: help up down down-volumes migrate migrate-status data data-weights ingest eval \
+.PHONY: help up down down-volumes migrate migrate-status data data-weights ingest eval ann \
 	test lint fmt clean-processed
 
 help: ## List targets
@@ -63,6 +63,9 @@ ingest: migrate ## Load items and users from data/processed into PostgreSQL
 
 eval: ## Offline evaluation of the baselines -> docs/results/offline.md (no database)
 	$(PY) -m ml.eval.run
+
+ann: ## ANN benchmark + index updates -> docs/results/ann.md (~30 min; run on an idle machine)
+	$(PY) -m ml.ann.run $(ANN_FLAGS)
 
 test: lint ## Lint and run the tests (data / database checks run when those are available)
 	$(UV) pytest ml/tests
