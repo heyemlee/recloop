@@ -600,10 +600,11 @@ def _agreement_section(out: dict) -> list[str]:
             [
                 a["run"],
                 f"{s['num_beams']} / {s['batch_size']} / {s['dtype']}",
+                a["reference"],
                 f"{a['samples']:,}",
                 f"{a['identical_top10']:.1%}",
                 f"{a['top10_overlap']:.1%}",
-                _ci(a["main"]["HR@10"]),
+                _ci(a["reference_values"]["HR@10"]),
                 _ci(a["run_values"]["HR@10"]),
                 _signed(a["difference"]["HR@10"]),
             ]
@@ -612,19 +613,21 @@ def _agreement_section(out: dict) -> list[str]:
         "## Other settings on the same samples",
         "",
         f"Each run against the main run ({main}: {st['num_beams']} beams, batch "
-        f"{st['batch_size']}, {st['dtype']}) on the samples both generated for; item rule, "
-        "paired bootstrap on those samples' users. Identical top-10 = the same ten SIDs in the "
-        "same order; overlap = the share of the main run's top-10 SIDs that the other run also "
-        "has in its top 10.",
+        f"{st['batch_size']}, {st['dtype']}), and two runs on the same samples whose settings "
+        "differ in one value against each other (the one with the main run's value is the "
+        "reference), on the samples both generated for; item rule, paired bootstrap on those "
+        "samples' users. Identical top-10 = the same ten SIDs in the same order; overlap = the "
+        "share of the reference's top-10 SIDs that the run also has in its top 10.",
         "",
         *_table(
             [
                 "Run",
                 "Beams / batch / dtype",
+                "Against",
                 "Samples",
                 "Identical top-10",
                 "Top-10 overlap",
-                f"HR@10, {main}",
+                "HR@10, reference",
                 "HR@10, this run",
                 "Difference",
             ],

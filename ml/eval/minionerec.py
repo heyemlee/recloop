@@ -421,35 +421,57 @@ def reproduction(gen: Generation, comp: dict, calc: dict) -> dict:
     }
 
 
+SETTINGS_COMPARED = ("num_beams", "batch_size", "dtype", "max_new_tokens", "length_penalty")
+
+
+def comparisons(gens: dict[str, Generation], main: str) -> list[tuple[str, str]]:
+    """(reference, run) pairs: every other run against the main run; and two other runs on the
+    same samples whose settings differ in one value, against each other, the one with the main
+    run's value as the reference. (float32 against bfloat16 at a batch size the main run does
+    not use separates the dtype from the batch size.)"""
+    pairs = [(main, name) for name in gens if name != main]
+    others = [n for n in gens if n != main]
+    main_settings = gens[main].meta["settings"]
+    for i, x in enumerate(others):
+        for y in others[i + 1 :]:
+            if gens[x].rows.tolist() != gens[y].rows.tolist():
+                continue
+            sx, sy = gens[x].meta["settings"], gens[y].meta["settings"]
+            diff = [k for k in SETTINGS_COMPARED if sx.get(k) != sy.get(k)]
+            if len(diff) == 1:
+                x_is_ref = sx.get(diff[0]) == main_settings.get(diff[0])
+                pairs.append((x, y) if x_is_ref else (y, x))
+    return pairs
+
+
 def agreement(gens: dict[str, Generation], scored: dict, main: str, test: Split) -> list[dict]:
-    """Every other run against the main run, paired on the test samples both generated for
-    (other beam widths or dtypes on a subset of the main run's users)."""
-    base = gens[main]
-    pos = {r: i for i, r in enumerate(base.rows.tolist())}
+    """Each pair of comparisons(), paired on the test samples both runs generated for."""
     out = []
-    for name, gen in gens.items():
-        if name == main:
-            continue
+    for ref, name in comparisons(gens, main):
+        base, gen = gens[ref], gens[name]
+        pos = {r: i for i, r in enumerate(base.rows.tolist())}
         other = [i for i, r in enumerate(gen.rows.tolist()) if r in pos]
         if not other:
             continue
         mine = [pos[int(gen.rows[i])] for i in other]
-        top_main = [[normalize(x) for x in base.predict[i][:10]] for i in mine]
-        top_other = [[normalize(x) for x in gen.predict[i][:10]] for i in other]
-        pairs = list(zip(top_main, top_other, strict=True))
+        top_ref = [[normalize(x) for x in base.predict[i][:10]] for i in mine]
+        top_run = [[normalize(x) for x in gen.predict[i][:10]] for i in other]
+        pairs = list(zip(top_ref, top_run, strict=True))
         resampler = bootstrap.Resampler.build(test.user[gen.rows[other]])
-        v_main = {k: scored[main]["values"][NAME]["item"][k][mine] for k in SEGMENT_METRICS}
-        v_other = {k: scored[name]["values"][NAME]["item"][k][other] for k in SEGMENT_METRICS}
+        v_ref = {k: scored[ref]["values"][NAME]["item"][k][mine] for k in SEGMENT_METRICS}
+        v_run = {k: scored[name]["values"][NAME]["item"][k][other] for k in SEGMENT_METRICS}
         out.append(
             {
                 "run": name,
+                "reference": ref,
                 "settings": gen.meta["settings"],
+                "reference_settings": base.meta["settings"],
                 "samples": len(other),
                 "identical_top10": float(np.mean([a == b for a, b in pairs])),
                 "top10_overlap": float(np.mean([len(set(a) & set(b)) / 10 for a, b in pairs])),
-                "main": _with_ci(v_main, resampler),
-                "run_values": _with_ci(v_other, resampler),
-                "difference": _with_ci({k: v_other[k] - v_main[k] for k in v_main}, resampler),
+                "reference_values": _with_ci(v_ref, resampler),
+                "run_values": _with_ci(v_run, resampler),
+                "difference": _with_ci({k: v_run[k] - v_ref[k] for k in v_ref}, resampler),
             }
         )
     return out

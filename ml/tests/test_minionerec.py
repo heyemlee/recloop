@@ -363,13 +363,43 @@ def test_agreement_pairs_runs_on_shared_samples(tmp_path):
         calc_fn=_calc_from_formula,
     )
     (a,) = out["agreement"]
-    assert a["run"] == "beam10" and a["samples"] == 2
+    assert a["run"] == "beam10" and a["reference"] == "test" and a["samples"] == 2
     assert a["identical_top10"] == pytest.approx(0.5)
     assert a["top10_overlap"] == pytest.approx((1.0 + 0.9) / 2)
     # row 1's target (item 2) moves from rank 2 to 3: a hit at 10 in both runs
     assert a["difference"]["HR@10"]["value"] == pytest.approx(0.0)
     assert a["difference"]["NDCG@10"]["value"] < 0
     assert "## Other settings on the same samples" in minionerec_report.render(out)
+
+
+def test_runs_differing_in_one_setting_are_compared_with_each_other(tmp_path):
+    test = _toy_split()
+    full = [_beams(1, 0), _beams(0, 2), _beams(4), _beams(2, 1), _beams(1, 0), _beams(2, 0)]
+    _write_run(tmp_path / "runs" / "test", list(range(len(test))), full, test)
+    for name, dtype in (("bf16-b4", "bfloat16"), ("fp32-b4", "float32")):
+        _write_run(tmp_path / "runs" / name, [0, 1], full[:2], test)
+        meta_path = tmp_path / "runs" / name / "run.json"
+        meta = json.loads(meta_path.read_text())
+        meta["settings"].update(batch_size=4, dtype=dtype)
+        meta_path.write_text(json.dumps(meta))
+    gens = {
+        p.name: minionerec.load_generation(p) for p in minionerec.finished_runs(tmp_path / "runs")
+    }
+    pairs = minionerec.comparisons(gens, "test")
+    # both against the main run, and float32 against bfloat16 (the main run's dtype)
+    assert sorted(pairs) == [("bf16-b4", "fp32-b4"), ("test", "bf16-b4"), ("test", "fp32-b4")]
+    out = minionerec.build(
+        minionerec.finished_runs(tmp_path / "runs"),
+        "test",
+        _toy_context(test),
+        None,
+        np.array(["A"] * 12, dtype=object),
+        np.ones(len(test), dtype=bool),
+        calc_fn=_calc_from_formula,
+    )
+    dtype_pair = next(a for a in out["agreement"] if a["reference"] == "bf16-b4")
+    assert dtype_pair["run"] == "fp32-b4" and dtype_pair["identical_top10"] == 1.0
+    assert "| fp32-b4 | 10 / 4 / float32 | bf16-b4 |" in minionerec_report.render(out)
 
 
 def test_smoke_runs_are_left_out(tmp_path):
