@@ -19,7 +19,8 @@ write-ups in `docs/results/`.
   each milestone after verifying it and pushes to `origin` (github.com/heyemlee/recloop). Check
   §22.4 before anything is made public.
 - `docs/results/*.md` are generated (`make eval` writes `offline.md`, `make ann` writes
-  `ann.md`); change the generator, not the file. The committed `offline.md` is `make setup`, then `make paper-sasrec`, then
+  `ann.md`, `make load` writes `latency.md`; `make latency-report` re-renders it from
+  `artifacts/latency/results.json`); change the generator, not the file. The committed `offline.md` is `make setup`, then `make paper-sasrec`, then
   `make eval`. `make eval` re-runs give the same bytes; `make train` runs on the CPU with fixed
   seeds, and two runs with the same worker / thread counts gave identical weights.
 - Generated code is committed: `serving/gen` and `model_server/gen` (`make proto`),
@@ -29,17 +30,27 @@ write-ups in `docs/results/`.
 ## Layout
 
 ```
-deploy/docker-compose.yml   PostgreSQL 18 + pgvector, Redis (ports 127.0.0.1:15432 / 16390)
+deploy/docker-compose.yml   PostgreSQL 18 + pgvector, Redis, Redpanda (+ topic init), log-sink
+                            (Redpanda Connect), aggregator, Prometheus, Grafana, OTel collector,
+                            Jaeger; profile `bench`: Toxiproxy, api and model-server containers
+deploy/connect/ prometheus/ grafana/ otel/ jaeger/ toxiproxy/   their configuration;
+                            model-server.Dockerfile (bench image)
 proto/                      buf workspace; recloop/modelserver/v1/model_server.proto (design §13.2)
 serving/                    Go module github.com/heyemlee/recloop/serving
   cmd/api/                  HTTP api (:18080): /v1/recommendations, /v1/events, /v1/items/{id}, ...
-  internal/                 api, mixer (fan-out, RRF, filters), recall, experiment, events,
-                            userstate (Redis + apply.lua), cache (pages), catalog, bundle, store
+  cmd/aggregator/           events -> Redis; rebuild-from-db, reset-offsets, wait-lag
+  internal/                 api, mixer (fan-out, RRF, filters), recall, experiment, events (record
+                            format, Redpanda publisher, served writer, Direct = M1's sync path),
+                            userstate (Redis + apply.lua), cache (pages, candidate cache, codec),
+                            resilience (budgets, breakers), consumer (consume loop, lag),
+                            aggregator, metrics (Prometheus), tracing (OTel), catalog, bundle, store
   internal/store/db/        sqlc output; queries in internal/store/queries, schema = migrations/
   migrations/               goose (00001 catalog, 00002 events/orders/experiments/models,
-                            00003 default experiment, 00004 text_emb stored inline)
+                            00003 default experiment, 00004 text_emb stored inline,
+                            00005 purchase -> order trigger on events_raw)
   gen/                      protoc-gen-go output
-model_server/               Python 3.12 uv project (own .venv): gRPC Retrieve over a bundle (:18081)
+model_server/               Python 3.12 uv project (own .venv): gRPC Retrieve over a bundle (:18081),
+                            admin.py: fault switch + /metrics on :18082
 ml/                         Python 3.12 uv project (own .venv); run modules from the repo root
   data/                     download, prefilter_meta, preprocess, catalog, verify, text_embed,
                             ingest, seed_redis
@@ -50,19 +61,26 @@ ml/                         Python 3.12 uv project (own .venv); run modules from
   experiment/               bucketing (Python twin of serving/internal/experiment)
   tests/
 web/                        Next.js 16 + shadcn/ui (:13000); /api/* is proxied to the Go api; e2e/
-tools/                      go.mod pinning buf, protoc-gen-go(-grpc), sqlc (built into .cache/bin)
+sim/                        traffic simulator (world, click model, sessions + fault switches, verify,
+                            drill); runs in the ml environment (`$(PY) -m sim.<module>`)
+loadtest/                   k6 scenario recs.js, experiment runner run.py, report.py (latency.md)
+analysis/                   served_attribution.sql, srm.py
+tools/                      go.mod pinning buf, protoc-gen-go(-grpc), sqlc (built into .cache/bin);
+                            tools/k6/go.mod pins k6 (own module)
 testdata/                   bucket_vectors.json, shared by the Go and Python bucketing tests
-agent/ sim/ loadtest/ analysis/   later milestones
+agent/                      later milestones
 data/        (ignored) raw/ downloads, hf/ model files, processed/ outputs of `make data`
 third_party/ (ignored) MiniOneRec and SASRec.pytorch clones
-artifacts/   (ignored) models/sasrec, bundles/<version> + bundles/current, eval/, e2e/, logs/
+artifacts/   (ignored) models/sasrec, bundles/<version> + bundles/current, eval/, e2e/, logs/,
+             sim/ (world.json, run ledgers), latency/ (results.json)
 ```
 
 ## Commands
 
 ```
 make setup         # up, data, ingest, train, eval, bundle, seed, web-install: clean checkout -> demo
-make up            # compose up --wait + goose migrations
+make up            # images + compose up --wait (event pipeline and monitoring too) + migrations
+make images        # cross-compile api + aggregator into .cache/linux, build recloop/go:dev
 make data          # fetch + checksum inputs, re-run MiniOneRec preprocessing, export, verify,
                    # text embeddings (bge-small-en-v1.5)
 make ingest        # migrations + items (text_emb, simulated stock) / users into PostgreSQL
@@ -73,14 +91,26 @@ make ann           # ANN benchmark + index updates -> docs/results/ann.md (~25 m
                    # it marks the report preliminary when the load average is above 2 at the start)
 make bundle        # artifacts/bundles/<version> (ONNX encoder, FAISS, ItemCF/Pop tables), current ->
 make seed          # FLUSHDB Redis, load dataset users' train-period history + demo users
+make rebuild-redis # seed + replay events_raw (FROM=db, default) or the event log (FROM=log)
 make serve-model   # model server on :18081 (bundle: artifacts/bundles/current)
 make serve-api     # Go api on :18080
 make serve-web     # Next.js dev server on :13000
 make test          # ruff + pytest (ml, model_server) + go vet/test; DB/Redis tests skip when down
 make test-web      # tsc + eslint for web/
 make e2e           # Playwright (local Chrome): click an item, reload, the feed follows (servers up)
+make sim-world     # simulator world (users, targets, click model) -> artifacts/sim/world.json
+make sim           # simulated sessions against the dev api (SIM_FLAGS, --faults ...) + verify
+make srm           # simulated traffic, then the SRM check on events_raw (analysis/srm.py)
+make drill         # duplicates + kill -9 of the consumers + broker restart, then verify (~2 min)
+make bench-up      # bench profile: api :18180 + model server (admin :18182) behind Toxiproxy
+make load          # latency experiments -> docs/results/latency.md (~90 min; idle machine; the
+                   # report marks itself preliminary if the VM is not 8 CPUs or the machine is busy;
+                   # LOAD_FLAGS='--resume "<reason>"' continues results.json, the report says so)
+make load-smoke    # 1 repeat, 15 s runs -> artifacts/latency/smoke.md (development)
+make latency-report  # re-render latency.md from artifacts/latency/results.json
+make k6            # build k6 v2.3.0 (tools/k6) into .cache/bin
 make proto / sqlc  # regenerate gRPC / SQL code (tools built once into .cache/bin)
-make down          # stop the stack; `make down-volumes` also deletes the database volume
+make down          # stop the stack; `make down-volumes` also deletes its volumes
 make clean-processed / clean-artifacts   # rm data/processed / artifacts/{models,bundles,eval}
 make data-weights  # 3.56 GB MiniOneRec weights, only needed from M7
 ```
@@ -93,15 +123,17 @@ preview browser. Ports and URLs are in `.env.example`.
 
 Caches (`UV_CACHE_DIR`, `GOMODCACHE`, `GOCACHE`, `BUF_CACHE_DIR`, npm) default to `.cache/` in
 the repo. Inside the Claude Code sandbox these must run outside it: docker, anything that
-connects to localhost (PostgreSQL, Redis, the servers), anything that binds a local port (the
-servers, the model_server gRPC tests, Go httptest), `git clone`, downloads (Go modules, npm, uv,
-Hugging Face), MPS (Metal) and Playwright. `make eval`, `make train` and the non-network tests
-work inside it.
+connects to localhost (PostgreSQL, Redis, Redpanda, the servers, k6, the simulator), anything
+that binds a local port (the servers, the model_server gRPC and admin tests, Go httptest,
+miniredis), `git clone`, downloads (Go modules, npm, uv, Hugging Face), MPS (Metal) and
+Playwright. `make eval`, `make train` and the non-network tests work inside it.
 
 torch and faiss-cpu each ship an OpenMP runtime and crash when loaded together on macOS: keep
 faiss out of torch processes (`ml/bundle/faiss_index.py` runs as a subprocess; the model server
 has faiss + onnxruntime only; `make test-ml` runs `ml/tests/test_ann.py` in a pytest process of
-its own).
+its own). onnxruntime 1.31 on macOS starts a telemetry uploader at import that can segfault the
+interpreter at exit: `ORT_DISABLE_TELEMETRY=1` (Makefile, model-server image, `ml/__init__.py`,
+`model_server/__init__.py`).
 
 ## Data (M0)
 
@@ -124,17 +156,59 @@ its own).
   pgvector) with per-source timeouts and partial merge -> weighted RRF (k = 60, weights from the
   recall-layer experiment) -> filters (bought, seen in 24 h, sold out, current item) -> at most 2
   per brand in the top 10 -> pop backfill -> 200 items kept in `page:{request_id}` (10 min).
-- Every response is logged as a `served` event (async batch insert into `events_raw`); a CHECK
+- Every response is logged as a `served` event (from M2 through Redpanda, see below); a CHECK
   constraint rejects served rows without `model_ver`, `exp.recall` and `config_version`.
 - `POST /v1/events` ({"events": [...]}, <= 100): UUIDv7 `event_id`, `event_day` from its time
-  (partition key; partitions created on demand). PostgreSQL dedups on (event_id, event_day);
-  Redis applies each event once (`userstate/apply.lua`, `dedup:api:{event_id}`). Click /
+  (partition key). PostgreSQL dedups on (event_id, event_day); Redis applies each event once
+  (`userstate/apply.lua`, `dedup:aggregator:{event_id}`; M1 used `dedup:api:`). Click /
   add_to_cart / purchase -> history + hv; purchase -> bought, order, stock - 1; all three and
   impressions -> seen.
 - Experiments: `bucket = xxhash64(salt + ":" + user_id) % 1000` per layer (salts `<layer>-v1`);
   config in the `experiments` table, reloaded every 10 s.
 - Bundle versions look like `2026-11-07-sasrec64-<content hash>`; the api registers the one it
   serves in `model_versions` (status active).
+
+## Latency and events (M2)
+
+- Events: the api validates and writes to the Redpanda topic `events` (6 partitions, key =
+  user_id, 7 days; `KAFKA_BROKERS`, default localhost:19092; `EVENTS_MODE=direct` = M1's
+  synchronous path) and answers 202. Record format `internal/events.Record` (JSON, header
+  `type`, carries `impression_id` and `ad_token` for billing). Consumer groups: `aggregator`
+  (Go, Redis; Lua dedup + state in one step, offsets committed after the batch, static
+  membership) and `log-sink` (Redpanda Connect `deploy/connect/log-sink.yaml`: `sql_insert` ...
+  `ON CONFLICT DO NOTHING`, unordered processing with 8 parallel 1,000-row inserts, ~16K rows/s;
+  the purchase trigger creates orders and takes stock). The api and the
+  aggregator keep the `events_raw` partitions of [today - 7, today + 1] in place; the api polls
+  stock every 5 s. Served events: bounded buffer, batches retried for 30 s, dropped (counted) only
+  when full.
+- Request budget (`internal/resilience`, `BUDGET_*_MS`): 100 ms total; user context 5, candidate
+  cache 3, recall 35, ranking reserve 25, tail 10. A stage gets min(its budget, left - later
+  budgets); a remote source with < 5 ms left is skipped. Degradation reasons are
+  `<dependency>_<timeout|error|circuit_open|skipped>`, `static_popular`, `pages_*`,
+  `model_version_mismatch`; a degraded candidate list is never cached.
+- Breakers (gobreaker) only in front of the model server and PostgreSQL text recall:
+  `BREAKER_WINDOW=time:10s:20:10` (default, §5.1 since 2026-11-06: >= 50 % of the last 10 s with
+  >= 20 calls, or 10 failures in a row; open 10 s, 5 half-open probes) or `calls:20` (the first
+  rule, kept as a comparison row in `make load`). Redis has none: its calls are capped by their
+  budgets and fail fast.
+- Candidate cache: `cand:{uid}:home:{recall}.{rank variant}:{model_ver}:{hv}` and
+  `cand:item:{seed}:...` (shared by users), 300 candidates, binary + S2, 5 min (`CANDIDATE_CACHE`).
+- Naive mode for the fault experiments: `RECLOOP_RESILIENCE=naive` (no deadline, budgets,
+  breakers or degradation; a failed dependency is a 503).
+- Model server fault switch: `PUT :18082/fault {"delay_ms":200,"probability":0.3}` (`FAULT_*`
+  env at start); the delay stops at the caller's deadline. 32 worker threads.
+- Ports: Redpanda 19092 (admin 19644), log-sink 14195, aggregator metrics 18090, Prometheus
+  19090, Grafana 13001 (dashboard "RecLoop"), Jaeger 16686, OTLP 14317 / 14318; bench api 18180,
+  bench model-server admin 18182, Toxiproxy 18474. `make serve-api` / `serve-model` send traces
+  to the collector (`OTEL_EXPORTER_OTLP_ENDPOINT`); the api serves `/metrics`.
+- Load tests run on the bench profile: api and model server containers (2 CPU each); the fault
+  experiment reaches the model server and Redis through Toxiproxy, the rest directly (the proxy
+  adds its own tail); k6 runs on the host; before every run the consumers catch up and Redis is
+  reseeded. Redis has `maxmemory 384mb` + `volatile-ttl` (pages and caches
+  go first). Measurements need an idle machine and the coordinator's go-ahead.
+- Simulator: `sim/world.py` (2,024 test-period users, targets = their test items, click model
+  = examination x relevance by text similarity), `sim/run.py` (sessions, fault switches, ledger),
+  `sim/verify.py` (events_raw / orders / Redis vs the ledger), `sim/drill.py`.
 
 ## Evaluation protocol
 

@@ -15,8 +15,21 @@ API_ADDR ?= 127.0.0.1:$(API_PORT)
 MODEL_SERVER_ADDR ?= 127.0.0.1:$(MODEL_SERVER_PORT)
 RECLOOP_API_URL ?= http://$(API_ADDR)
 RECLOOP_BUNDLE ?= $(CURDIR)/artifacts/bundles/current
+# M2: event log, monitoring, tracing, the bench profile's api.
+RECLOOP_KAFKA_PORT ?= 19092
+KAFKA_BROKERS ?= localhost:$(RECLOOP_KAFKA_PORT)
+RECLOOP_PROMETHEUS_PORT ?= 19090
+PROMETHEUS_URL ?= http://localhost:$(RECLOOP_PROMETHEUS_PORT)
+RECLOOP_BENCH_API_PORT ?= 18180
+# Traces of `make serve-api` / `serve-model` go to the compose OTel collector. Not exported to
+# every recipe: docker compose and other OTel-aware tools would send their own traces there.
+OTEL_EXPORTER_OTLP_ENDPOINT ?= http://localhost:14317
+TRACING := OTEL_EXPORTER_OTLP_ENDPOINT=$(OTEL_EXPORTER_OTLP_ENDPOINT) OTEL_EXPORTER_OTLP_INSECURE=true
 export RECLOOP_PG_PORT RECLOOP_REDIS_PORT DATABASE_URL REDIS_URL API_ADDR MODEL_SERVER_PORT \
-	MODEL_SERVER_ADDR RECLOOP_API_URL RECLOOP_BUNDLE
+	MODEL_SERVER_ADDR RECLOOP_API_URL RECLOOP_BUNDLE RECLOOP_KAFKA_PORT KAFKA_BROKERS \
+	PROMETHEUS_URL RECLOOP_BENCH_API_PORT
+# onnxruntime's telemetry uploader (macOS) can crash the interpreter at exit: off everywhere.
+export ORT_DISABLE_TELEMETRY := 1
 
 # Tool caches live in the repo (git-ignored) so the targets also work where ~/.cache is not
 # writable, e.g. for sandboxed coding agents. Set them in the environment to use global caches.
@@ -29,6 +42,7 @@ npm_config_cache ?= $(CURDIR)/.cache/npm
 export UV_CACHE_DIR GOMODCACHE GOCACHE GOTOOLCHAIN BUF_CACHE_DIR npm_config_cache
 
 COMPOSE := docker compose -f deploy/docker-compose.yml
+BENCH := $(COMPOSE) --profile bench
 UV := uv run --project ml --frozen
 PY := $(UV) python
 MS := uv run --project model_server --frozen
@@ -42,27 +56,43 @@ TOOLS := buf protoc-gen-go protoc-gen-go-grpc sqlc
 TOOL_PKGS := github.com/bufbuild/buf/cmd/buf google.golang.org/protobuf/cmd/protoc-gen-go \
 	google.golang.org/grpc/cmd/protoc-gen-go-grpc github.com/sqlc-dev/sqlc/cmd/sqlc
 
-.PHONY: help setup up down down-volumes migrate migrate-status data data-weights ingest train \
-	paper-sasrec eval ann bundle seed tools proto sqlc generate build-api serve-model serve-api \
-	serve-web web-install test lint test-ml test-model-server test-go test-web e2e fmt \
-	clean-processed clean-artifacts
+.PHONY: help setup images up down down-volumes bench-up bench-down migrate migrate-status data \
+	data-weights ingest train paper-sasrec eval ann bundle seed build-aggregator rebuild-redis tools \
+	k6 proto sqlc generate build-api serve-model serve-api serve-web web-install test lint test-ml \
+	test-model-server test-go test-web e2e fmt sim-world sim srm drill load load-smoke \
+	latency-report clean-processed clean-artifacts
 
 help: ## List targets
-	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) \
+	@grep -E '^[a-z0-9-]+:.*## ' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*## "} {printf "  %-18s %s\n", $$1, $$2}'
 
 setup: up data ingest train eval bundle seed web-install ## Everything from a clean checkout to a runnable demo
 	@echo "ready: run make serve-model, make serve-api and make serve-web (three terminals)"
 
-up: ## Start PostgreSQL + Redis (deploy/docker-compose.yml) and apply migrations
+# The Go services as linux binaries for the containers (aggregator; api in the bench profile).
+LINUX := $(CURDIR)/.cache/linux
+images: ## Cross-compile the Go services into .cache/linux and build their image (recloop/go:dev)
+	mkdir -p $(LINUX)
+	cd serving && CGO_ENABLED=0 GOOS=linux GOARCH=$$(go env GOARCH) GOFLAGS=-modcacherw \
+		go build -trimpath -o $(LINUX)/ ./cmd/api ./cmd/aggregator
+	$(COMPOSE) build aggregator
+
+up: images ## Start the stack (PostgreSQL, Redis, Redpanda, log-sink, aggregator, monitoring) + migrations
 	$(COMPOSE) up -d --wait
 	$(MAKE) migrate
 
-down: ## Stop the stack, keep the database volume
-	$(COMPOSE) down
+down: ## Stop the stack (bench profile included), keep the volumes
+	$(BENCH) down
 
-down-volumes: ## Stop the stack and delete its volumes (all database contents)
-	$(COMPOSE) down -v
+down-volumes: ## Stop the stack and delete its volumes (database, event log, metrics)
+	$(BENCH) down -v
+
+bench-up: images ## Also start the bench profile: api + model server containers behind Toxiproxy
+	$(BENCH) build model-server
+	$(BENCH) up -d --wait
+
+bench-down: ## Stop the bench profile's containers; the rest of the stack keeps running
+	$(BENCH) stop api model-server toxiproxy
 
 migrate: ## Apply database migrations (goose, serving/migrations)
 	$(GOOSE) up
@@ -101,6 +131,26 @@ bundle: ## Build artifacts/bundles/<version> and point artifacts/bundles/current
 seed: ## Flush Redis and load the dataset users' histories and the demo users
 	$(PY) -m ml.data.seed_redis
 
+build-aggregator:
+	cd serving && GOFLAGS=-modcacherw go build -o $(BIN)/aggregator ./cmd/aggregator
+
+# Redis holds derived state only (design §7.2). Rebuild = the seed state + every event since:
+#   FROM=db  (default) replay events_raw (everything ever logged, M1's direct writes included)
+#   FROM=log reset the aggregator's group to the start of the event log (7 days of retention)
+# The aggregator is stopped while Redis is rebuilt; both paths use its dedup markers, so the
+# events it applies after the restart that the replay already applied are skipped.
+FROM ?= db
+rebuild-redis: build-aggregator ## Rebuild Redis: seed, then replay events_raw (FROM=db) or the event log (FROM=log)
+	$(COMPOSE) stop aggregator
+	$(MAKE) seed
+	@if [ "$(FROM)" = log ]; then \
+		$(BIN)/aggregator reset-offsets; \
+	else \
+		$(BIN)/aggregator wait-lag log-sink && $(BIN)/aggregator rebuild-from-db; \
+	fi
+	$(COMPOSE) start aggregator
+	$(BIN)/aggregator wait-lag aggregator
+
 $(addprefix $(BIN)/,$(TOOLS)): tools/go.mod tools/go.sum
 	cd tools && GOFLAGS=-modcacherw go build -o $(BIN)/ $(TOOL_PKGS)
 
@@ -124,10 +174,10 @@ build-api: ## Build the Go api into .cache/bin/api
 	cd serving && GOFLAGS=-modcacherw go build -o $(BIN)/api ./cmd/api
 
 serve-model: ## Model server (gRPC) on MODEL_SERVER_PORT, serving artifacts/bundles/current
-	$(MS) python -m model_server --bundle "$(RECLOOP_BUNDLE)" --port $(MODEL_SERVER_PORT)
+	$(TRACING) $(MS) python -m model_server --bundle "$(RECLOOP_BUNDLE)" --port $(MODEL_SERVER_PORT)
 
 serve-api: build-api ## Go api on API_ADDR
-	$(BIN)/api
+	$(TRACING) $(BIN)/api
 
 serve-web: ## Next.js web app on WEB_PORT (proxies /api to the Go api)
 	cd web && npm run dev -- --port $(WEB_PORT)
@@ -135,11 +185,46 @@ serve-web: ## Next.js web app on WEB_PORT (proxies /api to the Go api)
 web-install: ## Install the web app's dependencies (npm ci)
 	cd web && npm ci --no-audit --no-fund
 
+# ---------------------------------------------------------------- M2: simulator and load tests
+
+$(BIN)/k6: tools/k6/go.mod tools/k6/go.sum
+	cd tools/k6 && GOFLAGS=-modcacherw go build -o $(BIN)/k6 go.k6.io/k6/v2
+
+k6: $(BIN)/k6 ## Build k6 (pinned in tools/k6/go.mod) into .cache/bin
+
+sim-world: ## Simulator world: test-period users, their targets, click model -> artifacts/sim/world.json
+	$(PY) -m sim.world
+
+SIM_FLAGS ?= --sessions 2000 --concurrency 16
+sim: sim-world build-aggregator ## Simulated sessions against the api (SIM_FLAGS, e.g. --faults duplicate=0.1), then verify
+	$(PY) -m sim.run $(SIM_FLAGS) --out artifacts/sim/run
+	$(PY) -m sim.verify --run artifacts/sim/run
+
+srm: sim-world build-aggregator ## Simulated traffic, then the SRM check of every experiment layer on events_raw
+	$(PY) -m sim.run --sessions 8000 --concurrency 16 --out artifacts/sim/srm
+	$(BIN)/aggregator wait-lag log-sink
+	$(PY) -m analysis.srm --run artifacts/sim/srm
+
+drill: sim-world build-aggregator ## Duplicate delivery + consumer kill -9 + broker restart under traffic, then verify (~2 min)
+	$(PY) -m sim.drill $(DRILL_FLAGS)
+
+load: bench-up k6 sim-world build-aggregator ## Latency experiments (bench profile) -> docs/results/latency.md (~90 min; idle machine)
+	$(PY) -m loadtest.run --plan full $(LOAD_FLAGS)
+	$(PY) -m loadtest.report
+
+load-smoke: bench-up k6 sim-world build-aggregator ## Short make load (1 repeat, 15 s runs) -> artifacts/latency/smoke.md
+	$(PY) -m loadtest.run --plan smoke --out artifacts/latency/smoke.json $(LOAD_FLAGS)
+	$(PY) -m loadtest.report --results artifacts/latency/smoke.json --out artifacts/latency/smoke.md
+
+latency-report: ## Re-render docs/results/latency.md from artifacts/latency/results.json
+	$(PY) -m loadtest.report
+
 test: lint test-ml test-model-server test-go ## Lint and run the Python and Go tests (DB / Redis tests skip when the stack is down)
 
-lint: ## ruff check + format check (ml, model_server)
-	$(UV) ruff check ml
-	$(UV) ruff format --check ml
+PYDIRS := ml sim loadtest analysis
+lint: ## ruff check + format check (ml, sim, loadtest, analysis, model_server)
+	$(UV) ruff check $(PYDIRS)
+	$(UV) ruff format --check $(PYDIRS)
 	$(MS) ruff check model_server
 	$(MS) ruff format --check model_server
 
@@ -164,8 +249,8 @@ e2e: ## Browser check (needs the three servers): click an item, reload, recommen
 	cd web && RECLOOP_WEB_URL=http://localhost:$(WEB_PORT) npx playwright test
 
 fmt: ## Format and auto-fix
-	$(UV) ruff format ml
-	$(UV) ruff check --fix ml
+	$(UV) ruff format $(PYDIRS)
+	$(UV) ruff check --fix $(PYDIRS)
 	$(MS) ruff format model_server
 	$(MS) ruff check --fix model_server
 	cd serving && gofmt -w cmd internal

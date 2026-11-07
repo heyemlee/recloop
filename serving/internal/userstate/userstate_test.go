@@ -93,3 +93,36 @@ func TestSeenWindow(t *testing.T) {
 		t.Fatalf("after a click: %+v", uc)
 	}
 }
+
+func TestApplyBatchMatchesApplyAndReloadsTheScript(t *testing.T) {
+	s, mr := newStore(t)
+	ctx := context.Background()
+	now := time.Now()
+	batch := []Change{
+		{EventID: "b1", UserID: 3, ItemID: 10, Kind: KindHistory, At: now.Add(-3 * time.Second)},
+		{EventID: "b2", UserID: 3, ItemID: 11, Kind: KindImpression, At: now.Add(-2 * time.Second)},
+		{EventID: "b3", UserID: 3, ItemID: 12, Kind: KindPurchase, At: now.Add(-time.Second)},
+		{EventID: "b1", UserID: 3, ItemID: 10, Kind: KindHistory, At: now.Add(-3 * time.Second)}, // redelivered in the same batch
+	}
+	got, err := s.ApplyBatch(ctx, batch, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []bool{true, true, true, false}; len(got) != 4 || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] || got[3] != want[3] {
+		t.Fatalf("applied %v", got)
+	}
+	// Redis lost its script cache (restart): the next batch reloads it; the old events are
+	// still recognised as duplicates.
+	mr.FlushAll()
+	if _, err := s.ApplyBatch(ctx, batch[:1], now); err != nil {
+		t.Fatalf("after a script flush: %v", err)
+	}
+	s.R.ScriptFlush(ctx)
+	got, err = s.ApplyBatch(ctx, []Change{batch[0], {EventID: "b4", UserID: 3, ItemID: 13, Kind: KindHistory, At: now}}, now)
+	if err != nil {
+		t.Fatalf("NOSCRIPT was not handled: %v", err)
+	}
+	if got[0] || !got[1] {
+		t.Fatalf("applied %v after reload", got)
+	}
+}

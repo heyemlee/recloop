@@ -19,9 +19,10 @@ var (
 
 const insertEvent = `-- name: InsertEvent :batchone
 INSERT INTO events_raw (
-  event_id, event_day, type, user_id, request_id, impression_id, item_id, payload, client_ts
+  event_id, event_day, type, user_id, request_id, impression_id, item_id, payload, client_ts,
+  server_ts
 ) VALUES (
-  $1, $2, $3, $4, $5, $6, $7, $8, $9
+  $1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10::timestamptz, now())
 )
 ON CONFLICT (event_id, event_day) DO NOTHING
 RETURNING event_id
@@ -43,10 +44,13 @@ type InsertEventParams struct {
 	ItemID       pgtype.Int4
 	Payload      []byte
 	ClientTs     pgtype.Timestamptz
+	ServerTs     pgtype.Timestamptz
 }
 
 // One statement per event, sent as a single pgx batch. A duplicate event_id (same event_day,
-// since the day comes from the event_id itself) returns no row.
+// since the day comes from the event_id itself) returns no row. server_ts is when the api
+// accepted the event (now() if unknown). A new purchase also creates its order and takes one
+// unit of stock, in the same statement (trigger, migration 00005).
 func (q *Queries) InsertEvent(ctx context.Context, arg []InsertEventParams) *InsertEventBatchResults {
 	batch := &pgx.Batch{}
 	for _, a := range arg {
@@ -60,6 +64,7 @@ func (q *Queries) InsertEvent(ctx context.Context, arg []InsertEventParams) *Ins
 			a.ItemID,
 			a.Payload,
 			a.ClientTs,
+			a.ServerTs,
 		}
 		batch.Queue(insertEvent, vals...)
 	}

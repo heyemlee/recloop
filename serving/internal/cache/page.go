@@ -1,10 +1,11 @@
-// Package cache holds what the api keeps in Redis between requests. M1: result pages
-// (page:{request_id}, design §4.5); the candidate cache comes in M2.
+// Package cache holds what the api keeps in Redis between requests (design §4.5): result pages
+// (page:{request_id}, 10 minutes) and the candidate cache (cand:..., 5 minutes).
 package cache
 
 import (
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/klauspost/compress/s2"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/heyemlee/recloop/serving/internal/experiment"
@@ -37,8 +39,58 @@ type Page struct {
 	ConfigVersion int                              `json:"config_version"`
 	Degraded      []string                         `json:"degraded"`
 	HV            int64                            `json:"hv"`
-	Items         []mixer.Fused                    `json:"items"`
+	Items         []mixer.Fused                    `json:"items,omitempty"`
 	CreatedAt     time.Time                        `json:"created_at"`
+}
+
+const pageFormat = 'P'
+
+// EncodePage: 'P', the request metadata as JSON, the items in the binary list format;
+// s2-compressed.
+func EncodePage(pg *Page) ([]byte, error) {
+	meta := *pg
+	meta.Items = nil
+	head, err := json.Marshal(&meta)
+	if err != nil {
+		return nil, err
+	}
+	b := make([]byte, 0, 16+len(head)+36*len(pg.Items))
+	b = append(b, pageFormat)
+	b = binary.AppendUvarint(b, uint64(len(head)))
+	b = append(b, head...)
+	b = appendFused(b, pg.Items)
+	return s2.Encode(nil, b), nil
+}
+
+// DecodePage reverses EncodePage; it also reads the JSON pages M1 stored.
+func DecodePage(raw []byte) (*Page, error) {
+	var pg Page
+	if len(raw) > 0 && raw[0] == '{' {
+		if err := json.Unmarshal(raw, &pg); err != nil {
+			return nil, err
+		}
+		return &pg, nil
+	}
+	b, err := s2.Decode(nil, raw)
+	if err != nil {
+		return nil, fmt.Errorf("page: %w", err)
+	}
+	r := &reader{b: b}
+	if r.byte() != pageFormat {
+		return nil, errCorrupt
+	}
+	head := r.bytes(r.uvarint())
+	if r.err != nil {
+		return nil, r.err
+	}
+	if err := json.Unmarshal(head, &pg); err != nil {
+		return nil, err
+	}
+	pg.Items = readFused(r)
+	if r.err != nil {
+		return nil, r.err
+	}
+	return &pg, nil
 }
 
 // ErrNoPage means the cursor's page expired or never existed.
@@ -48,11 +100,21 @@ var ErrNoPage = errors.New("page expired or unknown")
 type Pages struct{ R redis.UniversalClient }
 
 func (p Pages) Put(ctx context.Context, pg *Page) error {
-	raw, err := json.Marshal(pg)
+	raw, err := EncodePage(pg)
 	if err != nil {
 		return err
 	}
 	return p.R.Set(ctx, PageKey(pg.RequestID), raw, PageTTL).Err()
+}
+
+// PutCmd queues the page on a pipeline.
+func (p Pages) PutCmd(ctx context.Context, pipe redis.Pipeliner, pg *Page) error {
+	raw, err := EncodePage(pg)
+	if err != nil {
+		return err
+	}
+	pipe.Set(ctx, PageKey(pg.RequestID), raw, PageTTL)
+	return nil
 }
 
 func (p Pages) Get(ctx context.Context, requestID uuid.UUID) (*Page, error) {
@@ -63,11 +125,7 @@ func (p Pages) Get(ctx context.Context, requestID uuid.UUID) (*Page, error) {
 	if err != nil {
 		return nil, err
 	}
-	var pg Page
-	if err := json.Unmarshal(raw, &pg); err != nil {
-		return nil, err
-	}
-	return &pg, nil
+	return DecodePage(raw)
 }
 
 // Cursor points into a page: the request and the offset of the next item.

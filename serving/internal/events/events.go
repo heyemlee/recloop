@@ -1,6 +1,8 @@
-// Package events validates client events and writes them (design §7): PostgreSQL events_raw
-// first (the durable log, deduplicated by event_id), then the user's state in Redis (deduplicated
-// by its own marker). M1 writes both synchronously from the api; M2 puts Redpanda in between.
+// Package events validates client events and hands them to the event log (design §7): the api
+// writes every accepted event to the Redpanda topic `events` (key = user_id) and answers 202;
+// the consumers (aggregator -> Redis, log-sink -> PostgreSQL events_raw, billing from M3) each
+// deduplicate by event_id on their side. Direct is M1's synchronous path (PostgreSQL, then
+// Redis), kept for tests and for running without Redpanda.
 package events
 
 import (
@@ -33,6 +35,9 @@ const (
 	MaxSkew = 5 * time.Minute
 )
 
+// MaxAdToken bounds the ad_token of a sponsored click (verified by billing, M3).
+const MaxAdToken = 1024
+
 // ClientEvent is the wire format of POST /v1/events.
 type ClientEvent struct {
 	EventID      string          `json:"event_id"`
@@ -41,6 +46,7 @@ type ClientEvent struct {
 	ItemID       *int32          `json:"item_id"`
 	RequestID    string          `json:"request_id,omitempty"`
 	ImpressionID string          `json:"impression_id,omitempty"`
+	AdToken      string          `json:"ad_token,omitempty"`  // sponsored slots only (design §7.1, §9.3)
 	ClientTS     string          `json:"client_ts,omitempty"` // RFC 3339
 	Props        json.RawMessage `json:"props,omitempty"`     // small object, stored as payload
 }
@@ -55,7 +61,9 @@ type Event struct {
 	ItemID       int32
 	RequestID    uuid.NullUUID
 	ImpressionID string
+	AdToken      string    // sponsored clicks; billing verifies it (M3)
 	ClientTS     time.Time // zero if not sent
+	Received     time.Time // when the api accepted the event (events_raw.server_ts)
 	Payload      []byte    // nil if no props
 }
 
@@ -120,7 +128,7 @@ func Validate(ce ClientEvent, now time.Time, knownItem func(int32) bool) (Event,
 	if ce.ItemID == nil || !knownItem(*ce.ItemID) {
 		return Event{}, errors.New("item_id is required and must be a catalog item")
 	}
-	ev := Event{ID: id, Day: Day(at), Time: at, Type: ce.Type, UserID: *ce.UserID, ItemID: *ce.ItemID}
+	ev := Event{ID: id, Day: Day(at), Time: at, Type: ce.Type, UserID: *ce.UserID, ItemID: *ce.ItemID, Received: now.UTC()}
 
 	if ce.ImpressionID != "" {
 		rid, _, err := ParseImpressionID(ce.ImpressionID)
@@ -141,6 +149,15 @@ func Validate(ce ClientEvent, now time.Time, knownItem func(int32) bool) (Event,
 			return Event{}, errors.New("request_id does not match impression_id")
 		}
 		ev.RequestID = uuid.NullUUID{UUID: rid, Valid: true}
+	}
+	if ce.AdToken != "" {
+		if ce.Type != TypeClick || ce.ImpressionID == "" {
+			return Event{}, errors.New("ad_token belongs to a click with an impression_id")
+		}
+		if len(ce.AdToken) > MaxAdToken {
+			return Event{}, errors.New("ad_token is too long")
+		}
+		ev.AdToken = ce.AdToken
 	}
 	if ce.ClientTS != "" {
 		ts, err := time.Parse(time.RFC3339Nano, ce.ClientTS)

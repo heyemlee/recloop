@@ -21,6 +21,7 @@ import (
 	"github.com/heyemlee/recloop/serving/internal/experiment"
 	"github.com/heyemlee/recloop/serving/internal/mixer"
 	"github.com/heyemlee/recloop/serving/internal/recall"
+	"github.com/heyemlee/recloop/serving/internal/resilience"
 	"github.com/heyemlee/recloop/serving/internal/store"
 	"github.com/heyemlee/recloop/serving/internal/store/db"
 	"github.com/heyemlee/recloop/serving/internal/testutil"
@@ -28,6 +29,10 @@ import (
 )
 
 const nItems = 40
+
+// testPlan is generous: the integration tests check behaviour, not latency.
+var testPlan = resilience.Plan{Total: 2 * time.Second, UserContext: 500 * time.Millisecond, CacheGet: 200 * time.Millisecond,
+	Recall: 500 * time.Millisecond, Rank: 100 * time.Millisecond, Tail: 500 * time.Millisecond}
 
 // fixture: an api on the test database and Redis DB 15, with in-process sources only.
 type fixture struct {
@@ -73,13 +78,14 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatal(err)
 	}
 	bg, cancel := context.WithCancel(context.Background())
-	served := events.NewServedWriter(st, 128, log)
+	served := events.NewServedWriter(events.PGServed{DB: st}, 128, log)
 	go served.Run(bg, 50, 10*time.Millisecond)
 	users := userstate.Store{R: rdb}
 	s := &api.Server{
 		Catalog: cat, Bundle: b, Users: users, Pages: cache.Pages{R: rdb}, Exps: exps,
-		Events: &events.Service{DB: st, State: users, OnStock: cat.SetStock, Now: time.Now},
-		Served: served, Redis: rdb,
+		Cands:  &cache.CandidateCache{R: rdb},
+		Events: &events.Direct{DB: st, State: users, OnStock: cat.SetStock, Now: time.Now},
+		Served: served, Redis: rdb, Plan: testPlan,
 		Sources: map[string][]mixer.Spec{
 			recall.SurfaceHome: {
 				{Source: recall.ItemCF{B: b}, Timeout: 50 * time.Millisecond, K: 200},
@@ -309,7 +315,7 @@ func TestServedLogsAndPaging(t *testing.T) {
 
 	// The database refuses a served row without attribution.
 	bad, _ := events.Served(3, uuid.Must(uuid.NewV7()), []byte(`{"exp": {}}`))
-	if err := f.st.InsertServed(context.Background(), []db.InsertEventParams{bad}); err == nil {
+	if err := f.st.InsertServed(context.Background(), []db.InsertEventParams{events.Params(bad)}); err == nil {
 		t.Fatal("served event without model_ver was accepted")
 	}
 }

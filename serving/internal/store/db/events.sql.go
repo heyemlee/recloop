@@ -11,35 +11,80 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const decrementStock = `-- name: DecrementStock :one
-UPDATE items SET stock = stock - 1
-WHERE item_id = $1 AND stock > 0
-RETURNING stock
+const replayEvents = `-- name: ReplayEvents :many
+SELECT event_id, type, user_id, item_id
+FROM events_raw
+WHERE event_day = $1
+  AND type IN ('impression', 'click', 'add_to_cart', 'purchase')
+  AND event_id > $2
+ORDER BY event_id
+LIMIT $3
 `
 
-func (q *Queries) DecrementStock(ctx context.Context, itemID int32) (int32, error) {
-	row := q.db.QueryRow(ctx, decrementStock, itemID)
-	var stock int32
-	err := row.Scan(&stock)
-	return stock, err
+type ReplayEventsParams struct {
+	EventDay pgtype.Date
+	After    pgtype.UUID
+	N        int32
 }
 
-const insertOrder = `-- name: InsertOrder :one
-INSERT INTO orders (user_id, item_id, event_id)
-VALUES ($1, $2, $3)
-ON CONFLICT (event_id) DO NOTHING
-RETURNING order_id
-`
-
-type InsertOrderParams struct {
-	UserID  int64
-	ItemID  int32
+type ReplayEventsRow struct {
 	EventID pgtype.UUID
+	Type    string
+	UserID  int64
+	ItemID  pgtype.Int4
 }
 
-func (q *Queries) InsertOrder(ctx context.Context, arg InsertOrderParams) (int64, error) {
-	row := q.db.QueryRow(ctx, insertOrder, arg.UserID, arg.ItemID, arg.EventID)
-	var order_id int64
-	err := row.Scan(&order_id)
-	return order_id, err
+// Client events of one day in event_id (= UUIDv7 time) order, for rebuilding Redis.
+func (q *Queries) ReplayEvents(ctx context.Context, arg ReplayEventsParams) ([]ReplayEventsRow, error) {
+	rows, err := q.db.Query(ctx, replayEvents, arg.EventDay, arg.After, arg.N)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ReplayEventsRow
+	for rows.Next() {
+		var i ReplayEventsRow
+		if err := rows.Scan(
+			&i.EventID,
+			&i.Type,
+			&i.UserID,
+			&i.ItemID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const stockOf = `-- name: StockOf :many
+SELECT item_id, stock FROM items WHERE item_id = ANY($1::int[])
+`
+
+type StockOfRow struct {
+	ItemID int32
+	Stock  int32
+}
+
+func (q *Queries) StockOf(ctx context.Context, itemIds []int32) ([]StockOfRow, error) {
+	rows, err := q.db.Query(ctx, stockOf, itemIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []StockOfRow
+	for rows.Next() {
+		var i StockOfRow
+		if err := rows.Scan(&i.ItemID, &i.Stock); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

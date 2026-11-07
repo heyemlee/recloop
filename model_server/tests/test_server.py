@@ -4,6 +4,9 @@ The real bundle (artifacts/bundles/current) is exercised too when it exists: it 
 pass its golden queries and answer Retrieve over gRPC.
 """
 
+import json
+import time
+import urllib.request
 from pathlib import Path
 
 import faiss
@@ -12,6 +15,7 @@ import numpy as np
 import pytest
 from grpc_health.v1 import health_pb2, health_pb2_grpc
 
+from model_server import admin
 from model_server import bundle as bundle_mod
 from model_server.rpc import SERVICE_NAME, pb, pb_grpc
 from model_server.server import DEFAULT_BUNDLE, serve
@@ -155,3 +159,69 @@ def test_real_bundle_loads_and_serves():
         assert scores == sorted(scores, reverse=True)
     finally:
         server.stop(None)
+
+
+def test_fault_draws_follow_the_probability():
+    f = admin.Faults(admin.FaultSettings(delay_ms=200, probability=0.3), seed=1)
+    draws = [f.draw() for _ in range(20_000)]
+    share = sum(d > 0 for d in draws) / len(draws)
+    assert abs(share - 0.3) < 0.01
+    assert {d for d in draws if d > 0} == {0.2}
+    f.set(0, 0)
+    assert f.draw() == 0
+    with pytest.raises(ValueError):
+        f.set(10, 1.5)
+
+
+def _aborts(where: str) -> float:
+    return admin.DEADLINE_ABORTS.labels(where)._value.get()
+
+
+def test_injected_delay_respects_the_callers_deadline(toy):
+    faults = admin.Faults(admin.FaultSettings(delay_ms=400, probability=1.0))
+    try:
+        server, port = serve(toy[0], "127.0.0.1", 0, workers=4, faults=faults)
+    except (RuntimeError, OSError) as e:
+        pytest.skip(f"cannot bind a local port: {e}")
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            s = pb_grpc.ModelServerStub(channel)
+            before = _aborts("after_delay")
+            t0 = time.monotonic()
+            with pytest.raises(grpc.RpcError) as e:
+                s.Retrieve(pb.RetrieveRequest(history=[1, 2], k=5), timeout=0.05)
+            assert e.value.code() == grpc.StatusCode.DEADLINE_EXCEEDED
+            assert time.monotonic() - t0 < 0.3
+            # The server gives up at the deadline too, not after the full 400 ms.
+            deadline = time.monotonic() + 1
+            while _aborts("after_delay") == before and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert _aborts("after_delay") == before + 1
+            # Without a deadline the caller waits the whole delay (the naive client).
+            t0 = time.monotonic()
+            resp = s.Retrieve(pb.RetrieveRequest(history=[1, 2], k=5))
+            assert time.monotonic() - t0 >= 0.4 and len(resp.organic) == 5
+    finally:
+        server.stop(None)
+
+
+def test_admin_port_sets_faults_and_serves_metrics():
+    faults = admin.Faults()
+    try:
+        httpd = admin.serve_admin(faults, "127.0.0.1", 0)
+    except OSError as e:
+        pytest.skip(f"cannot bind a local port: {e}")
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+    try:
+        req = urllib.request.Request(
+            base + "/fault",
+            data=json.dumps({"delay_ms": 200, "probability": 0.3}).encode(),
+            method="PUT",
+        )
+        with urllib.request.urlopen(req, timeout=5) as r:
+            assert json.loads(r.read()) == {"delay_ms": 200.0, "probability": 0.3}
+        assert faults.get() == admin.FaultSettings(200, 0.3)
+        with urllib.request.urlopen(base + "/metrics", timeout=5) as r:
+            assert b"recloop_ms_retrieve_seconds" in r.read()
+    finally:
+        httpd.shutdown()

@@ -1,15 +1,17 @@
-// Package testutil gives integration tests a real PostgreSQL test database and a Redis
-// database, and skips the test when they are not reachable (run `make up`).
+// Package testutil gives integration tests a real PostgreSQL test database, a Redis database
+// and the Redpanda broker, and skips the test when they are not reachable (run `make up`).
 package testutil
 
 import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -104,6 +106,13 @@ func SeedItems(t *testing.T, st *store.Store, n int, stock func(i int) int) {
 // Redis returns a client on database 15 of the dev Redis, flushed.
 func Redis(t *testing.T) *redis.Client {
 	t.Helper()
+	return RedisDB(t, testRedisDB)
+}
+
+// RedisDB returns a client on database db of the dev Redis, flushed. Packages whose tests may
+// run at the same time use different databases.
+func RedisDB(t *testing.T, db int) *redis.Client {
+	t.Helper()
 	raw := os.Getenv("REDIS_URL")
 	if raw == "" {
 		raw = defaultRedisURL
@@ -112,7 +121,7 @@ func Redis(t *testing.T) *redis.Client {
 	if err != nil {
 		t.Fatal(err)
 	}
-	opts.DB = testRedisDB
+	opts.DB = db
 	c := redis.NewClient(opts)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -124,4 +133,21 @@ func Redis(t *testing.T) *redis.Client {
 	}
 	t.Cleanup(func() { c.Close() })
 	return c
+}
+
+// Brokers returns the dev Redpanda's seed brokers, or skips the test when it is not reachable.
+func Brokers(t *testing.T) []string {
+	t.Helper()
+	raw := os.Getenv("KAFKA_BROKERS")
+	if raw == "" {
+		raw = "localhost:19092"
+	}
+	brokers := strings.Split(raw, ",")
+	d := net.Dialer{Timeout: time.Second}
+	conn, err := d.Dial("tcp", brokers[0])
+	if err != nil {
+		t.Skipf("Redpanda not reachable (%v): run `make up`", err)
+	}
+	conn.Close()
+	return brokers
 }

@@ -1,0 +1,4 @@
+[
+  {"name": "model_server", "listen": "0.0.0.0:18091", "upstream": "model-server:18081", "enabled": true},
+  {"name": "redis", "listen": "0.0.0.0:16391", "upstream": "redis:6379", "enabled": true}
+]

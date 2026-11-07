@@ -56,14 +56,17 @@ class Bundle:
                 x[row, self.history_len - len(w) :] = np.asarray(w, dtype=np.int64) + 1
         return np.ascontiguousarray(self.encoder.run(None, {"history": x})[0], dtype=np.float32)
 
+    def search(self, user: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
+        """Top-k item ids and inner-product scores for one (1, dim) user vector."""
+        scores, rows = self.index.search(user, min(k, self.num_items))
+        keep = rows[0] >= 0
+        return self.item_ids[rows[0][keep]], scores[0][keep]
+
     def retrieve(self, history: Sequence[int], k: int) -> tuple[np.ndarray, np.ndarray]:
         """Top-k item ids and inner-product scores for one history; empty without history."""
         if k <= 0 or not self.window(history):
             return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float32)
-        user = self.encode([history])
-        scores, rows = self.index.search(user, min(k, self.num_items))
-        keep = rows[0] >= 0
-        return self.item_ids[rows[0][keep]], scores[0][keep]
+        return self.search(self.encode([history]), k)
 
 
 def sha256_file(path: Path) -> str:

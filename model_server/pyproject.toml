@@ -10,6 +10,10 @@ dependencies = [
     "grpcio-health-checking>=1.68",
     "numpy>=2.1",
     "onnxruntime>=1.20",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.40",
+    "opentelemetry-instrumentation-grpc>=0.61b0",
+    "opentelemetry-sdk>=1.40",
+    "prometheus-client>=0.21",
     "protobuf>=5.29",
 ]
 
