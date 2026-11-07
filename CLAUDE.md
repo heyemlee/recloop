@@ -32,12 +32,17 @@ write-ups in `docs/results/`.
 deploy/docker-compose.yml   PostgreSQL 18 + pgvector, Redis (ports 127.0.0.1:15432 / 16390)
 proto/                      buf workspace; recloop/modelserver/v1/model_server.proto (design §13.2)
 serving/                    Go module github.com/heyemlee/recloop/serving
-  cmd/api/                  HTTP api (:18080): /v1/recommendations, /v1/events, /v1/items/{id}, ...
+  cmd/api/                  HTTP api (:18080): /v1/recommendations, /v1/events, /v1/items/{id},
+                            /v1/advertisers, /v1/campaigns[/{id}[/report]], ...
   internal/                 api, mixer (fan-out, RRF, filters), recall, experiment, events,
-                            userstate (Redis + apply.lua), cache (pages), catalog, bundle, store
+                            userstate (Redis + apply.lua), cache (pages), catalog, bundle, store,
+                            ads (GSP auction, pCTR interface, campaign settings), adtoken (signed
+                            ad_token), billing (charge transaction, Redis spend.lua)
   internal/store/db/        sqlc output; queries in internal/store/queries, schema = migrations/
+  internal/testutil/        test DB per package (recloop_test_<package>) and Redis DB 15
   migrations/               goose (00001 catalog, 00002 events/orders/experiments/models,
-                            00003 default experiment, 00004 text_emb stored inline)
+                            00003 default experiment, 00004 text_emb stored inline,
+                            00005 advertisers, campaigns, budget rows, ad_charges, ad_clicks)
   gen/                      protoc-gen-go output
 model_server/               Python 3.12 uv project (own .venv): gRPC Retrieve over a bundle (:18081)
 ml/                         Python 3.12 uv project (own .venv); run modules from the repo root
@@ -49,7 +54,8 @@ ml/                         Python 3.12 uv project (own .venv); run modules from
   ann/                      ANN benchmark (FAISS Flat / IVF / HNSW / IVF-PQ) and index updates
   experiment/               bucketing (Python twin of serving/internal/experiment)
   tests/
-web/                        Next.js 16 + shadcn/ui (:13000); /api/* is proxied to the Go api; e2e/
+web/                        Next.js 16 + shadcn/ui (:13000); /api/* is proxied to the Go api; e2e/;
+                            /advertiser is the advertiser console
 tools/                      go.mod pinning buf, protoc-gen-go(-grpc), sqlc (built into .cache/bin)
 testdata/                   bucket_vectors.json, shared by the Go and Python bucketing tests
 agent/ sim/ loadtest/ analysis/   later milestones
@@ -77,6 +83,7 @@ make serve-model   # model server on :18081 (bundle: artifacts/bundles/current)
 make serve-api     # Go api on :18080
 make serve-web     # Next.js dev server on :13000
 make test          # ruff + pytest (ml, model_server) + go vet/test; DB/Redis tests skip when down
+make test-props    # long run of the ads / ad_token / billing property tests (CHECKS=2000, ~4 min)
 make test-web      # tsc + eslint for web/
 make e2e           # Playwright (local Chrome): click an item, reload, the feed follows (servers up)
 make proto / sqlc  # regenerate gRPC / SQL code (tools built once into .cache/bin)
@@ -90,6 +97,11 @@ Makefile's `PY`); the model server is `uv run --project model_server ...` (`MS`)
 `cd serving && go ...`; goose is a Go tool (`go tool goose`), built with tags that drop every
 driver but Postgres (`GOOSE_TAGS`). `.claude/launch.json` starts the three servers for the
 preview browser. Ports and URLs are in `.env.example`.
+
+Go integration tests use `DATABASE_URL` / `REDIS_URL`: each test package gets its own database
+on that server (`recloop_test_<package>`, created, migrated and emptied by `testutil.PG`) and
+Redis DB 15. Several checkouts testing at once should each point them at a stack of their own
+(e.g. `docker compose -p <name> -f deploy/docker-compose.yml up` with other `RECLOOP_*_PORT`s).
 
 Caches (`UV_CACHE_DIR`, `GOMODCACHE`, `GOCACHE`, `BUF_CACHE_DIR`, npm) default to `.cache/` in
 the repo. Inside the Claude Code sandbox these must run outside it: docker, anything that
@@ -135,6 +147,30 @@ its own).
   config in the `experiments` table, reloaded every 10 s.
 - Bundle versions look like `2026-11-07-sasrec64-<content hash>`; the api registers the one it
   serves in `model_versions` (status active).
+
+## Ads and billing (M3, logic part)
+
+- Advertiser api: `GET/POST /v1/advertisers`; `GET/POST /v1/campaigns`, `GET/PATCH/DELETE
+  /v1/campaigns/{id}`, `GET /v1/campaigns/{id}/report?from&to`. PATCH needs `If-Match` with the
+  ETag (= `version`): 428 without it, 412 (with the current campaign) when it is stale. A new daily
+  budget also updates today's budget row in the same transaction, never below today's spend.
+  DELETE ends a campaign (terminal; rows stay for the ledger). Money is integer cents, days UTC.
+- Auction (`ads.Run`): eCPM = bid x pCTR with pCTR quantised to ppm (exact integer ranking);
+  GSP price = floor(eCPM(k+1) / pCTR(k)) + 1 cent, within [reserve 5 cents, own bid]; one slot per
+  advertiser; quality floor `MinPCTR`. pCTR comes from `ads.PCTRModel` (`FixedPCTR` stub for now).
+- `ad_token` (`adtoken`): HS256 JWT (golang-jwt) with rid, pos, cid, item, price, uid, iat, exp
+  (iat + 30 min); keys from `AD_TOKEN_KEYS` (`kid:secret,...`, first signs, all verify).
+- Billing (`billing.Service.Handle`, one transaction per click): claim the event_id in `ad_clicks`
+  (technical dedup) -> lock the campaign's budget row for the day the impression was served ->
+  billed = min(token price, budget - spent) -> insert into `ad_charges`, keyed by impression_id
+  (business dedup) -> spent += billed; after COMMIT, Redis `spend:{cid}:{yyyymmdd}` once per
+  event (`spend.lua`). Token expiry is judged at the click's receive time (stamped by the api),
+  not at processing time. Not wired to the mixer or Redpanda yet.
+- Property tests (rapid; billing ones against PostgreSQL): a sequential model with technical
+  and business duplicates, late / forged / mismatched clicks, budget changes and crashes at every
+  step must match the database exactly; concurrent workers must give the order-independent
+  truth (one charge per clicked impression, spend = min(budget, prices), each outcome counted
+  once). `make test` runs 30 cases each, `make test-props` 2,000.
 
 ## Evaluation protocol
 

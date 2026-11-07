@@ -15,8 +15,9 @@ API_ADDR ?= 127.0.0.1:$(API_PORT)
 MODEL_SERVER_ADDR ?= 127.0.0.1:$(MODEL_SERVER_PORT)
 RECLOOP_API_URL ?= http://$(API_ADDR)
 RECLOOP_BUNDLE ?= $(CURDIR)/artifacts/bundles/current
+AD_TOKEN_KEYS ?= dev1:recloop-dev-only-ad-token-key-not-a-secret-0001
 export RECLOOP_PG_PORT RECLOOP_REDIS_PORT DATABASE_URL REDIS_URL API_ADDR MODEL_SERVER_PORT \
-	MODEL_SERVER_ADDR RECLOOP_API_URL RECLOOP_BUNDLE
+	MODEL_SERVER_ADDR RECLOOP_API_URL RECLOOP_BUNDLE AD_TOKEN_KEYS
 
 # Tool caches live in the repo (git-ignored) so the targets also work where ~/.cache is not
 # writable, e.g. for sandboxed coding agents. Set them in the environment to use global caches.
@@ -44,7 +45,7 @@ TOOL_PKGS := github.com/bufbuild/buf/cmd/buf google.golang.org/protobuf/cmd/prot
 
 .PHONY: help setup up down down-volumes migrate migrate-status data data-weights ingest train \
 	paper-sasrec eval ann bundle seed tools proto sqlc generate build-api serve-model serve-api \
-	serve-web web-install test lint test-ml test-model-server test-go test-web e2e fmt \
+	serve-web web-install test lint test-ml test-model-server test-go test-web test-props e2e fmt \
 	clean-processed clean-artifacts
 
 help: ## List targets
@@ -156,6 +157,13 @@ test-go:
 	@cd serving && unformatted="$$(gofmt -l cmd internal)" && \
 		if [ -n "$$unformatted" ]; then echo "gofmt needed: $$unformatted"; exit 1; fi
 	cd serving && GOFLAGS=-modcacherw go vet ./... && GOFLAGS=-modcacherw go test ./...
+
+# Property tests (rapid) run a moderate number of cases in `make test` (billing: 30 per
+# property, against PostgreSQL); this runs many more.
+CHECKS ?= 2000
+test-props: ## Long run of the ads / ad_token / billing property tests (CHECKS=2000 each, ~4 min; needs PostgreSQL)
+	cd serving && GOFLAGS=-modcacherw go test ./internal/ads/ ./internal/adtoken/ ./internal/billing/ \
+		-count=1 -timeout 0 -rapid.checks=$(CHECKS)
 
 test-web: ## Type-check and lint the web app (next typegen first: tsc needs the route types)
 	cd web && npx next typegen && npx tsc --noEmit && npm run lint

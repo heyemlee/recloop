@@ -79,7 +79,7 @@ func newFixture(t *testing.T) *fixture {
 	s := &api.Server{
 		Catalog: cat, Bundle: b, Users: users, Pages: cache.Pages{R: rdb}, Exps: exps,
 		Events: &events.Service{DB: st, State: users, OnStock: cat.SetStock, Now: time.Now},
-		Served: served, Redis: rdb,
+		Served: served, Redis: rdb, Campaigns: st,
 		Sources: map[string][]mixer.Spec{
 			recall.SurfaceHome: {
 				{Source: recall.ItemCF{B: b}, Timeout: 50 * time.Millisecond, K: 200},
