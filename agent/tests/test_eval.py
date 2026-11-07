@@ -4,7 +4,7 @@ import pytest
 
 from agent import constraints
 from agent.eval import cases as case_io
-from agent.eval import judge, metrics, report
+from agent.eval import harness, judge, metrics, report
 from agent.schema import Constraints
 from agent.tests.conftest import ITEMS
 
@@ -119,6 +119,14 @@ def test_unsatisfiable_case_succeeds_only_with_nothing_violating():
     assert empty.success and not empty.parse_ok
     shown = metrics.score_case("c", "t", 1, gold, eff, set(), ROWS, record([7], None))
     assert shown.hard_violations == 1 and not shown.success
+
+
+def test_snapshot_records_orders_and_the_report_says_if_stock_is_as_ingested(catalog):
+    snap = harness.snapshot(catalog.all_items(), catalog.order_count())
+    assert snap["orders"] == 2 and snap["items"] == len(ITEMS)
+    assert "fresh database" in report.database_note({**snap, "orders": 0})
+    assert report.database_note({**snap, "orders": 22246}).startswith("22,246 orders")
+    assert "belong to this snapshot" in report.database_note({"items": 3})
 
 
 def test_quantile_and_summary():

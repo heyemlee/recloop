@@ -6,7 +6,8 @@ parses, judges compatibility and explains with a language model. The search vari
 oracle isolate retrieval: BM25 only, vectors only, and the query without bge's instruction.
 
 Gold constraints, satisfiable sets and violations are computed on one snapshot of the items
-table taken when the run starts; its fingerprint goes into the run file and the report.
+table taken when the run starts; its fingerprint and the number of orders (each one took a unit
+of stock) go into the run file and the report.
 """
 
 from __future__ import annotations
@@ -52,7 +53,7 @@ def llm_spec(model: str, repeat: int) -> AgentSpec:
     )
 
 
-def snapshot(items: list[Item]) -> dict[str, Any]:
+def snapshot(items: list[Item], orders: int) -> dict[str, Any]:
     h = hashlib.sha256()
     for it in items:
         h.update(f"{it.item_id},{it.stock},{it.price_cents}\n".encode())
@@ -60,6 +61,7 @@ def snapshot(items: list[Item]) -> dict[str, Any]:
         "items": len(items),
         "in_stock": sum(it.stock > 0 for it in items),
         "priced": sum(it.price_cents is not None for it in items),
+        "orders": orders,
         "fingerprint": h.hexdigest()[:12],
     }
 
@@ -79,6 +81,7 @@ def run_agent(
     if spec.parser == "llm" and (llm is None or max_cost_usd is None):
         raise ValueError("an LLM agent needs an LLM client and a cost cap")
     items = catalog.all_items()
+    snap = snapshot(items, catalog.order_count())
     rows = {it.item_id: it for it in items}
     by_category = {
         k: [it for it in items if taxonomy.in_category(it.categories, k)] for k in taxonomy.KEYS
@@ -134,7 +137,7 @@ def run_agent(
         "agent": spec.name,
         "spec": asdict(spec),
         "encoder": catalog.encoder.name,
-        "snapshot": snapshot(items),
+        "snapshot": snap,
         "partial": partial,
         "cost_usd": spent,
         "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

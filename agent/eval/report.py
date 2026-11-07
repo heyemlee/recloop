@@ -153,6 +153,22 @@ def _retrieval(run: dict) -> tuple[float | None, float | None]:
     return ratio(sum(shares), len(shares)), quantile(firsts, 0.5)
 
 
+def database_note(snap: dict[str, Any]) -> str:
+    """Whether stock was as ingested: purchases are the only thing that takes stock."""
+    orders = snap.get("orders")
+    if orders is None:  # run files from before the order count was recorded
+        return "Stock is simulated and changes with purchases, so the numbers below belong to this snapshot."
+    if orders == 0:
+        return (
+            "No orders had been placed, so stock is as `make ingest` sets it (simulated, fixed "
+            "seed): a fresh database, as after `make setup`."
+        )
+    return (
+        f"{orders:,} orders had been placed, each taking a unit of stock: not a fresh database, so "
+        "the numbers differ from a run after `make setup`."
+    )
+
+
 def render(runs: list[dict[str, Any]]) -> str:
     cases = load()
     by_name = {r["agent"]: r for r in runs}
@@ -169,8 +185,8 @@ def render(runs: list[dict[str, Any]]) -> str:
         f"- {len(cases)} cases in {len({c.template for c in cases})} templates (below); each has gold constraints, and the "
         "ones that refer to an earlier purchase carry their own purchase history.",
         f"- Items table at run time: {snap.get('items', '–'):,} items, {snap.get('in_stock', 0):,} in stock, "
-        f"{snap.get('priced', 0):,} with a known price (fingerprint `{snap.get('fingerprint', '–')}`). Stock is "
-        "simulated and changes with purchases, so the numbers below belong to this snapshot.",
+        f"{snap.get('priced', 0):,} with a known price (fingerprint `{snap.get('fingerprint', '–')}`). "
+        + database_note(snap),
         "- Every agent shares the pipeline: tools (`search_items`: BM25 + pgvector, RRF k=60, price / "
         "stock / category filters in SQL; `get_item_details`; `get_purchase_history`), code checks of "
         "every constraint on the item rows, device matching in code, replies rendered from the rows. "

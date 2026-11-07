@@ -273,6 +273,10 @@ class Catalog(ABC):
     def purchases(self, user_id: int, limit: int) -> list[Purchase]:
         """The user's orders, most recent first."""
 
+    @abstractmethod
+    def order_count(self) -> int:
+        """All orders. Each one took a unit of stock, so 0 means stock is as ingested."""
+
 
 def _passes_sql_filters(item: Item, f: SearchFilters) -> bool:
     """What PgCatalog's WHERE clause does, for MemoryCatalog."""
@@ -320,6 +324,9 @@ class MemoryCatalog(Catalog):
     def purchases(self, user_id: int, limit: int) -> list[Purchase]:
         rows = sorted(self.orders.get(user_id, []), key=lambda p: p.purchased_at, reverse=True)
         return rows[:limit]
+
+    def order_count(self) -> int:
+        return sum(len(rows) for rows in self.orders.values())
 
 
 class PgCatalog(Catalog):
@@ -384,3 +391,6 @@ class PgCatalog(Catalog):
             (user_id, limit),
         ).fetchall()
         return [Purchase(int(i), ts) for i, ts in rows]
+
+    def order_count(self) -> int:
+        return int(self.conn.execute("SELECT count(*) FROM orders").fetchone()[0])

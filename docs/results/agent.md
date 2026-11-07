@@ -7,7 +7,7 @@ edit by hand. Design: `docs/design.md` §10. Cases: `agent/eval/cases.jsonl`, ge
 ## Setup
 
 - 150 cases in 12 templates (below); each has gold constraints, and the ones that refer to an earlier purchase carry their own purchase history.
-- Items table at run time: 3,459 items, 3,336 in stock, 2,967 with a known price (fingerprint `f65b25233dcb`). Stock is simulated and changes with purchases, so the numbers below belong to this snapshot.
+- Items table at run time: 3,459 items, 3,347 in stock, 2,967 with a known price (fingerprint `697c6108ea5a`). No orders had been placed, so stock is as `make ingest` sets it (simulated, fixed seed): a fresh database, as after `make setup`.
 - Every agent shares the pipeline: tools (`search_items`: BM25 + pgvector, RRF k=60, price / stock / category filters in SQL; `get_item_details`; `get_purchase_history`), code checks of every constraint on the item rows, device matching in code, replies rendered from the rows. At most 3 items per reply.
 - Agents: **baseline** parses with rules (budget regex, category aliases, a brand dictionary, 'genuine / original / OEM', 'for / with <model>'), no language model. **oracle** is handed the gold constraints: the ceiling of the pipeline when the request is understood perfectly. The oracle variants change only the search.
 
@@ -110,11 +110,11 @@ Wall time of a turn in the evaluation process: parsing, tools against the local 
 
 | agent | P50 | P95 | parse P50 | search P50 | details P50 | compat P50 |
 |---|---|---|---|---|---|---|
-| baseline | 11 ms | 12 ms | 0.1 ms | 9.5 ms | 0.7 ms | 0.0 ms |
-| oracle | 10 ms | 13 ms | 0.0 ms | 9.2 ms | 0.7 ms | 0.0 ms |
-| oracle-bm25 | 2.1 ms | 3.9 ms | 0.0 ms | 1.3 ms | 0.6 ms | 0.0 ms |
-| oracle-vector | 10 ms | 13 ms | 0.0 ms | 9.2 ms | 0.7 ms | 0.0 ms |
-| oracle-noprefix | 9.0 ms | 13 ms | 0.0 ms | 8.2 ms | 0.6 ms | 0.0 ms |
+| baseline | 10 ms | 13 ms | 0.1 ms | 9.1 ms | 0.7 ms | 0.0 ms |
+| oracle | 9.5 ms | 12 ms | 0.0 ms | 8.6 ms | 0.6 ms | 0.0 ms |
+| oracle-bm25 | 2.0 ms | 3.8 ms | 0.0 ms | 1.2 ms | 0.5 ms | 0.0 ms |
+| oracle-vector | 9.5 ms | 11 ms | 0.0 ms | 8.7 ms | 0.6 ms | 0.0 ms |
+| oracle-noprefix | 8.9 ms | 11 ms | 0.0 ms | 8.1 ms | 0.6 ms | 0.0 ms |
 
 ## Prices used for costs
 

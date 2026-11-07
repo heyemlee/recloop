@@ -47,5 +47,6 @@ def test_vector_neighbours_come_from_pgvector(catalog):
     assert catalog._nearest(vec, [0, 1, 2, 3], 2)[0] == 0  # an item is its own nearest neighbour
 
 
-def test_purchases_query_runs(catalog):
+def test_order_queries_run(catalog):
     assert isinstance(catalog.purchases(-1, 5), list)
+    assert catalog.order_count() >= 0

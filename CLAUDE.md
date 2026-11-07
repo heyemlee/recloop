@@ -23,7 +23,10 @@ write-ups in `docs/results/`.
   `artifacts/latency/results.json`; `make agent-eval` writes `agent.md`); change the generator,
   not the file. The committed `offline.md` is `make setup`, then `make paper-sasrec`, then
   `make eval`. `make eval` re-runs give the same bytes; `make train` runs on the CPU with fixed
-  seeds, and two runs with the same worker / thread counts gave identical weights.
+  seeds, and two runs with the same worker / thread counts gave identical weights. The committed
+  `agent.md` is a fresh database (`make setup`: no orders, stock as ingested), then `make
+  agent-eval`; re-runs differ only in its latency table, and the report says when the database
+  had orders (each one took a unit of stock).
 - Generated code is committed: `serving/gen` and `model_server/gen` (`make proto`),
   `serving/internal/store/db` (`make sqlc`). Edit the `.proto` / SQL, then regenerate.
 - Adapted third-party code keeps its licence: `licenses/` (SASRec.pytorch, Apache-2.0).
