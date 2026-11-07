@@ -4,8 +4,9 @@ A small office-supplies store with personalized recommendations, sponsored items
 a shopping assistant. Go for the online layer, Python for models and offline work, PostgreSQL +
 pgvector, Redis, Redpanda.
 
-The design lives in `docs/design.md` (Chinese). Read §0 (summary) and §16 (milestones) first;
-decisions are logged in §19, ADRs in `docs/adr/`, experiment write-ups in `docs/results/`.
+The design lives in `docs/design.md` (Chinese; kept locally, not in the repo). Read §0 (summary)
+and §16 (milestones) first; decisions are logged in §19, ADRs in `docs/adr/`, experiment
+write-ups in `docs/results/`.
 
 ## Conventions
 
