@@ -320,16 +320,52 @@ def comparison(values: dict, users: np.ndarray) -> dict:
     return {"models": models, "pairs": pairs}
 
 
+def group_contrast(
+    diff: np.ndarray, a: np.ndarray, b: np.ndarray, resampler: bootstrap.Resampler
+) -> dict:
+    """mean(diff | a) - mean(diff | b), with a user-level bootstrap interval.
+
+    Both groups are resampled with the same draws of users (one user can have samples in both
+    groups), so the interval accounts for that correlation. `resampler` covers all samples of
+    `diff`. Replicates that draw no sample of a group are dropped (possible on tiny subsets).
+    """
+    n_users = resampler.weights.shape[1]
+
+    def group_means(mask: np.ndarray) -> np.ndarray:
+        sums = np.bincount(resampler.inverse, weights=np.where(mask, diff, 0.0), minlength=n_users)
+        counts = np.bincount(resampler.inverse, weights=mask.astype(np.float64), minlength=n_users)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            return (resampler.weights @ sums) / (resampler.weights @ counts)
+
+    reps = group_means(a) - group_means(b)
+    reps = reps[np.isfinite(reps)]
+    lo, hi = np.quantile(reps, [bootstrap.ALPHA / 2, 1 - bootstrap.ALPHA / 2])
+    return {
+        "value": float(diff[a].mean() - diff[b].mean()),
+        "ci": (float(lo), float(hi)),
+        "replicates": int(len(reps)),
+    }
+
+
 def segments(values: dict, users: np.ndarray, masks: dict) -> dict:
+    """Per segmentation: every group's metrics and paired differences (bootstrap inside the
+    group), and the contrast between its two groups of MiniOneRec - reference (joint bootstrap
+    over all users), which tests whether MiniOneRec gains more in one group than the other."""
+    everyone = bootstrap.Resampler.build(users)
     out = {}
     for seg, groups in masks.items():
-        out[seg] = {}
+        out[seg] = {"groups": {}, "contrast": None}
         for label, m in groups.items():
             if not m.any():  # possible on a small subset of users
-                out[seg][label] = {"samples": 0, "share": 0.0, "models": None, "pairs": None}
+                out[seg]["groups"][label] = {
+                    "samples": 0,
+                    "share": 0.0,
+                    "models": None,
+                    "pairs": None,
+                }
                 continue
             resampler = bootstrap.Resampler.build(users[m])
-            out[seg][label] = {
+            out[seg]["groups"][label] = {
                 "samples": int(m.sum()),
                 "share": float(m.mean()),
                 "models": {
@@ -344,6 +380,20 @@ def segments(values: dict, users: np.ndarray, masks: dict) -> dict:
                         },
                         resampler,
                     )
+                    for ref in REFERENCES
+                },
+            }
+        (label_a, a), (label_b, b) = groups.items()
+        if a.any() and b.any():
+            out[seg]["contrast"] = {
+                "groups": [label_a, label_b],
+                "pairs": {
+                    f"{NAME} - {ref}": {
+                        k: group_contrast(
+                            values[NAME]["item"][k] - values[ref]["item"][k], a, b, everyone
+                        )
+                        for k in SEGMENT_METRICS
+                    }
                     for ref in REFERENCES
                 },
             }

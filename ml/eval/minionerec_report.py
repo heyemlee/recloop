@@ -261,10 +261,11 @@ def _segment_section(out: dict, main: dict) -> list[str]:
         "split offline.md reports on).",
         "",
     ]
+    lines += _findings(main)
     for metric in SEGMENT_METRICS:
         rows = []
-        for key, groups in seg.items():
-            for label, g in groups.items():
+        for key, s in seg.items():
+            for label, g in s["groups"].items():
                 if g["models"] is None:
                     rows.append([SEGMENT_TITLES[key], label, "0"] + ["-"] * 6)
                     continue
@@ -283,7 +284,80 @@ def _segment_section(out: dict, main: dict) -> list[str]:
             ),
             "",
         ]
+    lines += _contrast_table(seg)
     return lines
+
+
+def _versus_sasrec(cell: dict) -> str:
+    lo, hi = cell["ci"]
+    if lo > 0:
+        return "higher than SASRec's"
+    if hi < 0:
+        return "lower than SASRec's"
+    return "not significantly different from SASRec's"
+
+
+def _findings(main: dict) -> list[str]:
+    """One generated sentence per segmentation: MiniOneRec - SASRec in each group, and whether
+    the gap between the groups is significant."""
+    ref = f"{NAME} - SASRec"
+    overall = main["comparison"]["pairs"][ref]["item"]["HR@10"]
+    lines = [
+        'Findings (HR@10, item rule; "significant" = the 95% interval excludes 0):',
+        "",
+        f"- **All samples**: {NAME}'s HR@10 is {_versus_sasrec(overall)} ({_signed(overall)}).",
+    ]
+    for key, s in main["segments"].items():
+        c = s["contrast"]
+        if c is None:
+            continue
+        a, b = c["groups"]
+        ga, gb = s["groups"][a]["pairs"][ref]["HR@10"], s["groups"][b]["pairs"][ref]["HR@10"]
+        gap = c["pairs"][ref]["HR@10"]
+        verdict = (
+            f"the difference is significantly larger on {a}"
+            if gap["ci"][0] > 0
+            else f"the difference is significantly larger on {b}"
+            if gap["ci"][1] < 0
+            else "the two groups do not differ significantly"
+        )
+        lines.append(
+            f"- **{SEGMENT_TITLES[key]}**: {NAME} - SASRec is {_signed(ga)} on {a} and "
+            f"{_signed(gb)} on {b} ({a} minus {b}: {_signed(gap)}); {verdict}."
+        )
+    lines.append("")
+    return lines
+
+
+def _contrast_table(seg: dict) -> list[str]:
+    rows = []
+    for key, s in seg.items():
+        c = s["contrast"]
+        if c is None:
+            continue
+        a, b = c["groups"]
+        rows.append(
+            [SEGMENT_TITLES[key], f"{a} minus {b}"]
+            + [
+                _signed(c["pairs"][f"{NAME} - {ref}"][m])
+                for ref in REFERENCES
+                for m in SEGMENT_METRICS
+            ]
+        )
+    if not rows:
+        return []
+    return [
+        "Between the two groups of a segment: (MiniOneRec - reference) in the first group minus "
+        "the same in the second, with a joint user-level bootstrap over all samples (a user can "
+        "have samples in both groups):",
+        "",
+        *_table(
+            ["Segment", "Contrast"]
+            + [f"{NAME} - {ref}, {m}" for ref in REFERENCES for m in SEGMENT_METRICS],
+            rows,
+        ),
+        "",
+    ]
 
 
 def _cost_section(out: dict) -> list[str]:

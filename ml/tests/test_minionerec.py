@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from ml import paths
-from ml.eval import calc_check, metrics, minionerec, minionerec_report
+from ml.eval import bootstrap, calc_check, metrics, minionerec, minionerec_report
 from ml.eval.splits import Split
 
 # Twelve items; items 1 and 3 share a SID (like the 15 duplicate listings in the catalog).
@@ -202,11 +202,37 @@ def test_build_and_render_end_to_end(tmp_path):
     expected = minionerec.generated_ranks(predict, test.target, SIDS, ctx.by_sid)["item"]
     assert item["HR@3"]["value"] == pytest.approx(np.mean(expected <= 3))
     assert set(main["segments"]) == {"history", "popularity", "category", "day"}
+    # the contrast is MiniOneRec - SASRec in the first group minus the same in the second
+    day = main["segments"]["day"]
+    assert day["contrast"]["groups"] == ["same day", "later day"]
+    diff = ctx.baselines["SASRec"]["item"]["HR@10"] * -1.0 + (expected <= 10)
+    want = diff[same_day].mean() - diff[~same_day].mean()
+    got = day["contrast"]["pairs"]["MiniOneRec - SASRec"]["HR@10"]
+    assert got["value"] == pytest.approx(want)
+    assert got["ci"][0] <= got["value"] <= got["ci"][1]
     text = minionerec_report.render(out)
     assert text == minionerec_report.render(json.loads(json.dumps(out)))  # deterministic
     for heading in ("## Reproduction", "## Compared with", "## Which users", "## Cost", "## Runs"):
         assert heading in text
     assert "Preliminary" not in text
+    assert "Findings (HR@10" in text and "Between the two groups" in text
+
+
+def test_group_contrast():
+    users = np.array([0, 0, 1, 1, 2, 2, 3, 3])
+    res = bootstrap.Resampler.build(users, b=200, seed=1)
+    a = np.array([True, False] * 4)
+    # the same difference in both groups for every user: the contrast is exactly 0
+    same = np.array([0.5, 0.5, -1.0, -1.0, 0.0, 0.0, 1.0, 1.0])
+    c = minionerec.group_contrast(same, a, ~a, res)
+    assert c["value"] == 0 and c["ci"] == (0.0, 0.0) and c["replicates"] == 200
+    # +1 in group a, 0 in group b for everyone: contrast 1 with no spread
+    c = minionerec.group_contrast(a.astype(float), a, ~a, res)
+    assert c["value"] == 1 and c["ci"] == (1.0, 1.0)
+    # a group that some replicates never draw: those replicates are dropped
+    only_user_0 = users == 0
+    c = minionerec.group_contrast(np.ones(8), only_user_0, ~only_user_0, res)
+    assert 0 < c["replicates"] < 200 and c["value"] == 0
 
 
 def test_subset_run_is_preliminary(tmp_path):
