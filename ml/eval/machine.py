@@ -155,6 +155,17 @@ def wait_quiet(
     return s, time.monotonic() - t0
 
 
+class NotQuiet(RuntimeError):
+    """The machine did not get quiet within the wait, so the measurement did not start."""
+
+    def __init__(self, state: dict, waited: float):
+        super().__init__(
+            f"no quiet machine within {waited / 60:.0f} min (load {state['load1']}, "
+            f"containers {state['containers']})"
+        )
+        self.state, self.waited = state, waited
+
+
 class ContainerWatch:
     """`docker ps` every `interval` seconds in a thread while a measurement runs, and once more
     at its end; `seen` is every container name seen."""
@@ -188,13 +199,16 @@ def measure_quietly(
     log: Callable[[str], None] = print,
 ) -> tuple[object, dict]:
     """Run fn() under the cost runs' protocol: start only when the 1-minute load is below
-    BUSY_LOAD and no Docker container runs (waiting at most `max_wait`), record the load and the
+    BUSY_LOAD and no Docker container runs (waiting at most `max_wait`, then raising NotQuiet
+    without running fn), record the load and the
     containers (and free memory and vm_stat's swap counters) at the start and the end, and watch
     `docker ps` meanwhile. If a container ran during fn(), run it once more; if that is disturbed
     too, keep it and say so. Returns fn's last result and the record of every attempt."""
     attempts = []
     for attempt in (1, 2):
         start, waited = wait_quiet(max_wait, log=log)
+        if not is_quiet(start):
+            raise NotQuiet(start, waited)
         with ContainerWatch() as watch:
             result = fn()
         end = state()

@@ -1,6 +1,8 @@
 """The cost runs' quiet-machine protocol (machine.measure_quietly), with docker and the load
 average scripted."""
 
+import pytest
+
 from ml.eval import machine
 
 
@@ -53,11 +55,25 @@ def test_runs_once_more_after_a_container_ran(monkeypatch):
 
 
 def test_keeps_a_second_disturbed_attempt(monkeypatch):
-    _script(monkeypatch, [["kafka"]] * 8, load1=3.0)
+    # each attempt starts quiet; a stack comes up during both
+    _script(monkeypatch, ([[]] + [["kafka"]] * 3) * 2)
     calls = []
     _, rec = _quietly(lambda: calls.append(1))
     assert len(calls) == 2  # no third attempt
-    assert rec["disturbed"] and not rec["quiet_start"]
+    assert rec["disturbed"] and rec["quiet_start"]
+    assert [a["containers_during"] for a in rec["attempts"]] == [["kafka"], ["kafka"]]
+
+
+def test_does_not_measure_on_a_machine_that_stays_busy(monkeypatch):
+    _script(monkeypatch, [["kafka"]] * 4, load1=1.0)
+    calls = []
+    with pytest.raises(machine.NotQuiet, match="no quiet machine"):
+        _quietly(lambda: calls.append(1))
+    assert calls == []
+    _script(monkeypatch, [[]] * 4, load1=3.0)  # no containers, but the load stays high
+    with pytest.raises(machine.NotQuiet):
+        _quietly(lambda: calls.append(1))
+    assert calls == []
 
 
 def test_docker_not_answering_counts_as_no_containers(monkeypatch):

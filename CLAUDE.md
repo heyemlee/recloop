@@ -178,7 +178,8 @@ its own).
   cross-category (level-2 category not in the history) / same; same day / later.
 - Any MPS run (generation, cost, even a trial) waits for an idle machine: no compose stack, no
   other measurement. The cost runs start each configuration only when the 1-minute load is
-  below 2 and no Docker container runs, and re-run it once if a container appears meanwhile
-  (`ml.eval.machine.measure_quietly`). MPS is invisible inside the Claude Code sandbox (torch
+  below 2 and no Docker container runs, re-run it once if a container appears meanwhile, and stop
+  if the machine is not quiet within 20 min (`ml.eval.machine.measure_quietly`; rerun the rest
+  with `--only`). MPS is invisible inside the Claude Code sandbox (torch
   falls back to the CPU), so real runs go outside it. `--base-model` runs (tests, smoke checks with a tiny
   random Qwen2) are left out of the report.

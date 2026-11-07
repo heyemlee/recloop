@@ -95,7 +95,10 @@ def main(argv: list[str] | None = None) -> None:
         return runs, load_start
 
     # the cost runs' protocol: a quiet machine at the start, once more if a container ran
-    (runs, load_start), quiet = machine.measure_quietly(measure)
+    try:
+        (runs, load_start), quiet = machine.measure_quietly(measure)
+    except machine.NotQuiet as e:
+        raise SystemExit(f"SASRec cost: {e}; not measured, run it again later") from None
     fp = footprint.read()
     out = {
         "checkpoint": str(train_sasrec.CHECKPOINT.relative_to(paths.ROOT)),

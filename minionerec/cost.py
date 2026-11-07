@@ -3,10 +3,12 @@
 `make minionerec-cost` runs this, then ml.eval.sasrec_cost for the SASRec side. Run it on an
 idle machine (no compose stack, no other measurement). Each configuration starts only when the
 1-minute load average is below 2 and no Docker container runs (ml.eval.machine.measure_quietly
-waits up to 20 min for that); `docker ps` is checked every 10 s while it runs, and a
-configuration during which a container ran is run once more. The manifest keeps the load and
-the containers at the start and the end of every attempt; the report marks what stayed
-disturbed or started busy.
+waits up to 20 min for that, and the run stops when the machine does not get quiet: the
+configurations measured so far stay in the manifest, and the message names the --only command
+for the rest). `docker ps` is checked every 10 s while a configuration runs, and one during
+which a container ran is run once more. The manifest keeps the load, the containers, the free
+memory and the swap-out count at the start and the end of every attempt; the report marks what
+stayed disturbed or swapped.
 
 The workload is one test sample per user for USERS random test users (seeded; each user's
 sample is drawn at random too), so every request is a different user. Every configuration runs
@@ -118,9 +120,8 @@ def main(argv: list[str] | None = None) -> None:
     )
     manifest.setdefault("configs", {})
 
-    for cfg in configs():
-        if args.only is not None and cfg["name"] not in args.only:
-            continue
+    todo = [c for c in configs() if args.only is None or c["name"] in args.only]
+    for idx, cfg in enumerate(todo):
         out_dir = args.out / cfg["name"]
         out_dir.mkdir(parents=True, exist_ok=True)
         cfg_rows = rows[: cfg.get("limit", len(rows))]
@@ -138,9 +139,17 @@ def main(argv: list[str] | None = None) -> None:
             base_model=args.base_model,
         )
         print(f"[{time.strftime('%H:%M:%S')}] {cfg['name']}: {len(cfg_rows)} users", flush=True)
-        res, quiet = machine.measure_quietly(
-            functools.partial(upstream.run_logged, cmd, script.parent, out_dir / "evaluate.log")
-        )
+        try:
+            res, quiet = machine.measure_quietly(
+                functools.partial(upstream.run_logged, cmd, script.parent, out_dir / "evaluate.log")
+            )
+        except machine.NotQuiet as e:
+            rest = " ".join(c["name"] for c in todo[idx:])
+            raise SystemExit(
+                f"{cfg['name']}: {e}; stopped before measuring it. Measured so far: "
+                f"{', '.join(sorted(manifest['configs'])) or 'none'}. On a quiet machine, run "
+                f"the rest with: python -m minionerec.cost --only {rest}"
+            ) from None
         if res["returncode"] != 0:
             raise SystemExit(f"{cfg['name']} failed; see {out_dir / 'evaluate.log'}")
         valid, invalid = generate.predictions_valid(out_dir / "result.json")
