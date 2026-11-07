@@ -130,7 +130,30 @@ Between the two groups of a segment: (MiniOneRec - reference) in the first group
 
 The main run generated 434 samples in 26 min at 50 beams and batch 8: 3.57 s per sample, i.e. 59 min of this Mac's GPU per 1,000 recommendations (a test sample is one request); peak memory footprint 16.2 GiB. The 1-minute load average was at most 1.5 when a shard started. At this speed the full test split (4,866 samples as evaluate.sh's 8 shards, 13 s of start-up and model loading each) takes about 4.9 h.
 
-Latency, throughput and memory per beam width have not been measured yet (`make minionerec-cost`, on an idle machine).
+> **Preliminary timings.** 1 of 7 configurations started with a load average above 2 or ran while another Docker container ran; rerun `make minionerec-cost` on an idle machine.
+
+One test sample per user, 96 random users; MiniOneRec on the 16-core GPU (MPS) in bfloat16, SASRec on the CPU (Apple M4 Pro, 8 performance + 4 efficiency cores). A request at batch 1 is one user's recommendation; per-call times leave out each process's first calls (Metal kernel compilation). Memory is the process's physical footprint (Activity Monitor's figure, which includes what is allocated on the GPU), with the model weights loaded. Each configuration started when the 1-minute load average was below 2 and no Docker container ran; `docker ps` was checked every 10 s while it ran, and a configuration during which a container ran was run once more. The load column is the 1-minute load average at its start and end.
+
+| Model | Batch | P50 per call | P90 | P99 | Users per second | Peak memory | Load, start / end |
+|---|---|---|---|---|---|---|---|
+| MiniOneRec, 10 beams | 1 | 1,027 ms | 1,165 ms | 1,262 ms | 0.95 | 4.4 GiB | 1.8 / 1.1 |
+| MiniOneRec, 10 beams | 8 | 5,964 ms | 5,985 ms | 5,990 ms | 1.40 | 6.1 GiB | 1.1 / 0.9 |
+| MiniOneRec, 20 beams | 1 | 1,343 ms | 1,616 ms | 1,697 ms | 0.72 | 5.6 GiB | 0.9 / 1.5 |
+| MiniOneRec, 20 beams | 8 | 11,679 ms | 11,766 ms | 12,568 ms | 0.71 | 8.3 GiB | 1.5 / 1.3 |
+| MiniOneRec, 50 beams † | 1 | 3,113 ms | 3,797 ms | 3,831 ms | 0.31 | 6.4 GiB | 1.9 / 1.1 |
+| MiniOneRec, 50 beams | 8 | 29,104 ms | 29,719 ms | 30,128 ms | 0.28 | 15.2 GiB | 1.1 / 0.8 |
+| SASRec, PyTorch CPU, 1 thread | 1 | 0.15 ms | 0.17 ms | 0.19 ms | 6,274 | 0.2 GiB | 1.1 / 1.1 |
+| SASRec, PyTorch CPU, 8 threads | 1 | 0.35 ms | 0.40 ms | 0.48 ms | 2,832 | 0.2 GiB | 1.1 / 1.1 |
+| SASRec, PyTorch CPU, 8 threads | 8 | 0.64 ms | 0.70 ms | 0.75 ms | 12,356 | 0.2 GiB | 1.1 / 1.1 |
+| SASRec, PyTorch CPU, 8 threads | 256 | 9.68 ms | 10.12 ms | 10.21 ms | 26,054 | 0.2 GiB | 1.1 / 1.1 |
+
+- `beam50_batch1` was run a second time: other containers ran during the first attempt (aihd-test-12743-kafka, aihd-test-12743-pg, aihd-test-12743-redis, aihd-test-12743-s3, aisql-test-12606-pg), and during the second too (aisql-test-14013-pg); it is kept as measured (†).
+- `beam50_batch1_prefill` was run a second time: other containers ran during the first attempt (aihd-test-14950-kafka, aihd-test-14950-pg, aihd-test-14950-redis, aihd-test-14950-s3, aisql-test-14982-pg).
+- `beam10_batch1`: 1.4 GiB swapped out while it ran (vm_stat), so its times include paging.
+- `beam50_batch8`: 7.8 GiB swapped out while it ran (vm_stat), so its times include paging.
+
+- **Where the time goes.** With one new token instead of five, a 50-beam request takes 2,676 ms (P50) of its 3,113 ms: 86% is the first forward pass. Hugging Face's beam search copies the prompt (76-121 tokens) once per beam before that pass, so the model encodes the same prompt 50 times. The beams differ only in what they generate: encoding the prompt once and sharing its attention cache across the beams would remove most of that work.
+- **Against SASRec.** A 50-beam MiniOneRec request is 20,110 times a single-threaded SASRec request at the median (3,113 ms vs 0.15 ms). Online, the model server runs the same SASRec encoder in ONNX Runtime and searches FAISS.
 
 ## Other settings on the same samples
 
