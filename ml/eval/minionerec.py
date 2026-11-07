@@ -507,6 +507,7 @@ def cost_summary(
             "loadavg_start": cfg["loadavg_start"][0],
             "loadavg_end": cfg["loadavg_end"][0],
             "quiet": cfg.get("quiet"),
+            "swapped_out_bytes": cfg.get("swapped_out_bytes"),
             "invalid_predictions": cfg["invalid_predictions"],
         }
     sasrec = None
@@ -558,6 +559,7 @@ def run_summary(gen: Generation, test: Split) -> dict:
         # the highest 1-minute load average at the start of any shard
         "loadavg_start": meta.get("loadavg_max_start", meta["loadavg_start"][0]),
         "peak_footprint": (meta.get("memory") or {}).get("lifetime_max_footprint"),
+        "swapped_out_bytes": meta.get("swapped_out_bytes"),
         "mps_driver_allocated_max": max(b.get("mps_driver_allocated", 0) for b in batches),
     }
 

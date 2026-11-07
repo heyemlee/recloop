@@ -431,6 +431,7 @@ def _write_cost(cost, sasrec_json, disturbed="beam50_batch8"):
             "loadavg_start": [1.2, 0, 0],
             "loadavg_end": [1.8, 0, 0],
             "invalid_predictions": 0 if new_tokens > 1 else None,
+            "swapped_out_bytes": 5 * 2**20 if name == disturbed else 0,
             "quiet": {"attempts": attempts, "quiet_start": True, "disturbed": False},
         }
     (cost / "manifest.json").write_text(json.dumps(manifest))
@@ -465,6 +466,8 @@ def _write_cost(cost, sasrec_json, disturbed="beam50_batch8"):
 def test_cost_section_renders_load_and_reruns(tmp_path):
     test = _toy_split()
     _write_run(tmp_path / "runs" / "test", list(range(len(test))), [_beams(1, 0)] * 6, test)
+    meta_path = tmp_path / "runs" / "test" / "run.json"
+    meta_path.write_text(json.dumps(dict(json.loads(meta_path.read_text()), swapped_out_bytes=0)))
     _write_cost(tmp_path / "cost", tmp_path / "sasrec_cost.json")
     cost = minionerec.cost_summary(tmp_path / "cost", tmp_path / "sasrec_cost.json")
     out = minionerec.build(
@@ -482,3 +485,5 @@ def test_cost_section_renders_load_and_reruns(tmp_path):
     assert "†" not in text  # the second attempt was quiet
     assert "**Where the time goes.**" in text and "**Against SASRec.**" in text
     assert "Preliminary timings" not in text
+    assert "Nothing was swapped out while it ran" in text  # the main run
+    assert "`beam50_batch8`: 5 MiB swapped out while it ran" in text

@@ -155,6 +155,7 @@ def main(argv: list[str] | None = None) -> None:
             "loadavg_start": res["loadavg_start"],
             "loadavg_end": res["loadavg_end"],
             "memory": res["memory"],
+            "swapped_out_bytes": res["swapped_out_bytes"],
             "invalid_predictions": invalid if cfg["max_new_tokens"] > 1 else None,
             "quiet": quiet,
         }

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 import threading
@@ -92,6 +93,33 @@ def info() -> dict:
 # ----------------------------------------------------------------------------- quiet machine
 
 
+def vm_counters() -> dict | None:
+    """vm_stat's page size and its swap-in / swap-out counts (pages, since boot)."""
+    out = _run(["vm_stat"], timeout=10)
+    if not out:
+        return None
+    page = re.search(r"page size of (\d+) bytes", out)
+    ins = re.search(r"^Swapins:\s+(\d+)", out, re.M)
+    outs = re.search(r"^Swapouts:\s+(\d+)", out, re.M)
+    if not (page and ins and outs):
+        return None
+    return {"page_size": int(page[1]), "swapins": int(ins[1]), "swapouts": int(outs[1])}
+
+
+def swapped_out_bytes(start: dict | None, end: dict | None) -> int | None:
+    """Bytes the machine swapped out between two vm_counters() readings."""
+    if not start or not end:
+        return None
+    return (end["swapouts"] - start["swapouts"]) * end["page_size"]
+
+
+def memory_free_percent() -> int | None:
+    """memory_pressure's "System-wide memory free percentage"."""
+    out = _run(["memory_pressure", "-Q"], timeout=10)
+    m = re.search(r"free percentage:\s*(\d+)%", out or "")
+    return int(m[1]) if m else None
+
+
 def containers() -> list[str] | None:
     """Names of the running Docker containers; None when Docker does not answer."""
     out = _run(["docker", "ps", "--format", "{{.Names}}"], timeout=30)
@@ -103,6 +131,8 @@ def state() -> dict:
         "time": time.strftime("%H:%M:%S"),
         "load1": round(os.getloadavg()[0], 2),
         "containers": containers(),
+        "memory_free_percent": memory_free_percent(),
+        "vm": vm_counters(),
     }
 
 
@@ -159,20 +189,22 @@ def measure_quietly(
 ) -> tuple[object, dict]:
     """Run fn() under the cost runs' protocol: start only when the 1-minute load is below
     BUSY_LOAD and no Docker container runs (waiting at most `max_wait`), record the load and the
-    containers at the start and the end, and watch `docker ps` meanwhile. If a container ran
-    during fn(), run it once more; if that is disturbed too, keep it and say so. Returns fn's
-    last result and the record of every attempt."""
+    containers (and free memory and vm_stat's swap counters) at the start and the end, and watch
+    `docker ps` meanwhile. If a container ran during fn(), run it once more; if that is disturbed
+    too, keep it and say so. Returns fn's last result and the record of every attempt."""
     attempts = []
     for attempt in (1, 2):
         start, waited = wait_quiet(max_wait, log=log)
         with ContainerWatch() as watch:
             result = fn()
+        end = state()
         attempts.append(
             {
                 "waited_seconds": round(waited, 1),
                 "start": start,
-                "end": state(),
+                "end": end,
                 "containers_during": sorted(watch.seen),
+                "swapped_out_bytes": swapped_out_bytes(start["vm"], end["vm"]),
             }
         )
         if not watch.seen:
@@ -186,4 +218,5 @@ def measure_quietly(
         "attempts": attempts,
         "quiet_start": is_quiet(last["start"]),
         "disturbed": bool(last["containers_during"]),
+        "swapped_out_bytes": last["swapped_out_bytes"],
     }

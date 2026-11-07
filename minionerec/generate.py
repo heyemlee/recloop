@@ -128,6 +128,11 @@ def probe_dtype(script: Path, test_csv: Path, workdir: Path, args) -> tuple[str,
     raise SystemExit(f"no dtype works on this machine: {tried}")
 
 
+def _sum_known(values: list[int | None]) -> int | None:
+    known = [v for v in values if v is not None]
+    return sum(known) if known else None
+
+
 def run_shards(
     script: Path, test_csv: Path, rows: np.ndarray, out_dir: Path, args, dtype: str
 ) -> tuple[list[dict], dict]:
@@ -295,6 +300,7 @@ def main(argv: list[str] | None = None) -> None:
         "loadavg_end": infos[-1]["loadavg_end"],
         "loadavg_max_start": max(i["loadavg_start"][0] for i in infos),
         "memory": {"lifetime_max_footprint": max(peaks), "per_shard": peaks},
+        "swapped_out_bytes": _sum_known([i.get("swapped_out_bytes") for i in infos]),
         "calc_py": calc,
     }
     (out_dir / "run.json").write_text(json.dumps(run, indent=2) + "\n")

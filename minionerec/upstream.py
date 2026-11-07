@@ -38,7 +38,7 @@ import time
 from pathlib import Path
 
 from ml import paths
-from ml.eval import footprint
+from ml.eval import footprint, machine
 
 PATCH = Path(__file__).with_name("evaluate.py.patch")
 # The files evaluate.py needs from the clone, at MINIONEREC_COMMIT (ml/data/download.py).
@@ -166,6 +166,7 @@ def run_logged(cmd: list[str], cwd: Path, log: Path, *, sample_memory: bool = Tr
     env.pop("PYTORCH_ENABLE_MPS_FALLBACK", None)
     start = time.monotonic()
     load_start = os.getloadavg()
+    vm_start = machine.vm_counters()
     with log.open("w") as out:
         proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=out, stderr=subprocess.STDOUT)
         sampler = footprint.Sampler(proc.pid).start() if sample_memory else None
@@ -177,6 +178,8 @@ def run_logged(cmd: list[str], cwd: Path, log: Path, *, sample_memory: bool = Tr
         "loadavg_start": list(load_start),
         "loadavg_end": list(os.getloadavg()),
         "memory": memory,
+        # bytes the machine swapped out while the command ran (vm_stat), None if unknown
+        "swapped_out_bytes": machine.swapped_out_bytes(vm_start, machine.vm_counters()),
     }
 
 

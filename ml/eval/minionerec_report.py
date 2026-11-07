@@ -21,6 +21,10 @@ def _gib(n: float | None) -> str:
     return "n/a" if not n else f"{n / 2**30:.1f} GiB"
 
 
+def _bytes(n: int) -> str:
+    return f"{n / 2**30:.1f} GiB" if n >= 2**30 else f"{n / 2**20:,.0f} MiB"
+
+
 def _ms(s: float) -> str:
     return f"{s * 1e3:,.0f} ms" if s >= 0.0995 else f"{s * 1e3:.2f} ms"
 
@@ -402,6 +406,7 @@ def _cost_section(out: dict) -> list[str]:
             if main["loadavg_start"] <= BUSY_LOAD
             else f" (above {BUSY_LOAD:g}: the machine was busy, so these timings are indicative)."
         )
+        + _swap_sentence(main.get("swapped_out_bytes"))
     )
     lines.append("")
     if cost is None:
@@ -514,6 +519,20 @@ def _cost_section(out: dict) -> list[str]:
     return lines
 
 
+def _swap_sentence(swapped: int | None) -> str:
+    if swapped is None:
+        return ""
+    if swapped == 0:
+        return " Nothing was swapped out while it ran (vm_stat's swap-out count)."
+    return f" The machine swapped out {_bytes(swapped)} while it ran, so the times include paging."
+
+
+def _swapped(c: dict) -> int | None:
+    if c.get("swapped_out_bytes") is not None:
+        return c["swapped_out_bytes"]
+    return (c.get("quiet") or {}).get("swapped_out_bytes")
+
+
 def _busy(c: dict) -> bool:
     q = c.get("quiet")
     return not q["quiet_start"] if q else c["loadavg_start"] > BUSY_LOAD
@@ -553,6 +572,19 @@ def _quiet_notes(cost: dict) -> list[str]:
                 f"{attempts[-1]['start']['load1']:.1f} after waiting "
                 f"{attempts[-1]['waited_seconds'] / 60:.0f} min for a quiet machine."
             )
+    swaps = {name: _swapped(c) for name, c in measured.items()}
+    if any(v for v in swaps.values()):
+        notes += [
+            f"- `{name}`: {_bytes(v)} swapped out while it ran (vm_stat), so its times include "
+            "paging."
+            for name, v in swaps.items()
+            if v
+        ]
+    elif swaps and all(v == 0 for v in swaps.values()):
+        notes.append(
+            "- Nothing was swapped out during any measurement (vm_stat's swap-out count did not "
+            "change)."
+        )
     return [*notes, ""] if notes else []
 
 
