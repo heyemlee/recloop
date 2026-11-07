@@ -19,7 +19,7 @@ write-ups in `docs/results/`.
   each milestone after verifying it and pushes to `origin` (github.com/heyemlee/recloop). Check
   §22.4 before anything is made public.
 - `docs/results/*.md` are generated (`make eval` writes `offline.md`, `make ann` writes
-  `ann.md`); change the generator, not the file. The committed `offline.md` is `make setup`, then `make paper-sasrec`, then
+  `ann.md`, `make agent-eval` writes `agent.md`); change the generator, not the file. The committed `offline.md` is `make setup`, then `make paper-sasrec`, then
   `make eval`. `make eval` re-runs give the same bytes; `make train` runs on the CPU with fixed
   seeds, and two runs with the same worker / thread counts gave identical weights.
 - Generated code is committed: `serving/gen` and `model_server/gen` (`make proto`),
@@ -52,7 +52,13 @@ ml/                         Python 3.12 uv project (own .venv); run modules from
 web/                        Next.js 16 + shadcn/ui (:13000); /api/* is proxied to the Go api; e2e/
 tools/                      go.mod pinning buf, protoc-gen-go(-grpc), sqlc (built into .cache/bin)
 testdata/                   bucket_vectors.json, shared by the Go and Python bucketing tests
-agent/ sim/ loadtest/ analysis/   later milestones
+agent/                      Python 3.12 uv project (own .venv): the shopping assistant (design §10)
+  agent, parsing, schema    one turn; LLM / rule parsing into ShoppingRequest (Pydantic)
+  catalog, tools, text      search_items (BM25 + pgvector, RRF, SQL filters), details, history
+  constraints, compat       code checks of every constraint; device matching with evidence
+  llm, prompts, render      Claude Messages API adapter, prompts, replies rendered from rows
+  eval/                     cases.jsonl (150, generated), harness, metrics, judge, report
+sim/ loadtest/ analysis/    later milestones
 data/        (ignored) raw/ downloads, hf/ model files, processed/ outputs of `make data`
 third_party/ (ignored) MiniOneRec and SASRec.pytorch clones
 artifacts/   (ignored) models/sasrec, bundles/<version> + bundles/current, eval/, e2e/, logs/
@@ -73,10 +79,13 @@ make ann           # ANN benchmark + index updates -> docs/results/ann.md (~25 m
                    # it marks the report preliminary when the load average is above 2 at the start)
 make bundle        # artifacts/bundles/<version> (ONNX encoder, FAISS, ItemCF/Pop tables), current ->
 make seed          # FLUSHDB Redis, load dataset users' train-period history + demo users
+make agent-cases   # regenerate agent/eval/cases.jsonl from the items table (read-only)
+make agent-eval    # shopping assistant: baseline + oracle agents -> docs/results/agent.md (~1 min)
+make agent-eval-llm  # paid: MODELS=claude-opus-5-5 REPEATS=3 MAX_COST_USD=... (needs a key)
 make serve-model   # model server on :18081 (bundle: artifacts/bundles/current)
 make serve-api     # Go api on :18080
 make serve-web     # Next.js dev server on :13000
-make test          # ruff + pytest (ml, model_server) + go vet/test; DB/Redis tests skip when down
+make test          # ruff + pytest (ml, model_server, agent) + go vet/test; DB/Redis tests skip when down
 make test-web      # tsc + eslint for web/
 make e2e           # Playwright (local Chrome): click an item, reload, the feed follows (servers up)
 make proto / sqlc  # regenerate gRPC / SQL code (tools built once into .cache/bin)
@@ -86,7 +95,9 @@ make data-weights  # 3.56 GB MiniOneRec weights, only needed from M7
 ```
 
 Python: `uv run --project ml --frozen python -m ml.<package>.<module>` from the repo root (the
-Makefile's `PY`); the model server is `uv run --project model_server ...` (`MS`). Go:
+Makefile's `PY`); the model server is `uv run --project model_server ...` (`MS`), the agent
+`uv run --project agent ...` (`AG`; `AGE` adds the optional `encoder` group: torch +
+sentence-transformers for the query encoder, not installed by tests or CI). Go:
 `cd serving && go ...`; goose is a Go tool (`go tool goose`), built with tags that drop every
 driver but Postgres (`GOOSE_TAGS`). `.claude/launch.json` starts the three servers for the
 preview browser. Ports and URLs are in `.env.example`.
@@ -96,7 +107,7 @@ the repo. Inside the Claude Code sandbox these must run outside it: docker, anyt
 connects to localhost (PostgreSQL, Redis, the servers), anything that binds a local port (the
 servers, the model_server gRPC tests, Go httptest), `git clone`, downloads (Go modules, npm, uv,
 Hugging Face), MPS (Metal) and Playwright. `make eval`, `make train` and the non-network tests
-work inside it.
+work inside it; `make agent-cases` and `make agent-eval` read PostgreSQL, so they run outside.
 
 torch and faiss-cpu each ship an OpenMP runtime and crash when loaded together on macOS: keep
 faiss out of torch processes (`ml/bundle/faiss_index.py` runs as a subprocess; the model server
@@ -135,6 +146,35 @@ its own).
   config in the `experiments` table, reloaded every 10 s.
 - Bundle versions look like `2026-11-07-sasrec64-<content hash>`; the api registers the one it
   serves in `model_versions` (status active).
+
+## Shopping assistant (M6, core)
+
+- One turn (`agent/agent.py`): parse -> `get_purchase_history` (only when the request refers to
+  an earlier purchase) -> `search_items` -> `get_item_details` -> code checks -> device
+  matching -> reasons -> reply rendered from the item rows (titles, prices). The model never
+  picks or orders items; `surface=chat` recommendations and the sponsored slot come later.
+- Parsing: `ShoppingRequest` (category key from `agent/taxonomy.py`, budget in cents, brands,
+  excluded brands, genuine-only, device, last-purchase relation, search text). A reply that
+  fails validation goes back once with the error; a second failure ends the turn.
+- Hard constraints (price, stock, category) and brands are checked by code on the rows: an
+  unknown price never meets a budget, an item without a category path never meets a category.
+  Price, stock and category are also SQL filters of `search_items`.
+- Devices (`agent/compat.py`): code match in title, features, description (the model as
+  written, or a bare number in a list opened by the series prefix or a family word); the model
+  judges the rest only when the code confirmed fewer than 3, and its "compatible" needs a quote
+  that is in the named field and contains the model number. Otherwise: "not confirmed".
+- Search: BM25 in-process on `agent/text.py` tokens (`WF-2760` = `WF2760` = 'wf2760'), exact
+  pgvector KNN of the bge query embedding (with bge's query instruction), RRF k = 60, 30 results.
+  The query encoder is bge-small-en-v1.5 at ml/'s library versions, its files checked against
+  `ml/data/download.py`; `RECLOOP_TEXT_MODEL` points at another copy of the model directory.
+- Database access is a read-only session (`SET SESSION CHARACTERISTICS AS TRANSACTION READ
+  ONLY`) on `items` and `orders`.
+- Claude (`agent/llm.py`, anthropic 2.3.0): structured outputs, effort low, cached system
+  prompt, `fallbacks="default"` on Opus 5.5 / Sonnet 5.5, cost per reply at the serving model's
+  price. Nothing calls it except `make agent-eval-llm`; tests use a scripted fake.
+- Evaluation: `agent/eval/cases.jsonl` (150 cases, 12 templates, gold constraints, purchase
+  histories as fixtures, user ids from 900000); agents `baseline` (rules), `oracle` (gold
+  constraints) and search ablations; LLM agents pending a key and a spending cap.
 
 ## Evaluation protocol
 

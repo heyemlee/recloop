@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   python:
-    name: Python (ml, model_server)
+    name: Python (ml, model_server, agent)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -29,12 +29,16 @@ jobs:
           cache-dependency-glob: |
             ml/uv.lock
             model_server/uv.lock
+            agent/uv.lock
       - name: ruff (check + format)
         run: make lint
       - name: pytest ml
         run: make test-ml
       - name: pytest model_server
         run: make test-model-server
+      # Scripted language model, no API key; the encoder group (torch) is not installed here.
+      - name: pytest agent
+        run: make test-agent
 
   go:
     name: Go (serving)

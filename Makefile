@@ -15,8 +15,9 @@ API_ADDR ?= 127.0.0.1:$(API_PORT)
 MODEL_SERVER_ADDR ?= 127.0.0.1:$(MODEL_SERVER_PORT)
 RECLOOP_API_URL ?= http://$(API_ADDR)
 RECLOOP_BUNDLE ?= $(CURDIR)/artifacts/bundles/current
+RECLOOP_TEXT_MODEL ?= $(CURDIR)/data/hf/bge-small-en-v1.5
 export RECLOOP_PG_PORT RECLOOP_REDIS_PORT DATABASE_URL REDIS_URL API_ADDR MODEL_SERVER_PORT \
-	MODEL_SERVER_ADDR RECLOOP_API_URL RECLOOP_BUNDLE
+	MODEL_SERVER_ADDR RECLOOP_API_URL RECLOOP_BUNDLE RECLOOP_TEXT_MODEL
 
 # Tool caches live in the repo (git-ignored) so the targets also work where ~/.cache is not
 # writable, e.g. for sandboxed coding agents. Set them in the environment to use global caches.
@@ -32,6 +33,9 @@ COMPOSE := docker compose -f deploy/docker-compose.yml
 UV := uv run --project ml --frozen
 PY := $(UV) python
 MS := uv run --project model_server --frozen
+AG := uv run --project agent --frozen
+# The agent's query encoder (sentence-transformers + torch) is an optional dependency group.
+AGE := $(AG) --group encoder
 # goose's CLI links every SQL driver it supports; build it with Postgres only.
 GOOSE_TAGS := no_clickhouse,no_libsql,no_mssql,no_mysql,no_sqlite3,no_vertica,no_ydb
 GOOSE := cd serving && GOFLAGS="-modcacherw -tags=$(GOOSE_TAGS)" \
@@ -44,8 +48,8 @@ TOOL_PKGS := github.com/bufbuild/buf/cmd/buf google.golang.org/protobuf/cmd/prot
 
 .PHONY: help setup up down down-volumes migrate migrate-status data data-weights ingest train \
 	paper-sasrec eval ann bundle seed tools proto sqlc generate build-api serve-model serve-api \
-	serve-web web-install test lint test-ml test-model-server test-go test-web e2e fmt \
-	clean-processed clean-artifacts
+	serve-web web-install test lint test-ml test-model-server test-agent test-go test-web e2e fmt \
+	clean-processed clean-artifacts agent-cases agent-eval agent-eval-llm
 
 help: ## List targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) \
@@ -101,6 +105,19 @@ bundle: ## Build artifacts/bundles/<version> and point artifacts/bundles/current
 seed: ## Flush Redis and load the dataset users' histories and the demo users
 	$(PY) -m ml.data.seed_redis
 
+agent-cases: ## Regenerate agent/eval/cases.jsonl from the catalog (reads items, read-only)
+	$(AG) python -m agent.eval.build_cases
+
+agent-eval: ## Shopping assistant: baseline + oracle agents -> docs/results/agent.md (no API calls)
+	$(AGE) python -m agent.eval.run
+
+# Paid: needs Anthropic credentials, MODELS (e.g. claude-opus-5-5) and a cap in MAX_COST_USD.
+agent-eval-llm: ## Language-model agents (MODELS=..., REPEATS=3, MAX_COST_USD=... required)
+	@test -n "$(MAX_COST_USD)" || { echo "set MAX_COST_USD (a spending cap per model run)"; exit 1; }
+	@test -n "$(MODELS)" || { echo "set MODELS, e.g. MODELS=claude-opus-5-5"; exit 1; }
+	$(AGE) python -m agent.eval.run --skip-offline $(foreach m,$(MODELS),--llm $(m)) \
+		--repeats $(or $(REPEATS),3) --max-cost-usd $(MAX_COST_USD)
+
 $(addprefix $(BIN)/,$(TOOLS)): tools/go.mod tools/go.sum
 	cd tools && GOFLAGS=-modcacherw go build -o $(BIN)/ $(TOOL_PKGS)
 
@@ -135,13 +152,15 @@ serve-web: ## Next.js web app on WEB_PORT (proxies /api to the Go api)
 web-install: ## Install the web app's dependencies (npm ci)
 	cd web && npm ci --no-audit --no-fund
 
-test: lint test-ml test-model-server test-go ## Lint and run the Python and Go tests (DB / Redis tests skip when the stack is down)
+test: lint test-ml test-model-server test-agent test-go ## Lint and run the Python and Go tests (DB / Redis tests skip when the stack is down)
 
-lint: ## ruff check + format check (ml, model_server)
+lint: ## ruff check + format check (ml, model_server, agent)
 	$(UV) ruff check ml
 	$(UV) ruff format --check ml
 	$(MS) ruff check model_server
 	$(MS) ruff format --check model_server
+	$(AG) ruff check agent
+	$(AG) ruff format --check agent
 
 # test_ann.py loads faiss, so it gets a pytest process of its own: torch (test_sasrec.py) and
 # faiss in one process abort on macOS (two OpenMP runtimes).
@@ -151,6 +170,11 @@ test-ml:
 
 test-model-server:
 	$(MS) pytest model_server/tests
+
+# Scripted language model and an in-memory catalog; the database and encoder tests skip when the
+# stack is down or the `encoder` group / model files are missing. Never calls a paid API.
+test-agent:
+	$(AG) pytest agent/tests
 
 test-go:
 	@cd serving && unformatted="$$(gofmt -l cmd internal)" && \
@@ -168,6 +192,8 @@ fmt: ## Format and auto-fix
 	$(UV) ruff check --fix ml
 	$(MS) ruff format model_server
 	$(MS) ruff check --fix model_server
+	$(AG) ruff format agent
+	$(AG) ruff check --fix agent
 	cd serving && gofmt -w cmd internal
 
 clean-processed: ## Delete data/processed (keeps downloads and third_party/)
