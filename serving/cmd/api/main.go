@@ -310,6 +310,8 @@ func run(log *slog.Logger) error {
 		},
 		Log: log,
 		Now: time.Now,
+
+		Campaigns: st, // the advertiser api (design §9.5)
 	}
 
 	handler := srv.Handler()

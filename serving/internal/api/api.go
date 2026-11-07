@@ -36,6 +36,8 @@ type Server struct {
 	Events  events.Publisher
 	Served  *events.ServedWriter
 	Redis   redis.UniversalClient
+	// Campaigns is the advertiser api's store; nil leaves its routes out.
+	Campaigns CampaignStore
 	// Sources per surface, and the default RRF weights per surface (an experiment variant's
 	// "rrf_weights" param overrides them).
 	Sources map[string][]mixer.Spec
@@ -75,6 +77,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/items/{id}", s.getItem)
 	mux.HandleFunc("GET /v1/users/{id}/context", s.userContext)
 	mux.HandleFunc("GET /v1/demo/users", s.demoUsers)
+	if s.Campaigns != nil {
+		s.campaignRoutes(mux)
+	}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})

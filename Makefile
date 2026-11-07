@@ -25,9 +25,10 @@ RECLOOP_BENCH_API_PORT ?= 18180
 # every recipe: docker compose and other OTel-aware tools would send their own traces there.
 OTEL_EXPORTER_OTLP_ENDPOINT ?= http://localhost:14317
 TRACING := OTEL_EXPORTER_OTLP_ENDPOINT=$(OTEL_EXPORTER_OTLP_ENDPOINT) OTEL_EXPORTER_OTLP_INSECURE=true
+AD_TOKEN_KEYS ?= dev1:recloop-dev-only-ad-token-key-not-a-secret-0001
 export RECLOOP_PG_PORT RECLOOP_REDIS_PORT DATABASE_URL REDIS_URL API_ADDR MODEL_SERVER_PORT \
 	MODEL_SERVER_ADDR RECLOOP_API_URL RECLOOP_BUNDLE RECLOOP_KAFKA_PORT KAFKA_BROKERS \
-	PROMETHEUS_URL RECLOOP_BENCH_API_PORT
+	PROMETHEUS_URL RECLOOP_BENCH_API_PORT AD_TOKEN_KEYS
 # onnxruntime's telemetry uploader (macOS) can crash the interpreter at exit: off everywhere.
 export ORT_DISABLE_TELEMETRY := 1
 
@@ -59,7 +60,7 @@ TOOL_PKGS := github.com/bufbuild/buf/cmd/buf google.golang.org/protobuf/cmd/prot
 .PHONY: help setup images up down down-volumes bench-up bench-down migrate migrate-status data \
 	data-weights ingest train paper-sasrec eval ann bundle seed build-aggregator rebuild-redis tools \
 	k6 proto sqlc generate build-api serve-model serve-api serve-web web-install test lint test-ml \
-	test-model-server test-go test-web e2e fmt sim-world sim srm drill load load-smoke \
+	test-model-server test-go test-web test-props e2e fmt sim-world sim srm drill load load-smoke \
 	latency-report clean-processed clean-artifacts
 
 help: ## List targets
@@ -241,6 +242,13 @@ test-go:
 	@cd serving && unformatted="$$(gofmt -l cmd internal)" && \
 		if [ -n "$$unformatted" ]; then echo "gofmt needed: $$unformatted"; exit 1; fi
 	cd serving && GOFLAGS=-modcacherw go vet ./... && GOFLAGS=-modcacherw go test ./...
+
+# Property tests (rapid) run a moderate number of cases in `make test` (billing: 30 per
+# property, against PostgreSQL); this runs many more.
+CHECKS ?= 2000
+test-props: ## Long run of the ads / ad_token / billing property tests (CHECKS=2000 each, ~4 min; needs PostgreSQL)
+	cd serving && GOFLAGS=-modcacherw go test ./internal/ads/ ./internal/adtoken/ ./internal/billing/ \
+		-count=1 -timeout 0 -rapid.checks=$(CHECKS)
 
 test-web: ## Type-check and lint the web app (next typegen first: tsc needs the route types)
 	cd web && npx next typegen && npx tsc --noEmit && npm run lint
