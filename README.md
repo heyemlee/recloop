@@ -31,3 +31,8 @@ not redistributed here; `make data` downloads it and checks every file.
 
 > Jianmo Ni, Jiacheng Li and Julian McAuley. Justifying Recommendations using
 > Distantly-Labeled Reviews and Fine-Grained Aspects. EMNLP 2019.
+
+## License
+
+The code is under the [MIT License](LICENSE). Code adapted from other projects keeps its
+original license notice. The dataset is not part of this repository and has its own terms.
