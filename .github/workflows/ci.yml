@@ -1,0 +1,115 @@
+# Lint and tests on every push to main and every pull request. Datasets, checkpoints and model
+# bundles are not in the repository, so the tests that need them skip here. PostgreSQL and
+# Redis run as services, so the Go integration tests (migrations, served logs, idempotent
+# events) do run. Actions are pinned to commit SHAs.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python (ml, model_server)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.12.6"
+          enable-cache: true
+          cache-dependency-glob: |
+            ml/uv.lock
+            model_server/uv.lock
+      - name: ruff (check + format)
+        run: make lint
+      - name: pytest ml
+        run: make test-ml
+      - name: pytest model_server
+        run: make test-model-server
+
+  go:
+    name: Go (serving)
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.7-pg18-trixie
+        env:
+          POSTGRES_USER: recloop
+          POSTGRES_PASSWORD: recloop
+          POSTGRES_DB: recloop
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U recloop -d recloop"
+          --health-interval 2s --health-timeout 5s --health-retries 30
+      redis:
+        image: redis:8.10.3-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s --health-timeout 5s --health-retries 30
+    env:
+      DATABASE_URL: postgres://recloop:recloop@localhost:5432/recloop?sslmode=disable
+      REDIS_URL: redis://localhost:6379/0
+      GOMODCACHE: ${{ github.workspace }}/.cache/go/mod
+      GOCACHE: ${{ github.workspace }}/.cache/go/build
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: serving/go.mod
+          cache-dependency-path: |
+            serving/go.sum
+            tools/go.sum
+      - name: gofmt, go vet, go test
+        run: make test-go
+
+  generated:
+    name: Generated code is up to date
+    runs-on: ubuntu-24.04
+    env:
+      GOMODCACHE: ${{ github.workspace }}/.cache/go/mod
+      GOCACHE: ${{ github.workspace }}/.cache/go/build
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: tools/go.mod
+          cache-dependency-path: |
+            serving/go.sum
+            tools/go.sum
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.12.6"
+          enable-cache: true
+          cache-dependency-glob: model_server/uv.lock
+      - name: buf lint + format, protoc and sqlc generation
+        run: make generate
+      - name: No diff against the committed code
+        run: |
+          git status --porcelain
+          test -z "$(git status --porcelain)"
+
+  web:
+    name: Web (tsc, eslint)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "26"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: npm ci
+        working-directory: web
+        run: npm ci
+      - name: tsc + eslint
+        run: make test-web
