@@ -1,9 +1,17 @@
 # RecLoop
 
+[![CI](https://github.com/heyemlee/recloop/actions/workflows/ci.yml/badge.svg)](https://github.com/heyemlee/recloop/actions/workflows/ci.yml)
+
 RecLoop is a small office-supplies store with personalized recommendations, sponsored
 products in the feed and a shopping assistant. The online layer is written in Go, models and
 offline work in Python, and it runs on PostgreSQL + pgvector, Redis and Redpanda. User
 behavior, advertisers and budgets are all simulated.
+
+![The store with its debug panel: two users get different feeds, and a click on a binder changes the next feed](docs/demo.gif)
+
+The store with the debug panel on: every request shows its recall sources, fusion scores,
+model version and experiment groups. Two dataset users get different feeds; after a click on a
+binder, the next feed includes items recalled via that binder (outlined in the GIF).
 
 **Status: work in progress.** Milestones M0 and M1 are done:
 
