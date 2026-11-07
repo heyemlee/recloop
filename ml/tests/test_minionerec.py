@@ -295,12 +295,12 @@ def test_cost_summary_leaves_out_warmup_calls(tmp_path):
                         {
                             "waited_seconds": 0.0,
                             "start": {"load1": 0.5, "containers": []},
-                            "containers_during": ["aihd-test-pg"],
+                            "containers_during": ["other-test-pg", "other-test-kafka"],
                         },
                         {
                             "waited_seconds": 30.0,
                             "start": {"load1": 0.5, "containers": []},
-                            "containers_during": ["aihd-test-kafka"],
+                            "containers_during": ["other-test-redis"],
                         },
                     ],
                     "quiet_start": True,
@@ -318,8 +318,12 @@ def test_cost_summary_leaves_out_warmup_calls(tmp_path):
     assert c["loadavg_end"] == 0.7 and c["quiet"]["disturbed"]
     assert minionerec_report._disturbed(c) and not minionerec_report._busy(c)
     notes = "\n".join(minionerec_report._quiet_notes(out))
-    assert "`beam10_batch1` was run a second time" in notes
-    assert "aihd-test-pg" in notes and "aihd-test-kafka" in notes and "(†)" in notes
+    # counts, not names: the containers belong to other projects on the machine
+    assert (
+        "`beam10_batch1` was run a second time: 2 other Docker containers ran during the first "
+        "attempt, and 1 during the second too; it is kept as measured (†)." in notes
+    )
+    assert "other-test" not in notes
 
 
 @pytest.mark.skipif(
@@ -460,7 +464,7 @@ def _write_cost(cost, sasrec_json, disturbed="beam50_batch8"):
         timing = {"batches": [{"size": batch, "seconds": per_call} for _ in range(calls)]}
         (cost / name / "timing.json").write_text(json.dumps(timing))
         attempts = [{"waited_seconds": 0.0, "start": {"load1": 1.2, "containers": []}}]
-        attempts[0]["containers_during"] = ["aihd-test-pg"] if name == disturbed else []
+        attempts[0]["containers_during"] = ["other-test-pg"] if name == disturbed else []
         if name == disturbed:
             attempts.append(
                 {
@@ -530,7 +534,11 @@ def test_cost_section_renders_load_and_reruns(tmp_path):
     )
     text = minionerec_report.render(out)
     assert "| Load, start / end |" in text and "| 1.2 / 1.8 |" in text and "| 1.1 / 1.3 |" in text
-    assert "`beam50_batch8` was run a second time" in text and "(aihd-test-pg)." in text
+    assert (
+        "`beam50_batch8` was run a second time: 1 other Docker container ran during the first "
+        "attempt." in text
+    )
+    assert "other-test-pg" not in text
     assert "†" not in text  # the second attempt was quiet
     assert "**Where the time goes.**" in text and "**Against SASRec.**" in text
     assert "Preliminary timings" not in text

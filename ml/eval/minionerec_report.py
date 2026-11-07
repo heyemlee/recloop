@@ -565,6 +565,12 @@ def _disturbed(c: dict) -> bool:
     return bool((c.get("quiet") or {}).get("disturbed"))
 
 
+def _containers(names: list[str]) -> str:
+    """A count only: the containers belong to other projects on the machine, so their names
+    stay in the manifest under artifacts/."""
+    return f"{len(names)} other Docker container{'' if len(names) == 1 else 's'}"
+
+
 def _quiet_notes(cost: dict) -> list[str]:
     measured = dict(cost["configs"])
     if cost.get("sasrec"):
@@ -573,21 +579,19 @@ def _quiet_notes(cost: dict) -> list[str]:
     for name, c in measured.items():
         attempts = (c.get("quiet") or {}).get("attempts", [])
         if len(attempts) > 1:
-            first = ", ".join(attempts[0]["containers_during"])
             notes.append(
-                f"- `{name}` was run a second time: other containers ran during the first "
-                f"attempt ({first})"
+                f"- `{name}` was run a second time: {_containers(attempts[0]['containers_during'])}"
+                " ran during the first attempt"
                 + (
-                    f", and during the second too ({', '.join(attempts[-1]['containers_during'])}"
-                    "); it is kept as measured (†)."
+                    f", and {len(attempts[-1]['containers_during'])} during the second too; it is "
+                    "kept as measured (†)."
                     if _disturbed(c)
                     else "."
                 )
             )
         elif _disturbed(c):
             notes.append(
-                f"- `{name}`: containers ran during it "
-                f"({', '.join(attempts[-1]['containers_during'])}) (†)."
+                f"- `{name}`: {_containers(attempts[-1]['containers_during'])} ran during it (†)."
             )
         if attempts and not attempts[-1]["start"]["load1"] < BUSY_LOAD:
             notes.append(

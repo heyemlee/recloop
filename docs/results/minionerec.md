@@ -143,7 +143,7 @@ One test sample per user, 96 random users; MiniOneRec on the 16-core GPU (MPS) i
 | SASRec, PyTorch CPU, 8 threads | 8 | 0.64 ms | 0.70 ms | 0.75 ms | 12,356 | 0.2 GiB | 1.1 / 1.1 |
 | SASRec, PyTorch CPU, 8 threads | 256 | 9.68 ms | 10.12 ms | 10.21 ms | 26,054 | 0.2 GiB | 1.1 / 1.1 |
 
-- `beam50_batch1_prefill` was run a second time: other containers ran during the first attempt (aihd-test-14950-kafka, aihd-test-14950-pg, aihd-test-14950-redis, aihd-test-14950-s3, aisql-test-14982-pg).
+- `beam50_batch1_prefill` was run a second time: 5 other Docker containers ran during the first attempt.
 - `beam10_batch1`: 1.4 GiB swapped out while it ran (vm_stat), so its times include paging.
 - `beam50_batch1`: 506 MiB swapped out while it ran (vm_stat), so its times include paging.
 - `beam50_batch8`: 7.8 GiB swapped out while it ran (vm_stat), so its times include paging.

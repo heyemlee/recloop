@@ -39,13 +39,13 @@ def test_one_attempt_on_a_quiet_machine(monkeypatch):
 def test_runs_once_more_after_a_container_ran(monkeypatch):
     _script(
         monkeypatch,
-        [[], [], ["aihd-test-pg"], ["aihd-test-pg"], [], [], [], []],
+        [[], [], ["other-test-pg"], ["other-test-pg"], [], [], [], []],
         swapouts=[100, 103, 103, 103],
     )
     calls = []
     result, rec = _quietly(lambda: calls.append(1) or len(calls))
     assert result == 2 and len(rec["attempts"]) == 2
-    assert rec["attempts"][0]["containers_during"] == ["aihd-test-pg"]
+    assert rec["attempts"][0]["containers_during"] == ["other-test-pg"]
     assert rec["attempts"][1]["containers_during"] == []
     assert rec["quiet_start"] and not rec["disturbed"]
     # the first attempt swapped out 3 pages, the kept one nothing
@@ -56,16 +56,19 @@ def test_runs_once_more_after_a_container_ran(monkeypatch):
 
 def test_keeps_a_second_disturbed_attempt(monkeypatch):
     # each attempt starts quiet; a stack comes up during both
-    _script(monkeypatch, ([[]] + [["kafka"]] * 3) * 2)
+    _script(monkeypatch, ([[]] + [["other-test-kafka"]] * 3) * 2)
     calls = []
     _, rec = _quietly(lambda: calls.append(1))
     assert len(calls) == 2  # no third attempt
     assert rec["disturbed"] and rec["quiet_start"]
-    assert [a["containers_during"] for a in rec["attempts"]] == [["kafka"], ["kafka"]]
+    assert [a["containers_during"] for a in rec["attempts"]] == [
+        ["other-test-kafka"],
+        ["other-test-kafka"],
+    ]
 
 
 def test_does_not_measure_on_a_machine_that_stays_busy(monkeypatch):
-    _script(monkeypatch, [["kafka"]] * 4, load1=1.0)
+    _script(monkeypatch, [["other-test-kafka"]] * 4, load1=1.0)
     calls = []
     with pytest.raises(machine.NotQuiet, match="no quiet machine"):
         _quietly(lambda: calls.append(1))
