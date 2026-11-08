@@ -267,7 +267,24 @@ export default function AdminPage() {
                       </div>
                     ))}
                   </td>
-                  <td className="py-1.5 text-right">
+                  <td className="space-y-1 py-1.5 text-right">
+                    {e.status === "running" && e.variants.length === 2 && (
+                      <SplitEditor
+                        exp={e}
+                        disabled={busy !== null}
+                        onApply={(share) =>
+                          step(`Split ${e.exp_id}`, () =>
+                            admin.putExperiment({
+                              ...e,
+                              variants: [
+                                { ...e.variants[0], share },
+                                { ...e.variants[1], share: 100 - share },
+                              ],
+                            }),
+                          )
+                        }
+                      />
+                    )}
                     {e.status === "running" && (
                       <Button size="xs" variant="outline" disabled={busy !== null} onClick={() => step(`Stop ${e.exp_id}`, () => admin.stopExperiment(e.exp_id))}>
                         Stop
@@ -327,5 +344,34 @@ export default function AdminPage() {
         </CardContent>
       </Card>
     </main>
+  );
+}
+
+/** The share of an experiment's first variant (the second gets the rest), applied with PUT. */
+function SplitEditor({ exp, disabled, onApply }: { exp: Experiment; disabled: boolean; onApply: (share: number) => void }) {
+  const [share, setShare] = useState(exp.variants[0].share);
+  return (
+    <form
+      className="flex items-center justify-end gap-1"
+      onSubmit={(ev) => {
+        ev.preventDefault();
+        if (share >= 1 && share <= 99) onApply(share);
+      }}
+    >
+      <span className="text-xs text-muted-foreground">{exp.variants[0].name}</span>
+      <Input
+        className="h-6 w-16 text-xs"
+        type="number"
+        min={1}
+        max={99}
+        value={share}
+        onChange={(ev) => setShare(Number(ev.target.value))}
+        aria-label={`Share of ${exp.variants[0].name} in ${exp.exp_id}`}
+      />
+      <span className="text-xs text-muted-foreground">%</span>
+      <Button size="xs" type="submit" variant="secondary" disabled={disabled || share === exp.variants[0].share}>
+        Apply
+      </Button>
+    </form>
   );
 }
