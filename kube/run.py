@@ -532,12 +532,21 @@ def environment() -> dict:
     pins = [ln.split()[:3] for ln in lock.splitlines() if ln.startswith(("chart ", "node "))]
     tools = {ln.split()[1]: ln.split()[2] for ln in lock.splitlines() if ln.startswith("tool ")}
     k6v = subprocess.run([str(K6_BIN), "version"], capture_output=True, text=True).stdout.strip()
+    current = (BUNDLES / "current").resolve()
+    files = set(json.loads((current / "manifest.json").read_text())["files"])
     return {
         "machine": m.info(),
         "node": k8s.node_info(),
         "pins": pins,
         "tools": tools,
         "k6": k6v.splitlines()[0] if k6v else None,
+        # The bundle the cluster serves (artifacts/bundles/current): Rank runs when it has a
+        # ranker (M4), ads get the model's pCTR when it has one.
+        "bundle": {
+            "version": current.name,
+            "ranker": "ranker.onnx" in files,
+            "pctr": "pctr.json" in files,
+        },
         "images": images,
         "containers": k8s.containers_resources(),
         "hpa": k8s.kubectl_json("get", "hpa", "api")["spec"],

@@ -42,6 +42,12 @@ spec:
               value: "redis://{{ .Values.endpoints.cacheRedis }}/0"
             - name: MODEL_SERVER_ADDR
               value: "model-server:18081"
+            # Releases (M4): every api pod reconciles the model server's loaded versions and
+            # default through its admin port every 2 s. One address: with several model-server
+            # pods behind the Service, a release step reaches the pod the api's connection is on
+            # (the runs here make no release; see values.yaml, modelServer.replicas).
+            - name: MODEL_SERVER_ADMIN_URL
+              value: "http://model-server:18082"
             - name: RECLOOP_BUNDLE
               value: "/bundles/{{ .Values.bundle.version }}"
             {{- include "recloop.envMap" $c.env | trim | nindent 12 }}

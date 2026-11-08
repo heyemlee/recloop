@@ -6,12 +6,15 @@ import type { NextConfig } from "next";
 // /metrics stay off the browser's reach. The conversation (/api/v1/chat, server-sent events)
 // goes to the shopping assistant's own service (agent/server.py), which calls the api itself.
 const apiUrl = process.env.RECLOOP_API_URL ?? "http://127.0.0.1:18080";
+// An empty RECLOOP_AGENT_URL (the Kubernetes image, deploy/web.Dockerfile): no assistant, so no
+// /api/v1/chat rewrite, and the chat page says so (NEXT_PUBLIC_CHAT_BACKEND, fixed at build).
 const agentUrl = process.env.RECLOOP_AGENT_URL ?? "http://127.0.0.1:18083";
 
 const nextConfig: NextConfig = {
   // The container image (deploy/web.Dockerfile) builds with NEXT_OUTPUT=standalone: a minimal
   // server.js plus the traced dependencies. `next dev` and `next start` are unaffected.
   output: process.env.NEXT_OUTPUT === "standalone" ? "standalone" : undefined,
+  env: { NEXT_PUBLIC_CHAT_BACKEND: agentUrl ? "on" : "off" },
   cacheComponents: true,
   partialPrefetching: true,
   // The dev server only serves its scripts to localhost by default; tests may use 127.0.0.1.
@@ -27,7 +30,7 @@ const nextConfig: NextConfig = {
   async rewrites() {
     // In order: the first match wins.
     return [
-      { source: "/api/v1/chat", destination: `${agentUrl}/v1/chat` },
+      ...(agentUrl ? [{ source: "/api/v1/chat", destination: `${agentUrl}/v1/chat` }] : []),
       { source: "/api/v1/:path*", destination: `${apiUrl}/v1/:path*` },
     ];
   },

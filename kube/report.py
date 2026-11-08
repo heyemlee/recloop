@@ -690,6 +690,7 @@ def setup_section(meta: dict | None, runs: list[dict]) -> list[str]:
         "- Infrastructure from official charts: "
         + ", ".join(f"{name} {ver}" for _, name, ver in charts)
         + ". Prometheus scrapes RecLoop's services every 5 s.",
+        bundle_line(env.get("bundle")),
         f"- RecLoop's images (`deploy/kind/cluster.sh images`, loaded with `kind load`, not pushed "
         f"anywhere): {', '.join(f'{k} {v}' for k, v in env['images'].items()) or '?'}.",
         f"- Load: {env.get('k6') or 'k6'} on the host, open loop, to the api's NodePort through "
@@ -722,6 +723,14 @@ def setup_section(meta: dict | None, runs: list[dict]) -> list[str]:
                  sorted(rows), "llrrrr")  # fmt: skip
     out.append("")
     return out
+
+
+def bundle_line(b: dict | None) -> str:
+    if not b:
+        return "- Bundle: not recorded."
+    parts = ["LightGBM ranking on every home request" if b.get("ranker") else "RRF order (no ranker)",
+             "the model's pCTR for ads" if b.get("pctr") else "a fixed pCTR"]  # fmt: skip
+    return f"- Bundle `{b['version']}` (the api's `current`): {', '.join(parts)}."
 
 
 def preliminary(data: dict | None, drill: dict | None) -> list[str]:

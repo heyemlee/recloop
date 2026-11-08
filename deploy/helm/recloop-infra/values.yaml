@@ -50,9 +50,11 @@ redis:
       resources:
         requests: {cpu: 50m, memory: 128Mi}
         limits: {cpu: "1", memory: 512Mi}
-  # Memory, evictions and errors by prefix (OOM refusals) per instance.
+  # Memory, evictions and errors by prefix (OOM refusals) per instance; the version compose's
+  # redis-exporter runs (one sidecar per instance here, one multi-target exporter there: the
+  # same metrics, job "redis", label redis="state" / "cache", so the alert rules apply as is).
   exporter:
-    image: oliver006/redis_exporter:v1.94.0
+    image: oliver006/redis_exporter:v1.95.0
     resources:
       requests: {cpu: 10m, memory: 16Mi}
       limits: {cpu: 100m, memory: 64Mi}

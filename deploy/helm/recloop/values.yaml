@@ -41,6 +41,8 @@ bundle:
 api:
   # The starting size; the HorizontalPodAutoscaler owns the replica count when enabled.
   replicas: 1
+  # RANK (on), RECLOOP_ADMIN (off: no /internal/admin/*) and RECLOOP_BUNDLES_DIR (the startup
+  # bundle's parent, /bundles) keep their defaults.
   env:
     RECLOOP_RESILIENCE: full
     CANDIDATE_CACHE: "on"
@@ -68,6 +70,11 @@ api:
     scaleDownStabilizationSeconds: 60
 
 modelServer:
+  # Two pods: a rolling update keeps one serving while the other is replaced, and Rank (M4)
+  # runs on every home request. M4's releases (canary, activate, rollback) address one model
+  # server (MODEL_SERVER_ADMIN_URL): with two pods only the one the api's connection lands on
+  # follows a release step; use replicas: 1 on a cluster that makes releases until the api
+  # reconciles every endpoint.
   replicas: 2
   workers: 32
   # Burstable: about 0.1 core at the rates of the runs (the candidate cache answers most home

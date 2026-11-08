@@ -139,7 +139,7 @@ exists() { "$KIND" get clusters 2>/dev/null | grep -qx "$CLUSTER"; }
 # loading them saves the node's pulls (Docker Hub's anonymous limit is low). Best effort: an
 # image that is not here, or does not load, is pulled by the node instead.
 PRELOAD=(redis:8.10.3-alpine redpandadata/redpanda:v26.2.6 redpandadata/connect:4.115.1
-  ghcr.io/shopify/toxiproxy:2.13.0 grafana/grafana:13.2.4 oliver006/redis_exporter:v1.94.0)
+  ghcr.io/shopify/toxiproxy:2.13.0 grafana/grafana:13.2.4 oliver006/redis_exporter:v1.95.0)
 
 # A pulled image is an index of several platforms of which Docker has one: `kind load
 # docker-image` imports with --all-platforms and fails ("content digest ... not found"). Saving

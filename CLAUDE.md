@@ -555,12 +555,18 @@ interpreter at exit: `ORT_DISABLE_TELEMETRY=1` (Makefile, model-server image, `m
   with their image ID (unchanged code keeps its tag, so `make deploy` rolls only what changed),
   `kind load`ed, never pushed. The bundles: `artifacts/bundles` mounted read-only into the node
   (`/recloop/bundles`) and from there into the api and model-server pods.
-- The chart (`deploy/helm/recloop`): api readiness `/healthz`, not `/readyz` (a dependency outage
-  must degrade, not empty the Service); api CPU request = limit = 500m, HPA 1-4 pods at 60 %;
+- The chart (`deploy/helm/recloop`): every pod `enableServiceLinks: false` (a `model-server`
+  Service would inject `MODEL_SERVER_PORT=tcp://...`, which the model server reads as its port);
+  api readiness `/healthz`, not `/readyz` (a dependency outage must degrade, not empty the
+  Service), startup probes on the api and the consumers; api CPU request = limit = 500m, HPA 1-4 pods at 60 %;
   model-server readiness = gRPC health (SERVING after the bundle checks), `maxSurge 1`,
   `maxUnavailable 0`, `minReadySeconds 5`, preStop sleep 5 s; aggregator and billing are
   StatefulSets (pod name = static `group.instance.id`), KEDA Kafka scaler 1-3 pods, 20,000
-  records of lag per pod (above the 15 s stall a scale-in causes), aggregator CPU limit 250m; log-sink `Recreate` (its config's static id); billing through pg-proxy.
+  records of lag per pod (above the 15 s stall a scale-in causes), aggregator CPU limit 250m;
+  api `MODEL_SERVER_ADMIN_URL=http://model-server:18082` (M4 releases reconcile one address: with
+  two model-server pods a release reaches one of them; the runs make none); no assistant (§23.2:
+  the web image has an empty `RECLOOP_AGENT_URL`, no `/api/v1/chat` rewrite, the chat page says
+  so); log-sink `Recreate` (its config's static id); billing through pg-proxy.
 - Runs (`kube/`, the ml environment, k6 and checks on the host): `kube.run` = rollout (gated,
   no-probe, broken bundle: `item_ids.json` shuffled, golden queries fail), hpa (step in load),
   keda (billing behind PostgreSQL +200 ms; aggregator paused 90 s, with KEDA and capped at 1);
