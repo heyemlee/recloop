@@ -319,6 +319,17 @@ def _redis_cells(r: dict | None) -> list[str]:
     return [cell, f"{ca['evicted_keys']:,}"]
 
 
+def _pace(run: dict) -> str:
+    """How fast the simulator ran (sessions at once, pauses between page views)."""
+    if "think_ms" not in run:
+        return ""
+    lo, hi = run["think_ms"]
+    return (
+        f", {run['concurrency']} sessions at a time with pauses of {lo:.0f}-{hi:.0f} ms between "
+        "page views"
+    )
+
+
 def render(run: dict, results: dict, offline: dict | None) -> str:
     aa, ab = results.get("aa"), results.get("ab")
     lines = [
@@ -328,7 +339,9 @@ def render(run: dict, results: dict, offline: dict | None) -> str:
         "",
         "Simulated traffic (`sim/`, design §2.2) on the api with bundle "
         f"`{run['bundle']}`, the rank-layer experiment split 50 / 50 over all users, the standing "
-        f"campaigns ({run['campaigns']}) filling the sponsored slots. The simulator's users click by "
+        f"campaigns ({run['campaigns']}) filling the sponsored slots"
+        + _pace(run)
+        + ". The simulator's users click by "
         "examination × relevance to their test-period items; it validates the system and the experiment "
         "pipeline, while the evidence for the model is the offline evaluation (§2.2). The A/A ran first, "
         "and the analysis was checked on it before the A/B was read.",

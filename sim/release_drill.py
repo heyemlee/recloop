@@ -16,9 +16,10 @@ endpoints, the same ones the admin page's buttons call:
   3. full rollout: --full-seconds with every user on the new version;
   4. a bad release: --bad, built from a weaker SASRec checkpoint, passes validation (it is
      consistent; validation does not judge quality) and is activated without a canary;
-  5. after --bad-seconds the CTR of the bad release is compared with the full-rollout phase and
-     it is rolled back: the previous version is still loaded, so the switch back is a pointer
-     switch; --after-seconds more traffic show the recovery.
+  5. after --bad-seconds the CTR of the bad release is compared with the full-rollout phase (the
+     numbers go into the rollback's note) and it is rolled back: the previous version is still
+     loaded, so the switch back is a pointer switch; --after-seconds more traffic show the
+     recovery.
 
 Recorded: every step's wall-clock time and the api's answer, the release record
 (model_version_events), the traffic per phase and per 10 s (versions served, failed page
@@ -64,6 +65,11 @@ def events_since(t0: float) -> list[dict]:
     ]
 
 
+def version_arm(pg: dict) -> str | None:
+    """A page view's arm when the arms are the versions that served it."""
+    return pg.get("model_version")
+
+
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--api", default=os.environ.get("RECLOOP_API_URL", "http://127.0.0.1:18080"))
@@ -78,6 +84,12 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--bad-seconds", type=float, default=300)
     p.add_argument("--after-seconds", type=float, default=300)
     p.add_argument("--concurrency", type=int, default=16)
+    p.add_argument(
+        "--think-ms",
+        type=traffic_mod.think_arg,
+        default=traffic_mod.THINK_MS,
+        help="min,max pause between a session's page views",
+    )
     p.add_argument("--out", type=Path, default=OUT)
     args = p.parse_args(argv)
 
@@ -123,7 +135,9 @@ def main(argv: list[str] | None = None) -> None:
         + 600
     )
     redis_before = redis_stats.counters()
-    traffic = traffic_mod.Traffic(args.out / "traffic", args.api, args.concurrency)
+    traffic = traffic_mod.Traffic(
+        args.out / "traffic", args.api, args.concurrency, think_ms=args.think_ms
+    )
     t0 = traffic.start(total)
     log["t0"] = t0
     try:
@@ -192,7 +206,24 @@ def main(argv: list[str] | None = None) -> None:
         )
         time.sleep(args.bad_seconds)
         t_rollback = time.time()
-        step("rollback", lambda: admin.rollback("bad release: CTR below the previous version"))
+        # The evidence goes into the release record with the decision: the bad release's CTR
+        # against the full rollout before it (user-level bootstrap).
+        pages, events, errors = _snapshot(traffic)
+        full_users = traffic_mod.ctr_by_user(
+            pages, events, t_full + 15, t_full_end, version_arm
+        ).get(args.new, {})
+        bad_users = traffic_mod.ctr_by_user(pages, events, t_bad + 5, t_rollback, version_arm).get(
+            args.bad, {}
+        )
+        bad = traffic_mod.bootstrap_ctr_diff(full_users, bad_users)
+        log["bad_vs_full_ctr"] = bad
+        step(
+            "rollback",
+            lambda: admin.rollback(
+                "drill: the release pushed without a canary goes back; its CTR against the full "
+                f"rollout {bad[0]:+.4f} [{bad[1]:+.4f}, {bad[2]:+.4f}]"
+            ),
+        )
         time.sleep(args.after_seconds)
         t_end = time.time()
     finally:
@@ -201,10 +232,6 @@ def main(argv: list[str] | None = None) -> None:
         print(f"drill    {redis_stats.describe(log['redis'])}")
 
     pages, events, errors = _snapshot(traffic)
-
-    def version_arm(pg: dict) -> str | None:
-        return pg.get("model_version")
-
     phases = {
         "before": (t0, t_canary),
         "canary": (t_canary, t_full),
@@ -216,13 +243,6 @@ def main(argv: list[str] | None = None) -> None:
         k: {"from": a, "to": b, **traffic_mod.summarize(pages, events, errors, a, b, version_arm)}
         for k, (a, b) in phases.items()
     }
-    full_users = traffic_mod.ctr_by_user(pages, events, t_full + 15, t_full_end, version_arm).get(
-        args.new, {}
-    )
-    bad_users = traffic_mod.ctr_by_user(pages, events, t_bad + 5, t_rollback, version_arm).get(
-        args.bad, {}
-    )
-    log["bad_vs_full_ctr"] = traffic_mod.bootstrap_ctr_diff(full_users, bad_users)
     log["switch"] = {
         "full": _switch_time(pages, t_full, args.new),
         "bad": _switch_time(pages, t_bad, args.bad),

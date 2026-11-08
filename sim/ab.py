@@ -68,6 +68,12 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--api", default=os.environ.get("RECLOOP_API_URL", "http://127.0.0.1:18080"))
     p.add_argument("--seconds", type=float, default=1200)
     p.add_argument("--concurrency", type=int, default=16)
+    p.add_argument(
+        "--think-ms",
+        type=traffic_mod.think_arg,
+        default=traffic_mod.THINK_MS,
+        help="min,max pause between a session's page views",
+    )
     p.add_argument("--only", choices=sorted(PHASES))
     p.add_argument("--out", type=Path, default=OUT)
     args = p.parse_args(argv)
@@ -75,7 +81,14 @@ def main(argv: list[str] | None = None) -> None:
     ads = ads_mod.Ads(args.api, os.environ.get("DATABASE_URL", ""))
     campaigns = standing.ensure(ads)
     active = admin.overview()["active"]
-    run = {"api": args.api, "bundle": active, "campaigns": len(campaigns), "phases": {}}
+    run = {
+        "api": args.api,
+        "bundle": active,
+        "campaigns": len(campaigns),
+        "concurrency": args.concurrency,
+        "think_ms": list(args.think_ms),
+        "phases": {},
+    }
     path = args.out / "run.json"
     if path.exists():
         run["phases"] = json.loads(path.read_text()).get("phases", {})
@@ -95,7 +108,9 @@ def main(argv: list[str] | None = None) -> None:
         )
         admin.wait_config(version)
         redis_before = redis_stats.counters()
-        traffic = traffic_mod.Traffic(args.out / name, args.api, args.concurrency)
+        traffic = traffic_mod.Traffic(
+            args.out / name, args.api, args.concurrency, think_ms=args.think_ms
+        )
         t0 = traffic.start(args.seconds)
         print(
             f"ab       {time.strftime('%H:%M:%S')} {name}: {spec['exp_id']} running, {args.seconds:.0f}s of traffic"

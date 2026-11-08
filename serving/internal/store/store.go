@@ -125,7 +125,7 @@ func (s *Store) RegisterActiveModel(ctx context.Context, version, uri string, ma
 		}
 		// The record of releases (M4) starts with the version the api came up with.
 		return q.InsertModelVersionEvent(ctx, db.InsertModelVersionEventParams{
-			Version: version, ToStatus: "active", Actor: "api-startup", Note: "no active version yet: the startup bundle " + uri,
+			Version: version, ToStatus: "active", Actor: "api-startup", Note: "no active version yet: the startup bundle (artifact_uri)",
 		})
 	})
 }

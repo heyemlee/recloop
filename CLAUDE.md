@@ -498,7 +498,10 @@ interpreter at exit: `ORT_DISABLE_TELEMETRY=1` (Makefile, model-server image, `m
   `make samples` and `make train-pctr`, `make bundle` (the release), `make bundle
   BUNDLE_FLAGS="--sasrec artifacts/models/sasrec/trials/8.pt"` (a bad release: the BCE trial),
   `make release-drill NEW=... BAD=...`, `make ab`, `make samples`, `make ab-report`. The runs
-  reseed Redis between phases (`make ab` does it itself).
+  reseed Redis between phases (`make ab` does it itself). After simulated traffic, `make samples`
+  gets `SAMPLES_FLAGS="--complete-through <the traffic's end + 30 min, UTC>"`: the simulator has
+  stopped, so nothing can arrive later and this reads what a run 30 minutes later would (the
+  default, the newest event, leaves the last 30 minutes not final).
 
 ## Shopping assistant (M6)
 

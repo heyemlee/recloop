@@ -21,6 +21,17 @@ from sim import run as run_mod
 from sim import world as world_mod
 from sim.client import uuid7_ms
 
+# Pauses between a session's page views, as in the billing drill: 16 sessions then make ~80 page
+# views/s. Without them the simulator is a load test (~1,200/s on a laptop), which also fills the
+# 1 GB state Redis within 15 minutes (a 7-day dedup marker per event).
+THINK_MS = (50.0, 300.0)
+
+
+def think_arg(text: str) -> tuple[float, float]:
+    """`min,max` in ms (a command-line flag)."""
+    lo, hi = (float(x) for x in text.split(","))
+    return lo, hi
+
 
 class Traffic:
     """sim.run's sessions in a background thread, one ledger per run."""
@@ -33,13 +44,20 @@ class Traffic:
         seed: int = world_mod.SEED,
         world: Path = world_mod.DEFAULT_WORLD,
         dwell_ms=(0.0, 0.0),
+        think_ms=THINK_MS,
     ):
         self.out = Path(out)
         self.out.mkdir(parents=True, exist_ok=True)
         self.ledger = run_mod.Ledger(self.out / "ledger.jsonl")
         w = world_mod.load(world)
         self.sim = run_mod.Simulator(
-            w, api_url, run_mod.Faults(), self.ledger, seed=seed, dwell_ms=dwell_ms
+            w,
+            api_url,
+            run_mod.Faults(),
+            self.ledger,
+            think_ms=tuple(think_ms),
+            seed=seed,
+            dwell_ms=dwell_ms,
         )
         self.concurrency = concurrency
         self.thread: threading.Thread | None = None

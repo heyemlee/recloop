@@ -188,9 +188,18 @@ def test_ab_report_on_a_made_up_aa(tmp_path):
     assert 0 <= m["p"] <= 1 and res["resalt"]["n"] == ab_report.RESALTS
     assert sum(res["resalt"]["deciles"]) == ab_report.RESALTS
     md = ab_report.render(
-        {"bundle": "v1", "campaigns": 16, "phases": {"aa": phase}}, {"aa": res}, None
+        {
+            "bundle": "v1",
+            "campaigns": 16,
+            "concurrency": 16,
+            "think_ms": [50.0, 300.0],
+            "phases": {"aa": phase},
+        },
+        {"aa": res},
+        None,
     )
     assert "## A/A" in md and "Re-split 100 times" in md and "| 0 / 0 | 7 |" in md
+    assert "16 sessions at a time with pauses of 50-300 ms" in md
 
 
 def test_ab_report_finds_a_real_lift(tmp_path):
@@ -225,7 +234,7 @@ def test_release_report_renders(tmp_path, monkeypatch):
         "old": "vA",
         "new": "vB",
         "bad": "vC",
-        "args": {"concurrency": 16, "canary_percent": 5},
+        "args": {"concurrency": 16, "canary_percent": 5, "think_ms": [50.0, 300.0]},
         "steps": [
             {"step": "full rollout vB", "t": 1100.0, "seconds": 0.1, "ok": True, "response": {}}
         ],
@@ -280,4 +289,5 @@ def test_release_report_renders(tmp_path, monkeypatch):
         and "Decision: full rollout." in md
         and "| `vB` | canary | active |" in md
         and "evicted 0 keys and refused 0 writes" in md
+        and "16 concurrent sessions pausing 50-300 ms between page views" in md
     )

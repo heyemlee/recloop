@@ -325,7 +325,8 @@ train-pctr: ## Logistic-regression pCTR on the samples (artifacts/samples/train)
 COLLECT_SECONDS ?= 900
 collect: sim-world build-aggregator ## Traffic for the training samples: standing campaigns, COLLECT_SECONDS of sessions (~15 min)
 	$(PY) -m sim.standing
-	$(PY) -m sim.run --sessions 10000000 --max-seconds $(COLLECT_SECONDS) --concurrency 16 --out artifacts/sim/collect
+	$(PY) -m sim.run --sessions 10000000 --max-seconds $(COLLECT_SECONDS) --concurrency 16 --think-ms 50,300 \
+		--out artifacts/sim/collect
 
 release-drill: sim-world ## Canary -> full rollout of NEW, then BAD rolled back, under traffic (~35 min) -> docs/results/release.md
 	$(PY) -m sim.release_drill --new $(NEW) --bad $(BAD) $(DRILL_FLAGS)
