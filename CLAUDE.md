@@ -161,6 +161,7 @@ make deploy-runs   # rolling update, HPA, KEDA (3 repeats each) -> docs/results/
                    # deploy-rollout / deploy-hpa / deploy-keda; DEPLOY_FLAGS='--resume "<reason>"'
 make deploy-drill  # 30-min billing drill with billing's pods deleted -> deploy.md
 make deploy-report # re-render deploy.md from artifacts/deploy/
+make deploy-smoke  # one short run of each kind + a 5-min drill -> artifacts/deploy/smoke.md
 make kind-status / kind-down   # pods and autoscalers / delete the cluster
 make kind-tools / lint-deploy  # pinned kind, kubectl, helm / helm lint + render, no cluster
 ```

@@ -69,7 +69,7 @@ TOOL_PKGS := github.com/bufbuild/buf/cmd/buf google.golang.org/protobuf/cmd/prot
 	sim srm drill load load-smoke latency-report billing overdelivery billing-drill billing-report \
 	minionerec-gen minionerec-cost minionerec clean-processed clean-artifacts kind-tools kind-up \
 	kind-images kind-data deploy kind-status deploy-runs deploy-rollout deploy-hpa deploy-keda \
-	deploy-drill deploy-report kind-down lint-deploy
+	deploy-drill deploy-report deploy-smoke kind-down lint-deploy
 
 help: ## List targets
 	@grep -E '^[a-z0-9-]+:.*## ' $(MAKEFILE_LIST) \
@@ -319,6 +319,12 @@ deploy-drill: sim-world build-aggregator build-billing ## The 30-minute billing 
 
 deploy-report: ## Re-render docs/results/deploy.md from artifacts/deploy/
 	$(PY) -m kube.report
+
+deploy-smoke: k6 sim-world build-aggregator build-billing ## One short run of each kind + a 5-min drill -> artifacts/deploy/smoke.md (trying the cluster out)
+	$(PY) -m kube.run --smoke $(DEPLOY_FLAGS)
+	$(PY) -m kube.drill --minutes 5 --out artifacts/deploy/drill-smoke
+	$(PY) -m kube.report --results artifacts/deploy/smoke.json \
+		--drill artifacts/deploy/drill-smoke/verify.json --out artifacts/deploy/smoke.md
 
 kind-down: ## Delete the kind cluster (its volumes go with it)
 	$(KIND_SH) down

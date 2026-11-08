@@ -22,6 +22,8 @@ server has its two ready pods, no toxic is set. Each configuration runs `--repea
 (interleaved); the report takes medians.
 
 Usage: python -m kube.run [--only rollout,hpa,keda] [--repeats 3] [--resume REASON]
+       python -m kube.run --smoke   (one short run of each kind -> artifacts/deploy/smoke.json;
+                                     for trying the cluster out, not for the report)
 """
 
 from __future__ import annotations
@@ -567,7 +569,15 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--slow-seconds", type=int, default=120)
     p.add_argument("--pause-seconds", type=int, default=90)
     p.add_argument("--settle-seconds", type=int, default=240)
+    p.add_argument("--smoke", action="store_true", help="one short run of each kind")
     args = p.parse_args(argv)
+    if args.smoke:
+        short = {"repeats": 1, "rollout_seconds": 90, "hpa_hold": 120, "keda_seconds": 180,
+                 "slow_seconds": 60, "pause_seconds": 45, "settle_seconds": 120}  # fmt: skip
+        for k, v in short.items():
+            setattr(args, k, v)
+        if args.out == str(OUT / "results.json"):
+            args.out = str(OUT / "smoke.json")
     args.only = set(args.only.split(","))
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
