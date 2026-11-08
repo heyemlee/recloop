@@ -83,6 +83,15 @@ class Traffic:
         self.ledger.close()
 
 
+def snapshot(ledger: run_mod.Ledger) -> tuple[dict, list, list]:
+    """read_ledger() of a ledger that may still be written (flushed first) or already closed
+    (Traffic.stop() closes it)."""
+    with ledger.lock:
+        if not ledger.f.closed:
+            ledger.f.flush()
+    return read_ledger(Path(ledger.f.name))
+
+
 def read_ledger(path: Path) -> tuple[dict, list, list]:
     """pages by request_id (first page of a request), events, errors."""
     pages, events, errors = {}, [], []
@@ -209,6 +218,51 @@ def ctr_by_user(
             seen.add(imp)
             out[a][u][1] += 1
     return {a: dict(us) for a, us in out.items()}
+
+
+# Bins of a user's home-page count within a run: (first, last) page number, last None = open.
+PAGE_COUNT_BINS = ((1, 3), (4, 15), (16, 63), (64, None))
+
+
+def ctr_by_page_count(pages: dict, events: list, t0: float, t1: float, arm=None) -> list[dict]:
+    """CTR of a user's n-th home page view within [t0, t1), by bins of n (PAGE_COUNT_BINS) and,
+    when given, by arm. Shows how CTR moves as the same users keep coming back, which makes
+    phases at different times differ in more than their version."""
+    order = defaultdict(list)
+    for r, p in pages.items():
+        if p["surface"] == "home" and t0 <= p["t"] < t1:
+            order[p["user_id"]].append((p["t"], r))
+    rank = {}
+    for lst in order.values():
+        for n, (_, r) in enumerate(sorted(lst), 1):
+            rank[r] = n
+    counts = defaultdict(lambda: [0, 0])
+    seen = set()
+    for e in events:
+        imp = e.get("impression_id")
+        if not imp:
+            continue
+        r = imp.split(":")[0]
+        n = rank.get(r)
+        if n is None:
+            continue
+        b = next(b for b in PAGE_COUNT_BINS if n >= b[0] and (b[1] is None or n <= b[1]))
+        key = (b, arm(pages[r]) if arm else None)
+        if e["type"] == "impression":
+            counts[key][0] += 1
+        elif e["type"] == "click" and imp not in seen:
+            seen.add(imp)
+            counts[key][1] += 1
+    return [
+        {
+            "pages": list(b),
+            "arm": a,
+            "impressions": i,
+            "clicks": c,
+            "ctr": c / i if i else float("nan"),
+        }
+        for (b, a), (i, c) in sorted(counts.items(), key=lambda kv: (kv[0][0][0], str(kv[0][1])))
+    ]
 
 
 def bootstrap_ctr_diff(

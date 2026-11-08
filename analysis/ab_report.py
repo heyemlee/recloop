@@ -143,16 +143,22 @@ def srm(df: pd.DataFrame, variants: list[dict]) -> dict:
     chi2, p = stats.chisquare(observed, expected)
     # Every user's arm is the one the bucketing gives (Python twin of serving/internal/experiment).
     exp = {"layer": "rank", "bucket_from": 0, "bucket_to": 1000, "variants": variants}
-    mismatch = sum(
-        srm_mod.assign([exp], "rank", str(uid)) != row["first"] for uid, row in users.iterrows()
+    mismatch = int(
+        sum(
+            srm_mod.assign([exp], "rank", str(uid)) != row["first"] for uid, row in users.iterrows()
+        )
     )
+    switchers = int((users["nunique"] > 1).sum())
     return {
         "observed": dict(zip(names, observed, strict=True)),
         "chi2": float(chi2),
         "p": float(p),
-        "switchers": int((users["nunique"] > 1).sum()),
+        "switchers": switchers,
         "bucketing_mismatch": mismatch,
-        "ok": p >= SRM_ALPHA,
+        # The split is sound only if the ratio fits, nobody saw two arms, and every user's arm
+        # is the one the bucketing gives.
+        "ratio_ok": bool(p >= SRM_ALPHA),
+        "ok": bool(p >= SRM_ALPHA and switchers == 0 and mismatch == 0),
     }
 
 
@@ -187,7 +193,10 @@ def ledger_guardrails(path: Path, exp_id: str) -> dict:
         return by
     with path.open() as f:
         for line in f:
-            r = json.loads(line)
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:  # a line cut off when the run was stopped
+                continue
             if r.get("kind") != "page" or "ms" not in r:
                 continue
             arm = r["variants"].get("rank")
@@ -307,6 +316,11 @@ def _metric_rows(res: dict) -> list[list[str]]:
     return rows
 
 
+def _flag(n: int, what: str) -> str:
+    """A count that must be 0, in bold when it is not."""
+    return f"{n:,} {what}" if n == 0 else f"**{n:,} {what}**"
+
+
 def _redis_cells(r: dict | None) -> list[str]:
     """A phase's effect on the two Redis instances (sim/redis_stats.py); the state instance
     must show 0 / 0."""
@@ -398,8 +412,15 @@ def render(run: dict, results: dict, offline: dict | None) -> str:
             "",
             "Sample ratio: "
             + ", ".join(f"{k} {v:,}" for k, v in s["observed"].items())
-            + f" users; chi-square p = {s['p']:.3f} ({'no mismatch' if s['ok'] else '**MISMATCH**'} at {SRM_ALPHA}); "
-            f"{s['switchers']} users seen in two arms; {s['bucketing_mismatch']} users whose arm differs from the Python bucketing.",
+            + f" users; chi-square p = {s['p']:.3f} ({'no mismatch' if s['ratio_ok'] else '**MISMATCH**'} at {SRM_ALPHA}); "
+            + _flag(s["switchers"], "users seen in two arms")
+            + "; "
+            + _flag(s["bucketing_mismatch"], "users whose arm differs from the Python bucketing")
+            + (
+                "."
+                if s["ok"]
+                else ". **The split is not sound: the comparison below does not hold.**"
+            ),
             "",
             *_table(
                 [

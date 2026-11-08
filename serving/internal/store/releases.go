@@ -98,7 +98,7 @@ func (s *Store) RegisterBuilt(ctx context.Context, version, uri string, manifest
 			return err
 		}
 		added = true
-		return q.InsertModelVersionEvent(ctx, db.InsertModelVersionEventParams{Version: version, ToStatus: "built", Actor: actor, Note: uri})
+		return q.InsertModelVersionEvent(ctx, db.InsertModelVersionEventParams{Version: version, ToStatus: "built", Actor: actor, Note: "registered: manifest found (artifact_uri)"})
 	})
 	return added, err
 }

@@ -88,9 +88,27 @@ def test_traffic_summaries(tmp_path):
     assert [r["versions"] for r in tl] == [{"vA": 10}, {"vA": 10}, {"vB": 10}, {"vB": 10}] and tl[
         0
     ]["failed"] == 1
+    pc = traffic.ctr_by_page_count(pages, events, t0, t0 + 40)
+    # 8 users with 5 home pages each: pages 1-3 and 4-15 of each user; 50 impressions per
+    # user... 5 per page, a click (counted once) on every fourth page.
+    assert [(r["pages"], r["impressions"]) for r in pc] == [([1, 3], 120), ([4, 15], 80)]
+    assert sum(r["clicks"] for r in pc) == 10
     users = traffic.ctr_by_user(pages, events, t0, t0 + 40, lambda p: p["model_version"])
     point, lo, hi = traffic.bootstrap_ctr_diff(users["vA"], users["vB"], reps=200)
     assert point == pytest.approx(5 / 100 - 5 / 100) and lo <= point <= hi
+
+
+def test_snapshot_reads_an_open_and_a_closed_ledger(tmp_path):
+    from sim import run as run_mod
+
+    led = run_mod.Ledger(tmp_path / "ledger.jsonl")
+    led.write("page", request_id="r1", user_id=1, surface="home", t=1.0)
+    pages, _, _ = traffic.snapshot(led)  # still open: flushed first
+    assert list(pages) == ["r1"]
+    led.write("error", user_id=1, surface="home", t=2.0, status=503, ms=1.0)
+    led.close()  # as Traffic.stop() does
+    pages, _, errors = traffic.snapshot(led)
+    assert list(pages) == ["r1"] and len(errors) == 1
 
 
 def test_ratio_delta_matches_its_formula():
@@ -179,10 +197,12 @@ def test_ab_report_on_a_made_up_aa(tmp_path):
             },
         },
     }
-    res = ab_report.analyse(df, phase, tmp_path / "none.jsonl")
+    led, _ = ledger(tmp_path)  # a real ledger shape, torn last line included
+    res = ab_report.analyse(df, phase, led)
     assert (
         res["srm"]["bucketing_mismatch"] == 0 and res["srm"]["switchers"] == 0 and res["srm"]["ok"]
     )
+    assert res["guardrails"]["a"]["requests"] == 20  # the ledger's pages by their rank variant
     m = res["metrics"]["ctr"]
     assert m["ci_delta"][0] < m["diff"] < m["ci_delta"][1]
     assert 0 <= m["p"] <= 1 and res["resalt"]["n"] == ab_report.RESALTS
@@ -200,6 +220,14 @@ def test_ab_report_on_a_made_up_aa(tmp_path):
     )
     assert "## A/A" in md and "Re-split 100 times" in md and "| 0 / 0 | 7 |" in md
     assert "16 sessions at a time with pauses of 50-300 ms" in md
+
+
+def test_srm_fails_when_the_bucketing_disagrees():
+    df = impressions(n_users=200)
+    df["exp_rank"] = df["exp_rank"].map({"a": "b", "b": "a"})  # arms swapped: ratio still fine
+    variants = [{"name": "a", "share": 50}, {"name": "b", "share": 50}]
+    s = ab_report.srm(df, variants)
+    assert s["ratio_ok"] and s["bucketing_mismatch"] == 200 and not s["ok"]
 
 
 def test_ab_report_finds_a_real_lift(tmp_path):
@@ -251,7 +279,11 @@ def test_release_report_renders(tmp_path, monkeypatch):
             },
             "pass": True,
         },
-        "switch": {"full": {"first_page_s": 0.01, "last_other_page_s": 0.2}},
+        "switch": {"full": {"first_page_s": 0.01, "last_other_page_s": None}},
+        "ctr_by_page_count": [
+            {"pages": [1, 3], "arm": None, "impressions": 100, "clicks": 2, "ctr": 0.02},
+            {"pages": [64, None], "arm": None, "impressions": 50, "clicks": 0, "ctr": 0.0},
+        ],
         "phases": {"before": {"from": 1000.0, "to": 1100.0, **summary}},
         "redis": {
             "state": {
@@ -279,7 +311,15 @@ def test_release_report_renders(tmp_path, monkeypatch):
                 "at": 1100.0,
                 "actor": "drill",
                 "note": "ok",
-            }
+            },
+            {
+                "version": "vB",
+                "from": None,
+                "to": "built",
+                "at": 1000.0,
+                "actor": "drill",
+                "note": "/Users/someone/repo/artifacts/bundles/vB",
+            },
         ],
     }
     monkeypatch.setattr(release_report, "BUNDLES", tmp_path)
@@ -290,4 +330,10 @@ def test_release_report_renders(tmp_path, monkeypatch):
         and "| `vB` | canary | active |" in md
         and "evicted 0 keys and refused 0 writes" in md
         and "16 concurrent sessions pausing 50-300 ms between page views" in md
+        and "/Users/" not in md
+        and "| drill | vB |" in md
+        and "| full rollout | 0.01 | none |" in md
+        and "CTR: -0.0040, 95% CI [-0.0070, -0.0010] (user-level bootstrap over the two phases' users); lower."
+        in md
+        and "| 64 and later | 50 | 0 | 0.00% |" in md
     )

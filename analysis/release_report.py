@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -37,6 +38,26 @@ def _ms(x) -> str:
     return "n/a" if x is None or x != x else f"{x:.1f}"
 
 
+_PATH = re.compile(r"(?<![\w.])/(?:[\w.@+-]+/)+([\w.@+-]+)")
+
+
+def _scrub(text: str) -> str:
+    """A local absolute path in a note shows as its last component (the report is published)."""
+    return _PATH.sub(r"\1", text)
+
+
+def _s(x) -> str:
+    return "none" if x is None else str(x)
+
+
+def _valid_ndcg(version: str) -> float | None:
+    m = BUNDLES / version / "manifest.json"
+    if not m.exists():
+        return None
+    valid = json.loads(m.read_text())["models"]["sasrec"].get("valid") or {}
+    return valid.get("NDCG@10")
+
+
 def _bundle(version: str) -> str:
     m = BUNDLES / version / "manifest.json"
     if not m.exists():
@@ -51,6 +72,9 @@ def _bundle(version: str) -> str:
         parts.append(f"LightGBM ranker ({r['rounds']} trees)")
     pc = man.get("pctr")
     parts.append(f"pCTR {pc['model']} (trained on {', '.join(pc['days'])})" if pc else "fixed pCTR")
+    valid = man["models"]["sasrec"].get("valid") or {}
+    if valid:
+        parts.append(f"SASRec validation NDCG@10 {valid['NDCG@10']:.4f}")
     test = man["models"]["sasrec"].get("test") or {}
     if test:
         parts.append(f"SASRec test HR@10 {test['HR@10']:.4f}")
@@ -202,8 +226,8 @@ def render(d: dict) -> str:
         [
             [
                 label,
-                str(sw.get(k, {}).get("first_page_s")),
-                str(sw.get(k, {}).get("last_other_page_s")),
+                _s(sw.get(k, {}).get("first_page_s")),
+                _s(sw.get(k, {}).get("last_other_page_s")),
             ]
             for k, label in (
                 ("full", "full rollout"),
@@ -249,12 +273,51 @@ def render(d: dict) -> str:
     )
     bad = d.get("bad_vs_full_ctr")
     if bad:
+        lower = bad[2] < 0
         lines += [
             "",
-            f"The bad release against the full rollout before it, CTR: {bad[0]:+.4f}, 95% CI [{bad[1]:+.4f}, {bad[2]:+.4f}] "
-            "(user-level bootstrap). It passed validation: its files are consistent and its golden queries reproduce, "
-            "which is what validation checks; quality is what the canary would have caught.",
+            f"The bad release against the full rollout before it, CTR: {bad[0]:+.4f}, 95% CI [{bad[1]:+.4f}, "
+            f"{bad[2]:+.4f}] (user-level bootstrap over the two phases' users); "
+            + ("lower." if lower else "the interval includes 0.")
+            + " Consecutive phases are not a fair comparison of versions, though: they differ in time too, and CTR "
+            "falls with every home page a user has already seen in the drill, whatever the version (table below: the "
+            "items seen in the last 24 hours are filtered out, so the same users' later pages show weaker matches). A "
+            "version comparison needs the same minutes, which is what the canary's split gives.",
         ]
+        nb, nn = _valid_ndcg(d["bad"]), _valid_ndcg(d["new"])
+        quality = (
+            f" Offline, its SASRec reaches validation NDCG@10 {nb:.4f} against {nn:.4f}: that is what tells the two "
+            "versions apart."
+            if nb is not None and nn is not None
+            else ""
+        )
+        lines += [
+            "",
+            "What the drill shows is the mechanism: the bad release passed validation (its files are consistent and its "
+            "golden queries reproduce; validation does not judge quality), went out without a canary, and the rollback "
+            "returned to the previous version, still loaded, in one switch." + quality,
+        ]
+    pc = d.get("ctr_by_page_count")
+    if pc:
+        lines += [
+            "",
+            "CTR by how many home pages the user had seen in the drill, all versions:",
+            "",
+        ]
+        lines += _table(
+            ["User's home page", "Impressions", "Clicks", "CTR"],
+            [
+                [
+                    f"{r['pages'][0]}-{r['pages'][1]}"
+                    if r["pages"][1]
+                    else f"{r['pages'][0]} and later",
+                    f"{r['impressions']:,}",
+                    f"{r['clicks']:,}",
+                    _pct(r["ctr"]),
+                ]
+                for r in pc
+            ],
+        )
     lines += ["", "## Release record (`model_version_events`)", ""]
     lines += _table(
         ["UTC", "Version", "From", "To", "Actor", "Note"],
@@ -265,7 +328,7 @@ def render(d: dict) -> str:
                 e["from"] or "",
                 e["to"],
                 e["actor"],
-                (e["note"] or "").replace("|", "\\|"),
+                _scrub(e["note"] or "").replace("|", "\\|"),
             ]
             for e in d["events"]
         ],

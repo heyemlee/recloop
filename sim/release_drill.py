@@ -230,6 +230,9 @@ def main(argv: list[str] | None = None) -> None:
         traffic.stop()
         log["redis"] = redis_stats.delta(redis_before, redis_stats.counters())
         print(f"drill    {redis_stats.describe(log['redis'])}")
+        # What happened so far, kept even if the drill failed or the analysis below fails (the
+        # ledger next to it holds the traffic).
+        _write(args.out, log)
 
     pages, events, errors = _snapshot(traffic)
     phases = {
@@ -249,19 +252,23 @@ def main(argv: list[str] | None = None) -> None:
         "rollback": _switch_time(pages, t_rollback, args.new),
     }
     log["timeline"] = traffic_mod.timeline(pages, errors, t0, t_end)
+    log["ctr_by_page_count"] = traffic_mod.ctr_by_page_count(pages, events, t0, t_end)
     log["events"] = events_since(t0 - 1)
     log["t_end"] = t_end
     log["after"] = admin.overview()
-    args.out.mkdir(parents=True, exist_ok=True)
-    (args.out / "drill.json").write_text(json.dumps(log, indent=2, default=str) + "\n")
+    _write(args.out, log)
     print(
         f"drill    done: {len(pages):,} page views, {len(errors)} failed -> {(args.out / 'drill.json').relative_to(ROOT)}"
     )
 
 
+def _write(out: Path, log: dict) -> None:
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "drill.json").write_text(json.dumps(log, indent=2, default=str) + "\n")
+
+
 def _snapshot(traffic: traffic_mod.Traffic):
-    traffic.ledger.f.flush()
-    return traffic_mod.read_ledger(Path(traffic.ledger.f.name))
+    return traffic_mod.snapshot(traffic.ledger)
 
 
 def _switch_time(pages: dict, t: float, version: str) -> dict:
