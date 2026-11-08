@@ -18,6 +18,9 @@ When the traffic stops: wait until billing, the log-sink and the aggregator have
 everything, run one reconciliation pass, then sim.billing_verify (the ledger) and sim.verify
 (the event pipeline, as in make drill).
 
+The chaos acts on the compose stack (Compose below); kube.drill runs the same drill on the kind
+cluster with its own Platform (deleting billing's and Redpanda's pods).
+
 Usage: python -m sim.billing_drill [--minutes 30]
 """
 
@@ -85,6 +88,31 @@ def pg_slow(on: bool, ms: int) -> None:
         toxiproxy("DELETE", "/proxies/postgres/toxics/pg_latency")
 
 
+class Compose:
+    """The drill's chaos on the compose stack. A platform implements these four methods;
+    `note` records an action in the chaos log as it happens."""
+
+    name = "compose"
+
+    def kill_billing(self, down: float, note) -> None:
+        compose("kill", "-s", "SIGKILL", "billing")
+        note("kill -9 billing")
+        time.sleep(down)
+        compose("start", "billing")
+        note(f"started billing ({down} s down)")
+
+    def restart_redpanda(self, note) -> None:
+        compose("restart", "redpanda")
+        note("restarted redpanda")
+
+    def ensure_billing(self) -> None:
+        """Billing runs again (the traffic may have ended while it was down)."""
+        compose("start", "billing")
+
+    def reconciler_during(self, since: float) -> dict:
+        return repairs_during(since)
+
+
 def plan(seconds: float, seed: int) -> list[dict]:
     """The chaos schedule: start times (s from the start of the traffic) and actions."""
     rng = random.Random(seed)
@@ -110,7 +138,8 @@ def plan(seconds: float, seed: int) -> list[dict]:
     return sorted(steps, key=lambda x: x["t"])
 
 
-def chaos(steps: list[dict], pg_ms: int, log: list, stop: threading.Event) -> None:
+def chaos(steps: list[dict], pg_ms: int, log: list, stop: threading.Event, platform=None) -> None:
+    platform = platform or Compose()
     t0 = time.time()
 
     def note(what: str) -> None:
@@ -122,14 +151,9 @@ def chaos(steps: list[dict], pg_ms: int, log: list, stop: threading.Event) -> No
         if stop.wait(max(0.0, t0 + st["t"] - time.time())):
             break
         if st["action"] == "kill_billing":
-            compose("kill", "-s", "SIGKILL", "billing")
-            note("kill -9 billing")
-            time.sleep(st["down"])
-            compose("start", "billing")
-            note(f"started billing ({st['down']} s down)")
+            platform.kill_billing(st["down"], note)
         elif st["action"] == "restart_redpanda":
-            compose("restart", "redpanda")
-            note("restarted redpanda")
+            platform.restart_redpanda(note)
         elif st["action"] == "pg_slow":
             pg_slow(True, pg_ms)
             note(f"postgres +{pg_ms} ms for billing")
@@ -184,7 +208,8 @@ def repairs_during(since: float) -> dict:
     return {"passes_with_repairs": passes, "repaired_cents": cents, "billing_starts": starts}
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None, platform=None) -> None:
+    platform = platform or Compose()
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--minutes", type=float, default=30)
     # 8 sessions at a time, ~40 page views/s: 30 minutes of result pages (5 KB each, kept 10
@@ -243,7 +268,7 @@ def main(argv: list[str] | None = None) -> None:
         )  # fmt: skip
         log: list = []
         stop = threading.Event()
-        th = threading.Thread(target=chaos, args=(steps, args.pg_latency_ms, log, stop))
+        th = threading.Thread(target=chaos, args=(steps, args.pg_latency_ms, log, stop, platform))
         started = time.time()
         summary = run_mod.run_main(sim_args, on_start=th.start)
         stop.set()
@@ -251,7 +276,7 @@ def main(argv: list[str] | None = None) -> None:
     finally:
         with contextlib.suppress(urllib.error.HTTPError):  # 404: no toxic left
             pg_slow(False, 0)
-        compose("start", "billing")  # in case the traffic ended while it was down
+        platform.ensure_billing()
         ads.end(ids)
         ads.stop_policy(EXP_ID)
         ads.close()
@@ -261,7 +286,7 @@ def main(argv: list[str] | None = None) -> None:
     verify_mod.wait_for_consumers(("billing", "log-sink", "aggregator"))
     caught_up = time.time() - t
     evicted = ads_mod.evicted_keys() - evicted
-    during = repairs_during(started)
+    during = platform.reconciler_during(started)
     rec = reconcile()
     rep = billing_verify.verify(out, db_url, redis_url)
     pipeline = verify_mod.verify(out, db_url, redis_url)
@@ -273,7 +298,7 @@ def main(argv: list[str] | None = None) -> None:
         "campaign_settings": [{"campaign_id": c["campaign_id"], "bid": c["bid_cpc_cents"],
                                "budget": c["daily_budget_cents"]} for c in camps],
         "caught_up_seconds": round(caught_up, 1), "reconcile": rec, "reconciler_during": during,
-        "evicted_keys": evicted, "candidate_cache": cache,
+        "evicted_keys": evicted, "candidate_cache": cache, "platform": platform.name,
         "pipeline": {k: pipeline[k] for k in ("events", "pages", "checks", "ok")},
     })  # fmt: skip
     rep["ok"] = (

@@ -67,7 +67,9 @@ TOOL_PKGS := github.com/bufbuild/buf/cmd/buf google.golang.org/protobuf/cmd/prot
 	rebuild-redis tools k6 proto sqlc generate build-api serve-model serve-api serve-web web-install \
 	test lint test-ml test-model-server test-minionerec test-go test-web test-props e2e fmt sim-world \
 	sim srm drill load load-smoke latency-report billing overdelivery billing-drill billing-report \
-	minionerec-gen minionerec-cost minionerec clean-processed clean-artifacts
+	minionerec-gen minionerec-cost minionerec clean-processed clean-artifacts kind-tools kind-up \
+	kind-images kind-data deploy kind-status deploy-runs deploy-rollout deploy-hpa deploy-keda \
+	deploy-drill deploy-report kind-down lint-deploy
 
 help: ## List targets
 	@grep -E '^[a-z0-9-]+:.*## ' $(MAKEFILE_LIST) \
@@ -263,10 +265,72 @@ billing-drill: sim-world build-aggregator build-billing ## 30 min of traffic, ki
 billing-report: ## Re-render docs/results/billing.md from artifacts/billing/
 	$(PY) -m analysis.billing_report
 
+# ---------------------------------------------------------------- M5: local Kubernetes (kind)
+
+# A one-node kind cluster in Docker Desktop's VM (deploy/kind, design §23.2): the infrastructure
+# from official charts, RecLoop's services from deploy/helm/recloop, reached from the host on
+# 127.0.0.1:30xxx (deploy/kind/cluster.yaml). The cluster needs the machine to itself: stop the
+# compose stack first (`make down`), Docker Desktop's VM needs about 8 GB for it.
+KIND_SH := deploy/kind/cluster.sh
+
+kind-tools: ## kind, kubectl, helm (pinned, sha256-checked: deploy/kind/versions.lock) -> .cache/bin
+	$(KIND_SH) tools
+
+kind-up: sim-world build-aggregator build-billing ## Cluster + infrastructure, RecLoop's images, data and services (~15 min)
+	$(KIND_SH) up
+	$(KIND_SH) images
+	$(KIND_SH) data
+	$(KIND_SH) deploy
+
+kind-images: ## Build RecLoop's images (compose's definitions + deploy/web.Dockerfile) and load them into the node
+	$(KIND_SH) images
+
+kind-data: ## Migrations, catalog, users and the Redis seed on the cluster (NodePorts)
+	$(KIND_SH) data
+
+deploy: kind-images ## helm upgrade --install RecLoop's chart with the freshly loaded images
+	$(KIND_SH) deploy
+
+kind-status: ## Pods, autoscalers and resource use on the cluster
+	$(KIND_SH) status
+
+# The runs: k6 and the checks on the host, against the cluster; artifacts/deploy/, then
+# docs/results/deploy.md. Measurements: idle machine and the coordinator's go-ahead.
+DEPLOY_FLAGS ?=
+deploy-runs: k6 sim-world build-aggregator ## Rolling update, HPA and KEDA runs (3 repeats each, ~90 min) -> deploy.md
+	$(PY) -m kube.run $(DEPLOY_FLAGS)
+	$(PY) -m kube.report
+
+deploy-rollout: k6 sim-world build-aggregator ## Model server rolling updates under load (gated / no probe / broken bundle)
+	$(PY) -m kube.run --only rollout $(DEPLOY_FLAGS)
+	$(PY) -m kube.report
+
+deploy-hpa: k6 sim-world build-aggregator ## The api's HPA under a step in load
+	$(PY) -m kube.run --only hpa $(DEPLOY_FLAGS)
+	$(PY) -m kube.report
+
+deploy-keda: k6 sim-world build-aggregator ## KEDA: billing behind a slow database, the aggregator after an outage
+	$(PY) -m kube.run --only keda $(DEPLOY_FLAGS)
+	$(PY) -m kube.report
+
+deploy-drill: sim-world build-aggregator build-billing ## The 30-minute billing drill with billing's pods deleted -> deploy.md
+	$(PY) -m kube.drill $(DEPLOY_DRILL_FLAGS)
+	$(PY) -m kube.report
+
+deploy-report: ## Re-render docs/results/deploy.md from artifacts/deploy/
+	$(PY) -m kube.report
+
+kind-down: ## Delete the kind cluster (its volumes go with it)
+	$(KIND_SH) down
+
+lint-deploy: kind-tools ## helm lint + render both charts and the infrastructure values; bash -n of the script
+	bash -n $(KIND_SH)
+	$(KIND_SH) lint
+
 test: lint test-ml test-model-server test-minionerec test-go ## Lint and run the Python and Go tests (DB / Redis tests skip when the stack is down)
 
-PYDIRS := ml sim loadtest analysis minionerec
-lint: ## ruff check + format check (ml, sim, loadtest, analysis, minionerec, model_server)
+PYDIRS := ml sim loadtest analysis minionerec kube
+lint: ## ruff check + format check (ml, sim, loadtest, analysis, minionerec, kube, model_server)
 	$(UV) ruff check $(PYDIRS)
 	$(UV) ruff format --check $(PYDIRS)
 	$(MS) ruff check model_server

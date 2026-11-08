@@ -1,0 +1,87 @@
+{{- $c := .Values.logSink -}}
+{{- $ctx := dict "root" . "name" "log-sink" -}}
+{{- if not $c.config }}
+{{- fail "logSink.config is empty: pass --set-file logSink.config=deploy/connect/log-sink.yaml" }}
+{{- end }}
+# events -> PostgreSQL events_raw (Redpanda Connect, deploy/connect/log-sink.yaml, the file
+# compose mounts).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: log-sink
+  labels:
+    {{- include "recloop.labels" $ctx | nindent 4 }}
+data:
+  log-sink.yaml: |-
+    {{- $c.config | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: log-sink
+  labels:
+    {{- include "recloop.labels" $ctx | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "recloop.selector" $ctx | nindent 6 }}
+  # The config's static member id (log-sink-0) allows one instance at a time.
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        {{- include "recloop.selector" $ctx | nindent 8 }}
+      annotations:
+        checksum/config: {{ $c.config | sha256sum }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: log-sink
+          image: {{ .Values.images.logSink }}
+          imagePullPolicy: IfNotPresent
+          args: ["run", "/config/log-sink.yaml"]
+          env:
+            {{- include "recloop.goEnv" $ctx | nindent 12 }}
+            {{- include "recloop.envMap" $c.env | trim | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 4195
+          readinessProbe:
+            httpGet: {path: /ready, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /ping, port: http}
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            {{- toYaml $c.resources | nindent 12 }}
+          securityContext:
+            {{- include "recloop.containerSecurity" . | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: log-sink
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: log-sink
+  labels:
+    {{- include "recloop.labels" $ctx | nindent 4 }}
+spec:
+  selector:
+    {{- include "recloop.selector" $ctx | nindent 4 }}
+  ports:
+    - name: http
+      port: 4195
+      targetPort: http

@@ -1,0 +1,73 @@
+{{- $pg := .Values.postgres -}}
+# The application user's credentials; CloudNativePG creates the role and the database from it.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $pg.name }}-app
+  labels:
+    {{- include "recloop-infra.labels" . | nindent 4 }}
+type: kubernetes.io/basic-auth
+stringData:
+  username: {{ $pg.user | quote }}
+  password: {{ $pg.password | quote }}
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: {{ $pg.name }}
+  labels:
+    {{- include "recloop-infra.labels" . | nindent 4 }}
+spec:
+  instances: {{ $pg.instances }}
+  imageName: {{ $pg.image }}
+  enableSuperuserAccess: false
+  postgresql:
+    parameters:
+      {{- toYaml $pg.parameters | nindent 6 }}
+  bootstrap:
+    initdb:
+      database: {{ $pg.database }}
+      owner: {{ $pg.user }}
+      secret:
+        name: {{ $pg.name }}-app
+      postInitApplicationSQL:
+        {{- range $pg.extensions }}
+        - CREATE EXTENSION IF NOT EXISTS {{ . }}
+        {{- end }}
+  storage:
+    size: {{ $pg.storage }}
+  resources:
+    {{- toYaml $pg.resources | nindent 4 }}
+---
+# The primary from the host (kind maps 127.0.0.1:{{ $pg.nodePort }} to this NodePort).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $pg.name }}-nodeport
+  labels:
+    {{- include "recloop-infra.labels" . | nindent 4 }}
+spec:
+  type: NodePort
+  selector:
+    cnpg.io/cluster: {{ $pg.name }}
+    cnpg.io/instanceRole: primary
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+      nodePort: {{ $pg.nodePort }}
+---
+# The instance manager's exporter (pg_stat_* metrics) for kube-prometheus-stack.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ $pg.name }}
+  labels:
+    {{- include "recloop-infra.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      cnpg.io/cluster: {{ $pg.name }}
+  podMetricsEndpoints:
+    - port: metrics
+      interval: 10s

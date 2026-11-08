@@ -1,0 +1,11 @@
+# metrics-server (official chart, versions.lock), namespace kube-system: pod CPU / memory for
+# `kubectl top` and the api's HorizontalPodAutoscaler.
+args:
+  # kind's kubelets serve self-signed certificates.
+  - --kubelet-insecure-tls
+# The chart's defaultArgs already ask the kubelets every 15 s (--metric-resolution=15s), which
+# is also the HPA controller's sync period.
+
+resources:
+  requests: {cpu: 50m, memory: 64Mi}
+  limits: {cpu: 500m, memory: 128Mi}

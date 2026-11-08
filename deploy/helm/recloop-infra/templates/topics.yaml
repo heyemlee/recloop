@@ -1,0 +1,40 @@
+{{- $rp := .Values.redpanda -}}
+# Creates the topics once, as compose's redpanda-init does: describe, else create. Runs after
+# every install / upgrade of this chart (idempotent), before the services start producing.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: redpanda-topics
+  labels:
+    {{- include "recloop-infra.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 30
+  template:
+    spec:
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+      containers:
+        - name: rpk
+          image: {{ $rp.image }}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              b={{ $rp.brokers | quote }}
+              {{- range $rp.topics }}
+              if rpk topic describe {{ .name }} -X brokers="$b" >/dev/null 2>&1; then
+                echo "topic {{ .name }} exists"
+              else
+                rpk topic create {{ .name }} -X brokers="$b" --partitions {{ .partitions }} --replicas {{ .replicas }}{{ range $k, $v := .config }} --topic-config {{ $k }}={{ $v }}{{ end }}
+              fi
+              {{- end }}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false

@@ -7,6 +7,9 @@ import type { NextConfig } from "next";
 const apiUrl = process.env.RECLOOP_API_URL ?? "http://127.0.0.1:18080";
 
 const nextConfig: NextConfig = {
+  // The container image (deploy/web.Dockerfile) builds with NEXT_OUTPUT=standalone: a minimal
+  // server.js plus the traced dependencies. `next dev` and `next start` are unaffected.
+  output: process.env.NEXT_OUTPUT === "standalone" ? "standalone" : undefined,
   cacheComponents: true,
   partialPrefetching: true,
   // The dev server only serves its scripts to localhost by default; tests may use 127.0.0.1.

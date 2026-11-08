@@ -36,7 +36,14 @@ deploy/docker-compose.yml   PostgreSQL 18 + pgvector, Redis, Redpanda (+ topic i
                             billing and PostgreSQL), Prometheus, Grafana, OTel collector, Jaeger;
                             profile `bench`: Toxiproxy, api and model-server containers
 deploy/connect/ prometheus/ grafana/ otel/ jaeger/ toxiproxy/   their configuration;
-                            model-server.Dockerfile (bench image)
+                            model-server.Dockerfile (bench image), web.Dockerfile (Next.js
+                            standalone build, for the cluster)
+deploy/kind/                local Kubernetes (M5): cluster.yaml (one node, port mappings, bundles
+                            mount), versions.lock (kind / kubectl / helm, node image and charts,
+                            sha256-pinned), values/ (the official charts' values), cluster.sh
+deploy/helm/recloop-infra/  CloudNativePG Cluster (pgvector), Redis StatefulSets, topic Job
+deploy/helm/recloop/        api (HPA), model-server, aggregator + billing (StatefulSets, KEDA),
+                            log-sink, web, pg-proxy, ServiceMonitors, Grafana dashboard
 proto/                      buf workspace; recloop/modelserver/v1/model_server.proto (design §13.2)
 serving/                    Go module github.com/heyemlee/recloop/serving
   cmd/api/                  HTTP api (:18080): /v1/recommendations, /v1/events, /v1/items/{id},
@@ -82,6 +89,9 @@ sim/                        traffic simulator (world, click model, sessions + fa
                             ml environment (`$(PY) -m sim.<module>`)
 loadtest/                   k6 scenario recs.js, experiment runner run.py, report.py (latency.md)
 analysis/                   served_attribution.sql, srm.py, billing_report.py (billing.md)
+kube/                       runs on the kind cluster: cluster (kubectl, Prometheus, watcher), run
+                            (rollout, HPA, KEDA), drill (sim.billing_drill on pods), report
+                            (deploy.md); ml environment
 tools/                      go.mod pinning buf, protoc-gen-go(-grpc), sqlc (built into .cache/bin);
                             tools/k6/go.mod pins k6 (own module)
 testdata/                   bucket_vectors.json, shared by the Go and Python bucketing tests
@@ -90,7 +100,8 @@ data/        (ignored) raw/ downloads, hf/ model files, processed/ outputs of `m
 third_party/ (ignored) MiniOneRec and SASRec.pytorch clones
 artifacts/   (ignored) models/sasrec, bundles/<version> + bundles/current, eval/, e2e/, logs/,
              sim/ (world.json, run ledgers), latency/ (results.json),
-             minionerec/ (runs/<name>/, cost/, upstream/ = the staged, patched evaluate.py)
+             minionerec/ (runs/<name>/, cost/, upstream/ = the staged, patched evaluate.py),
+             deploy/ (results.json, k6 summaries, drill/)
 ```
 
 ## Commands
@@ -98,7 +109,7 @@ artifacts/   (ignored) models/sasrec, bundles/<version> + bundles/current, eval/
 ```
 make setup         # up, data, ingest, train, eval, bundle, seed, web-install: clean checkout -> demo
 make up            # images + compose up --wait (event pipeline and monitoring too) + migrations
-make images        # cross-compile api + aggregator into .cache/linux, build recloop/go:dev
+make images        # cross-compile api, aggregator, billing into .cache/linux, build recloop/go:dev
 make data          # fetch + checksum inputs, re-run MiniOneRec preprocessing, export, verify,
                    # text embeddings (bge-small-en-v1.5)
 make ingest        # migrations + items (text_emb, simulated stock) / users into PostgreSQL
@@ -143,6 +154,15 @@ make minionerec-gen   # MiniOneRec on MPS over the test split, evaluate.sh's 8 s
                       # another (~5 h; resumable); MINIONEREC_ARGS="--name trial --users 200"
 make minionerec-cost  # latency / memory at 10, 20, 50 beams (MPS) + SASRec on the CPU (idle machine)
 make minionerec       # score the runs like make eval -> docs/results/minionerec.md (no GPU)
+make kind-up       # kind cluster + infrastructure + RecLoop's images, data, services (~15 min;
+                   # needs the machine: compose stopped, ~8 GB of Docker's VM)
+make deploy        # rebuild + `kind load` RecLoop's images, helm upgrade its chart
+make deploy-runs   # rolling update, HPA, KEDA (3 repeats each) -> docs/results/deploy.md; also
+                   # deploy-rollout / deploy-hpa / deploy-keda; DEPLOY_FLAGS='--resume "<reason>"'
+make deploy-drill  # 30-min billing drill with billing's pods deleted -> deploy.md
+make deploy-report # re-render deploy.md from artifacts/deploy/
+make kind-status / kind-down   # pods and autoscalers / delete the cluster
+make kind-tools / lint-deploy  # pinned kind, kubectl, helm / helm lint + render, no cluster
 ```
 
 Python: `uv run --project ml --frozen python -m ml.<package>.<module>` from the repo root (the
@@ -320,6 +340,48 @@ interpreter at exit: `ORT_DISABLE_TELEMETRY=1` (Makefile, model-server image, `m
   step must match the database exactly; concurrent workers must give the order-independent
   truth (one charge per clicked impression, spend = min(budget, prices), each outcome counted
   once). `make test` runs 30 cases each, `make test-props` 2,000.
+
+## Local Kubernetes (M5)
+
+- `make kind-up` (`deploy/kind/cluster.sh`): kind v0.33.0, one node `kindest/node:v1.36.4`
+  (CloudNativePG 1.30 and KEDA 2.21 support 1.34-1.36) in Docker Desktop's VM, context
+  `kind-recloop`. kind, kubectl, helm in `.cache/bin`; kubeconfig `.cache/kind/kubeconfig`, Helm's
+  state `.cache/helm` (nothing goes to `~/.kube` or `~/.config`). Every tool, chart and the node
+  image is pinned in `deploy/kind/versions.lock` and sha256-checked (a GitHub release download
+  falls back to the API's asset endpoint, which some proxies need).
+- Host access: NodePorts through kind's port mappings on 127.0.0.1: web 30000, api 30080,
+  Prometheus 30090, Grafana 30001, PostgreSQL 30432, Redis 30379 (state) / 30380 (cache), Redpanda
+  31092 (external listener advertised as localhost), pg-proxy's Toxiproxy API 30474.
+  `kube.cluster.host_env()` points host tools (simulator, seed, `aggregator wait-lag`, `billing
+  reconcile`) at them; `KIND_*` variables override.
+- Infrastructure (official charts, `deploy/kind/values/`): kube-prometheus-stack 92.10.1 without
+  Alertmanager, node-exporter and the control-plane scrapes (memory; kind binds those to the
+  node's localhost), metrics-server 3.14.0 (`--kubelet-insecure-tls`), KEDA 2.21.0, CloudNativePG
+  0.29.1 (operator 1.30.1), Redpanda chart 26.2.5 (v26.2.6: one broker, plaintext, no console or
+  config watchers, fsync on, auto-create off). `deploy/helm/recloop-infra`: Cluster `recloop-pg`
+  (CloudNativePG's standard 18.6 image = pgvector, digest-pinned; `vector` and `btree_gist` made
+  at bootstrap, the app user is no superuser), Redis `redis` (state, noeviction, 1 GB) and
+  `redis-cache` (allkeys-lru, 384 MB) StatefulSets with redis_exporter sidecars, the topic Job.
+- RecLoop's images: compose's build definitions (`make images` with `RECLOOP_GO_IMAGE`,
+  `deploy/model-server.Dockerfile`) plus `deploy/web.Dockerfile`, named `recloop-kind/*`, tagged
+  with their image ID (unchanged code keeps its tag, so `make deploy` rolls only what changed),
+  `kind load`ed, never pushed. The bundles: `artifacts/bundles` mounted read-only into the node
+  (`/recloop/bundles`) and from there into the api and model-server pods.
+- The chart (`deploy/helm/recloop`): api readiness `/healthz`, not `/readyz` (a dependency outage
+  must degrade, not empty the Service); api CPU request = limit = 500m, HPA 1-4 pods at 60 %;
+  model-server readiness = gRPC health (SERVING after the bundle checks), `maxSurge 1`,
+  `maxUnavailable 0`, `minReadySeconds 5`, preStop sleep 5 s; aggregator and billing are
+  StatefulSets (pod name = static `group.instance.id`), KEDA Kafka scaler 1-3 pods, 5,000
+  records of lag per pod; log-sink `Recreate` (its config's static id); billing through pg-proxy.
+- Runs (`kube/`, the ml environment, k6 and checks on the host): `kube.run` = rollout (gated,
+  no-probe, broken bundle: `item_ids.json` shuffled, golden queries fail), hpa (step in load),
+  keda (billing behind PostgreSQL +200 ms; aggregator paused 90 s, with KEDA and capped at 1);
+  `kube.drill` = `sim.billing_drill` with the `Kube` platform (billing pods deleted, alternately
+  graceful and forced; `redpanda-0` deleted). `loadtest/recs.js` takes `PROFILE` (steps),
+  `WINDOW_S` (per-window percentiles) and `CONN_CLOSE` (kube-proxy places connections, not
+  requests); sponsored slots' events carry their `ad_token`. The cluster needs the machine to
+  itself (compose stopped) and the coordinator's go-ahead; `make kind-down` deletes it with its
+  volumes.
 
 ## Evaluation protocol
 

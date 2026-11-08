@@ -1,0 +1,165 @@
+{{- /*
+Redis instances (values: redis.instances): "redis" holds the state (user history, dedup
+markers, frequency caps, spend; noeviction: a full instance refuses writes instead of silently
+dropping state), "redis-cache" the result pages and candidate cache (allkeys-lru). No RDB / AOF:
+derived state, rebuilt from the event log (design §7.2); a restart starts empty, as
+`docker compose restart redis` does. One StatefulSet per instance: a stable name (<name>-0) and
+never two pods at once. A redis_exporter sidecar per pod; its metrics carry redis="<role>".
+*/ -}}
+{{- range $i, $r := .Values.redis.instances }}
+{{- if $i }}
+---
+{{- end }}
+# Redis "{{ $r.name }}" ({{ $r.role }}): maxmemory {{ $r.maxmemory }}, {{ $r.policy }}.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $r.name }}
+  labels:
+    {{- include "recloop-infra.labels" $ | nindent 4 }}
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/instance: {{ $r.name }}
+spec:
+  serviceName: {{ $r.name }}-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: redis
+      app.kubernetes.io/instance: {{ $r.name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: redis
+        app.kubernetes.io/instance: {{ $r.name }}
+    spec:
+      # UID 999 / GID 1000: the image's redis user.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: redis
+          image: {{ $.Values.redis.image }}
+          args: ["redis-server", "--save", "", "--appendonly", "no",
+                 "--maxmemory", {{ $r.maxmemory | quote }}, "--maxmemory-policy", {{ $r.policy | quote }}]
+          ports:
+            - name: redis
+              containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            periodSeconds: 2
+            timeoutSeconds: 2
+          livenessProbe:
+            tcpSocket:
+              port: redis
+            periodSeconds: 10
+          resources:
+            {{- toYaml $r.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+        - name: exporter
+          image: {{ $.Values.redis.exporter.image }}
+          env:
+            - name: REDIS_ADDR
+              value: redis://localhost:6379
+          ports:
+            - name: metrics
+              containerPort: 9121
+          readinessProbe:
+            httpGet: {path: /health, port: metrics}
+            periodSeconds: 10
+          resources:
+            {{- toYaml $.Values.redis.exporter.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+      volumes:
+        # The working directory only: nothing is persisted.
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $r.name }}-headless
+  labels:
+    {{- include "recloop-infra.labels" $ | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/instance: {{ $r.name }}
+  ports:
+    - name: redis
+      port: 6379
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $r.name }}
+  labels:
+    {{- include "recloop-infra.labels" $ | nindent 4 }}
+    app.kubernetes.io/name: redis
+    redis-role: {{ $r.role }}
+spec:
+  selector:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/instance: {{ $r.name }}
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+    - name: metrics
+      port: 9121
+      targetPort: metrics
+{{- if $r.nodePort }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $r.name }}-nodeport
+  labels:
+    {{- include "recloop-infra.labels" $ | nindent 4 }}
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/instance: {{ $r.name }}
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+      nodePort: {{ $r.nodePort }}
+{{- end }}
+{{- end }}
+---
+# Both instances as one job, "redis", with redis="state" / "cache" (as compose's Prometheus).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: redis
+  labels:
+    {{- include "recloop-infra.labels" . | nindent 4 }}
+spec:
+  jobLabel: app.kubernetes.io/name
+  selector:
+    matchExpressions:
+      - {key: app.kubernetes.io/name, operator: In, values: [redis]}
+      - {key: redis-role, operator: Exists}
+  endpoints:
+    - port: metrics
+      interval: 5s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_service_label_redis_role]
+          targetLabel: redis

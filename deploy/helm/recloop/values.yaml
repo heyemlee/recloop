@@ -1,0 +1,166 @@
+# RecLoop's services (namespace recloop). Configuration mirrors deploy/docker-compose.yml: the
+# same images, environment and limits, unless a comment says why not. Every container has
+# requests and limits; GOMEMLIMIT sits below each Go container's memory limit, as in compose.
+#
+# deploy/kind/cluster.sh deploy sets the image tags (content tags of the images it built and
+# loaded) and passes two files: --set-file logSink.config=deploy/connect/log-sink.yaml and
+# --set-file grafana.dashboard=deploy/grafana/dashboards/recloop.json.
+
+images:
+  # api, aggregator, billing: static binaries on an empty image (compose's x-go-image).
+  go: {repository: recloop/go, tag: dev}
+  # deploy/model-server.Dockerfile, as compose's bench profile.
+  modelServer: {repository: recloop/model-server, tag: dev}
+  # deploy/web.Dockerfile (Next.js standalone build).
+  web: {repository: recloop/web, tag: dev}
+  logSink: redpandadata/connect:4.115.1
+  toxiproxy: ghcr.io/shopify/toxiproxy:2.13.0
+  # Loaded into the node by `kind load`; never pulled.
+  pullPolicy: IfNotPresent
+
+# Where the services find each other (recloop-infra and the Redpanda chart).
+endpoints:
+  postgres: recloop-pg-rw:5432
+  postgresDatabase: recloop
+  postgresSecret: recloop-pg-app  # basic-auth Secret of recloop-infra
+  # State (REDIS_URL, every service) and cache (CACHE_REDIS_URL, the api's pages and
+  # candidate cache), recloop-infra's two instances.
+  redis: redis:6379
+  cacheRedis: redis-cache:6379
+  kafkaBrokers: redpanda-0.redpanda.redpanda.svc.cluster.local.:9093
+
+# ad_token keys (kid:secret,...): the development key of .env.example.
+adTokenKeys: dev1:recloop-dev-only-ad-token-key-not-a-secret-0001
+
+# The node's read-only mount of the host's artifacts/bundles (deploy/kind/cluster.yaml). The
+# api and the model server read <path>/<version>; "current" is the host's link.
+bundle:
+  nodePath: /recloop/bundles
+  version: current
+
+api:
+  # The starting size; the HorizontalPodAutoscaler owns the replica count when enabled.
+  replicas: 1
+  env:
+    RECLOOP_RESILIENCE: full
+    CANDIDATE_CACHE: "on"
+    BREAKER_WINDOW: time:10s:20:10
+    ACCESS_LOG: "0"
+    GOMEMLIMIT: 440MiB
+  # requests = limits for CPU: a pod gets exactly half a core, busy or not, so the latency at a
+  # given rate per pod is reproducible and the HPA's utilisation (usage / request) means
+  # "share of the pod's core". Half a core so that one pod saturates at a rate the load
+  # generator and the rest of the stack sustain on this machine (deploy.md).
+  resources:
+    requests: {cpu: 500m, memory: 256Mi}
+    limits: {cpu: 500m, memory: 512Mi}
+  nodePort: 30080
+  # Endpoints are removed asynchronously after a pod starts terminating: keep serving that long
+  # (scale-in, rollouts) before the server shuts down.
+  preStopSleepSeconds: 5
+  hpa:
+    enabled: true
+    minReplicas: 1
+    maxReplicas: 4
+    cpuUtilization: 60
+    # Up: at once, doubling (or +2 pods) every 15 s. Down: after 60 s below target, one pod
+    # per 30 s (the default waits 300 s; shorter so repeated runs start from one pod).
+    scaleDownStabilizationSeconds: 60
+
+modelServer:
+  replicas: 2
+  workers: 32
+  # Burstable: about 0.1 core at the rates of the runs (the candidate cache answers most home
+  # requests), up to the bench profile's 2 cores.
+  resources:
+    requests: {cpu: 250m, memory: 768Mi}
+    limits: {cpu: "2", memory: 1Gi}
+  # Rolling update: one new pod at a time, never fewer ready pods than replicas. A new pod gets
+  # traffic only once its readiness probe passes, i.e. the gRPC health service says SERVING,
+  # which the server does only after the bundle loaded and passed its checks (checksums,
+  # dimensions, item count, golden queries; model_server/bundle.py).
+  maxSurge: 1
+  maxUnavailable: 0
+  # A new pod must stay ready this long before the next old pod goes.
+  minReadySeconds: 5
+  preStopSleepSeconds: 5
+  # grpc.server.stop(grace=5) after SIGTERM: in-flight calls finish, clients reconnect.
+  terminationGracePeriodSeconds: 30
+  # A rollout that stalls (a bundle that fails its checks never becomes ready) is reported as
+  # failed after this long; the old pods keep serving meanwhile.
+  progressDeadlineSeconds: 120
+
+aggregator:
+  # The starting size; KEDA owns the replica count when enabled.
+  replicas: 1
+  env:
+    GOMEMLIMIT: 220MiB
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {cpu: "1", memory: 256Mi}
+  keda:
+    enabled: true
+    minReplicas: 1
+    # events has 6 partitions; 3 keeps the run within the node's memory.
+    maxReplicas: 3
+    # Target lag per replica (records not yet committed by the group, summed over partitions).
+    lagThreshold: 5000
+    pollingInterval: 5
+    scaleDownStabilizationSeconds: 60
+
+billing:
+  replicas: 1
+  env:
+    BILLING_WORKERS: "8"
+    RECONCILE_EVERY: 1m
+    GOMEMLIMIT: 220MiB
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {cpu: "1", memory: 256Mi}
+  # PostgreSQL through pg-proxy (Toxiproxy), so the drill can slow billing's database down, as
+  # in compose.
+  viaPgProxy: true
+  keda:
+    enabled: true
+    minReplicas: 1
+    maxReplicas: 3
+    lagThreshold: 5000
+    pollingInterval: 5
+    scaleDownStabilizationSeconds: 60
+
+logSink:
+  # deploy/connect/log-sink.yaml (--set-file). One instance: the config's static group member
+  # id is fixed (log-sink-0), so updates replace the pod instead of running two at once.
+  config: ""
+  env:
+    GOMEMLIMIT: 440MiB
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {cpu: "1", memory: 512Mi}
+
+web:
+  replicas: 1
+  resources:
+    requests: {cpu: 100m, memory: 192Mi}
+    limits: {cpu: "1", memory: 512Mi}
+  nodePort: 30000
+
+pgProxy:
+  enabled: true
+  resources:
+    requests: {cpu: 50m, memory: 32Mi}
+    limits: {cpu: 500m, memory: 64Mi}
+  # Toxiproxy's API from the host (the drill's latency toxic).
+  nodePort: 30474
+
+monitoring:
+  # ServiceMonitors for kube-prometheus-stack; the dashboard of compose's Grafana.
+  enabled: true
+  interval: 5s
+
+grafana:
+  # deploy/grafana/dashboards/recloop.json (--set-file); empty: no dashboard ConfigMap.
+  dashboard: ""
+  # compose's Grafana alert rules (deploy/grafana/provisioning/alerting/*.yml, --set-file when
+  # the file exists); empty: none.
+  alerts: ""

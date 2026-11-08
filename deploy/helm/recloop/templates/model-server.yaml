@@ -1,0 +1,101 @@
+{{- $c := .Values.modelServer -}}
+{{- $ctx := dict "root" . "name" "model-server" -}}
+# The gRPC model server (model_server/). It loads and checks its bundle before it opens any
+# port, and its gRPC health service says SERVING only after that: the readiness probe asks it,
+# so a new pod receives no traffic until its bundle is in memory and valid, and a pod whose
+# bundle fails the checks never becomes ready (a rolling update then stalls with the old pods
+# still serving). On SIGTERM: the preStop sleep lets the endpoint removal reach kube-proxy,
+# then grpc.server.stop(grace=5) finishes in-flight calls and the api's channel reconnects.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: model-server
+  labels:
+    {{- include "recloop.labels" $ctx | nindent 4 }}
+spec:
+  replicas: {{ $c.replicas }}
+  minReadySeconds: {{ $c.minReadySeconds }}
+  progressDeadlineSeconds: {{ $c.progressDeadlineSeconds }}
+  selector:
+    matchLabels:
+      {{- include "recloop.selector" $ctx | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: {{ $c.maxSurge }}
+      maxUnavailable: {{ $c.maxUnavailable }}
+  template:
+    metadata:
+      labels:
+        {{- include "recloop.selector" $ctx | nindent 8 }}
+    spec:
+      terminationGracePeriodSeconds: {{ $c.terminationGracePeriodSeconds }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: model-server
+          image: {{ include "recloop.image" .Values.images.modelServer }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          args: ["--bundle", "/bundles/{{ .Values.bundle.version }}", "--host", "0.0.0.0",
+                 "--port", "18081", "--admin-port", "18082"]
+          env:
+            - name: MODEL_SERVER_WORKERS
+              value: {{ $c.workers | quote }}
+          ports:
+            - name: grpc
+              containerPort: 18081
+            - name: admin
+              containerPort: 18082
+          # The ports open only after the bundle loaded: up to 2 minutes for that.
+          startupProbe:
+            grpc: {port: 18081}
+            periodSeconds: 1
+            failureThreshold: 120
+          readinessProbe:
+            grpc: {port: 18081}
+            periodSeconds: 1
+            failureThreshold: 2
+          livenessProbe:
+            httpGet: {path: /healthz, port: admin}
+            periodSeconds: 10
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: {{ $c.preStopSleepSeconds }}
+          resources:
+            {{- toYaml $c.resources | nindent 12 }}
+          securityContext:
+            {{- include "recloop.containerSecurity" . | nindent 12 }}
+          volumeMounts:
+            - name: bundles
+              mountPath: /bundles
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        {{- include "recloop.bundleVolume" . | nindent 8 }}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: model-server
+  labels:
+    {{- include "recloop.labels" $ctx | nindent 4 }}
+spec:
+  selector:
+    {{- include "recloop.selector" $ctx | nindent 4 }}
+  ports:
+    - name: grpc
+      port: 18081
+      targetPort: grpc
+      appProtocol: grpc
+    - name: admin
+      port: 18082
+      targetPort: admin

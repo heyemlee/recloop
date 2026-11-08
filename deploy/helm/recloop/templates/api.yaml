@@ -1,0 +1,122 @@
+{{- $c := .Values.api -}}
+{{- $ctx := dict "root" . "name" "api" -}}
+# The HTTP api (serving/cmd/api). Readiness is /healthz, which answers once the process has
+# loaded its bundle, the catalog and the experiments (the listener starts after that). Not
+# /readyz: that one reports dependencies, and a dependency outage must degrade answers (design
+# §5.1), not take every api pod out of the Service at once.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  labels:
+    {{- include "recloop.labels" $ctx | nindent 4 }}
+spec:
+  {{- if not $c.hpa.enabled }}
+  replicas: {{ $c.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "recloop.selector" $ctx | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxSurge: 1, maxUnavailable: 0}
+  template:
+    metadata:
+      labels:
+        {{- include "recloop.selector" $ctx | nindent 8 }}
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        {{- include "recloop.goPodSecurity" . | nindent 8 }}
+      containers:
+        - name: api
+          image: {{ include "recloop.image" .Values.images.go }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          command: ["/usr/local/bin/api"]
+          env:
+            - name: API_ADDR
+              value: "0.0.0.0:18080"
+            {{- include "recloop.goEnv" $ctx | nindent 12 }}
+            - name: CACHE_REDIS_URL
+              value: "redis://{{ .Values.endpoints.cacheRedis }}/0"
+            - name: MODEL_SERVER_ADDR
+              value: "model-server:18081"
+            - name: RECLOOP_BUNDLE
+              value: "/bundles/{{ .Values.bundle.version }}"
+            {{- include "recloop.envMap" $c.env | trim | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 18080
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 2
+            failureThreshold: 2
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 10
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: {{ $c.preStopSleepSeconds }}
+          resources:
+            {{- toYaml $c.resources | nindent 12 }}
+          securityContext:
+            {{- include "recloop.containerSecurity" . | nindent 12 }}
+          volumeMounts:
+            - name: bundles
+              mountPath: /bundles
+              readOnly: true
+      volumes:
+        {{- include "recloop.bundleVolume" . | nindent 8 }}
+---
+# NodePort {{ $c.nodePort }}: kube-proxy spreads connections (not requests) over the ready pods.
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  labels:
+    {{- include "recloop.labels" $ctx | nindent 4 }}
+spec:
+  type: NodePort
+  selector:
+    {{- include "recloop.selector" $ctx | nindent 4 }}
+  ports:
+    - name: http
+      port: 18080
+      targetPort: http
+      nodePort: {{ $c.nodePort }}
+{{- if $c.hpa.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api
+  labels:
+    {{- include "recloop.labels" $ctx | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: api
+  minReplicas: {{ $c.hpa.minReplicas }}
+  maxReplicas: {{ $c.hpa.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ $c.hpa.cpuUtilization }}
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      selectPolicy: Max
+      policies:
+        - {type: Percent, value: 100, periodSeconds: 15}
+        - {type: Pods, value: 2, periodSeconds: 15}
+    scaleDown:
+      stabilizationWindowSeconds: {{ $c.hpa.scaleDownStabilizationSeconds }}
+      policies:
+        - {type: Pods, value: 1, periodSeconds: 30}
+{{- end }}

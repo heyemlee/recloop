@@ -1,0 +1,83 @@
+{{- if .Values.pgProxy.enabled }}
+{{- $c := .Values.pgProxy -}}
+{{- $ctx := dict "root" . "name" "pg-proxy" -}}
+# Toxiproxy between billing and PostgreSQL, as compose's pg-proxy: it only forwards until the
+# drill adds a latency toxic through its API (NodePort {{ $c.nodePort }}).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pg-proxy
+  labels:
+    {{- include "recloop.labels" $ctx | nindent 4 }}
+data:
+  pg-proxy.json: |
+    [
+      {"name": "postgres", "listen": "0.0.0.0:15433", "upstream": {{ .Values.endpoints.postgres | quote }}, "enabled": true}
+    ]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pg-proxy
+  labels:
+    {{- include "recloop.labels" $ctx | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "recloop.selector" $ctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "recloop.selector" $ctx | nindent 8 }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: toxiproxy
+          image: {{ .Values.images.toxiproxy }}
+          imagePullPolicy: IfNotPresent
+          args: ["-host=0.0.0.0", "-config=/config/pg-proxy.json"]
+          ports:
+            - name: postgres
+              containerPort: 15433
+            - name: api
+              containerPort: 8474
+          readinessProbe:
+            httpGet: {path: /version, port: api}
+            periodSeconds: 5
+          resources:
+            {{- toYaml $c.resources | nindent 12 }}
+          securityContext:
+            {{- include "recloop.containerSecurity" . | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: pg-proxy
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pg-proxy
+  labels:
+    {{- include "recloop.labels" $ctx | nindent 4 }}
+spec:
+  type: NodePort
+  selector:
+    {{- include "recloop.selector" $ctx | nindent 4 }}
+  ports:
+    - name: postgres
+      port: 15433
+      targetPort: postgres
+    - name: api
+      port: 8474
+      targetPort: api
+      nodePort: {{ $c.nodePort }}
+{{- end }}
