@@ -55,7 +55,9 @@ DEADLINE_ABORTS = Counter(
     ["where"],
 )
 INFLIGHT = Gauge("recloop_ms_inflight", "Retrieve and Rank calls being handled.")
-CALLS = Counter("recloop_ms_calls_total", "Calls by method and gRPC status code.", ["method", "code"])
+CALLS = Counter(
+    "recloop_ms_calls_total", "Calls by method and gRPC status code.", ["method", "code"]
+)
 RANK_SECONDS = Histogram(
     "recloop_ms_rank_seconds",
     "Rank latency inside the model server by stage (features, scores, ads, total).",
@@ -146,8 +148,14 @@ def _handler(faults: Faults, registry=None):
             try:
                 body = self._body()
                 if self.path == "/fault":
-                    s = faults.set(float(body.get("delay_ms", 0)), float(body.get("probability", 0)))
-                    log.warning("fault injection set: delay %.0f ms, probability %.2f", s.delay_ms, s.probability)
+                    s = faults.set(
+                        float(body.get("delay_ms", 0)), float(body.get("probability", 0))
+                    )
+                    log.warning(
+                        "fault injection set: delay %.0f ms, probability %.2f",
+                        s.delay_ms,
+                        s.probability,
+                    )
                     self._json(200, asdict(s))
                 elif registry is not None and self.path == "/bundles/default":
                     registry.set_default(str(body["version"]))

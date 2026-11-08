@@ -16,7 +16,9 @@ from ml.ranking import candidates as cand_mod
 
 
 class RRF:
-    def __init__(self, sources: dict, weights: dict[str, float], name: str = "RRF", variant: str = "control"):
+    def __init__(
+        self, sources: dict, weights: dict[str, float], name: str = "RRF", variant: str = "control"
+    ):
         self.sources = sources  # source name -> fitted model with score(split)
         self.weights = dict(weights)
         self.name = name

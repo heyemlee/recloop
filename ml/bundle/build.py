@@ -228,7 +228,9 @@ def ranker_files(stage: Path, ranker: LambdaRank, valid: Split) -> dict:
             items=c.items[i : i + 1],
             rrf=c.rrf[i : i + 1],
             ranks={s: c.ranks[s][i : i + 1] for s in c.ranks},
-            scores={s: c.scores[s][i : i + 1].astype(np.float32).astype(np.float64) for s in c.scores},
+            scores={
+                s: c.scores[s][i : i + 1].astype(np.float32).astype(np.float64) for s in c.scores
+            },
         )
         xf = feat.compute(one, [valid.history[i]], ranker.tables)[0][c.valid()[i]]
         queries.append(
@@ -243,9 +245,18 @@ def ranker_files(stage: Path, ranker: LambdaRank, valid: Split) -> dict:
         )
     _write_json(
         stage / "rank_golden.json",
-        {"features": list(feat.FEATURES), "feature_tolerance": 1e-5, "score_tolerance": 1e-3, "queries": queries},
+        {
+            "features": list(feat.FEATURES),
+            "feature_tolerance": 1e-5,
+            "score_tolerance": 1e-3,
+            "queries": queries,
+        },
     )
-    return {"onnx_max_abs_diff": worst, "checked_rows": int(len(rows)), "golden_queries": len(queries)}
+    return {
+        "onnx_max_abs_diff": worst,
+        "checked_rows": int(len(rows)),
+        "golden_queries": len(queries),
+    }
 
 
 def pctr_file(stage: Path, valid_x: np.ndarray) -> dict | None:
@@ -276,7 +287,10 @@ def pctr_file(stage: Path, valid_x: np.ndarray) -> dict | None:
         "C": m["C"],
         "days": m["training"]["days"],
         "rows": m["training"]["rows"],
-        "held_out": {k: m["training"]["held_out"][k] for k in ("auc", "logloss", "logloss_constant", "observed_ctr", "predicted_ctr")},
+        "held_out": {
+            k: m["training"]["held_out"][k]
+            for k in ("auc", "logloss", "logloss_constant", "observed_ctr", "predicted_ctr")
+        },
     }
 
 
@@ -305,7 +319,12 @@ def _write_json(path: Path, obj) -> None:
     path.write_text(json.dumps(obj, separators=(",", ":")) + "\n")
 
 
-def build(set_current: bool = False, with_ranker: bool = True, with_pctr: bool = True, sasrec_path: Path | None = None) -> Path:
+def build(
+    set_current: bool = False,
+    with_ranker: bool = True,
+    with_pctr: bool = True,
+    sasrec_path: Path | None = None,
+) -> Path:
     if not train_sasrec.CHECKPOINT.exists():
         raise SystemExit("no SASRec checkpoint: run `make train` first")
     if not OFFLINE_JSON.exists():
@@ -367,7 +386,11 @@ def build(set_current: bool = False, with_ranker: bool = True, with_pctr: bool =
         }
     pctr_info = None
     if with_pctr:
-        c = (ranker.rrf if ranker is not None else RRF({"sasrec": sasrec, "itemcf": itemcf, "pop": pop}, cand_mod.CONTROL_WEIGHTS)).candidates(load_split("valid"))
+        c = (
+            ranker.rrf
+            if ranker is not None
+            else RRF({"sasrec": sasrec, "itemcf": itemcf, "pop": pop}, cand_mod.CONTROL_WEIGHTS)
+        ).candidates(load_split("valid"))
         vx = feat.compute(c, load_split("valid").history, tables)[c.valid()]
         pctr_info = pctr_file(stage, vx)
 
@@ -410,11 +433,15 @@ def build(set_current: bool = False, with_ranker: bool = True, with_pctr: bool =
         "models": {
             "sasrec": {
                 "config": asdict(sasrec.cfg),
-                "checkpoint": str(checkpoint.relative_to(paths.ROOT)) if checkpoint.is_relative_to(paths.ROOT) else str(checkpoint),
+                "checkpoint": str(checkpoint.relative_to(paths.ROOT))
+                if checkpoint.is_relative_to(paths.ROOT)
+                else str(checkpoint),
                 "best_epoch": sasrec.log.best_epoch,
                 "valid": sasrec.log.best_valid,
                 # make eval's test numbers are the selected checkpoint's
-                "test": _test_summary(models.get("SASRec")) if checkpoint == train_sasrec.CHECKPOINT else None,
+                "test": _test_summary(models.get("SASRec"))
+                if checkpoint == train_sasrec.CHECKPOINT
+                else None,
             },
             "itemcf": {
                 "params": offline["itemcf_params"],
@@ -457,11 +484,22 @@ def _test_summary(model_results: dict | None) -> dict | None:
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description="Build a model bundle")
     p.add_argument("--current", action="store_true", help="point artifacts/bundles/current at it")
-    p.add_argument("--no-ranker", action="store_true", help="feature tables only, no LightGBM ranker")
+    p.add_argument(
+        "--no-ranker", action="store_true", help="feature tables only, no LightGBM ranker"
+    )
     p.add_argument("--no-pctr", action="store_true", help="leave the pCTR model out")
-    p.add_argument("--sasrec", type=Path, help="another SASRec checkpoint (e.g. a weaker trial, for the release drill)")
+    p.add_argument(
+        "--sasrec",
+        type=Path,
+        help="another SASRec checkpoint (e.g. a weaker trial, for the release drill)",
+    )
     args = p.parse_args(argv)
-    final = build(args.current, with_ranker=not args.no_ranker, with_pctr=not args.no_pctr, sasrec_path=args.sasrec)
+    final = build(
+        args.current,
+        with_ranker=not args.no_ranker,
+        with_pctr=not args.no_pctr,
+        sasrec_path=args.sasrec,
+    )
     manifest = json.loads((final / "manifest.json").read_text())
     print(f"bundle   {manifest['version']}  ({len(manifest['files'])} files)")
     print(f"encoder  ONNX vs PyTorch max |diff| {manifest['encoder']['onnx_max_abs_diff']:.1e}")
@@ -477,8 +515,17 @@ def main(argv: list[str] | None = None) -> None:
             f"over {r['checked_rows']:,} validation candidates; {r['golden_queries']} golden queries"
         )
     pc = manifest.get("pctr")
-    print(f"pctr     {pc['model'] + ' from ' + ', '.join(pc['days']) if pc else 'none (FixedPCTR stays)'}")
-    print(f"current  -> {os.readlink(CURRENT)}" + ("" if os.readlink(CURRENT) == final.name else f" (this bundle: {final.name}; release it through the api)"))
+    print(
+        f"pctr     {pc['model'] + ' from ' + ', '.join(pc['days']) if pc else 'none (FixedPCTR stays)'}"
+    )
+    print(
+        f"current  -> {os.readlink(CURRENT)}"
+        + (
+            ""
+            if os.readlink(CURRENT) == final.name
+            else f" (this bundle: {final.name}; release it through the api)"
+        )
+    )
 
 
 if __name__ == "__main__":

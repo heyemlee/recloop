@@ -26,9 +26,8 @@ from pathlib import Path
 
 import faiss
 import grpc
-from grpc_health.v1 import health, health_pb2, health_pb2_grpc
-
 import numpy as np
+from grpc_health.v1 import health, health_pb2, health_pb2_grpc
 
 from model_server import admin
 from model_server import bundle as bundle_mod
@@ -133,7 +132,10 @@ class ModelServer(pb_grpc.ModelServerServicer):
                 pb.Scored(item_id=int(i), score=float(s))
                 for i, s in zip(items, scores, strict=True)
             ],
-            ads=[pb.Scored(item_id=int(i), score=float(s)) for i, s in zip(ad_ids, ad_scores, strict=True)],
+            ads=[
+                pb.Scored(item_id=int(i), score=float(s))
+                for i, s in zip(ad_ids, ad_scores, strict=True)
+            ],
         )
         admin.REQUESTS.labels("OK").inc()
         admin.RETRIEVE_SECONDS.labels("total").observe(time.perf_counter() - t0)
@@ -154,7 +156,9 @@ class ModelServer(pb_grpc.ModelServerServicer):
         r = b.ranking
         if r is None:
             admin.CALLS.labels("Rank", "FAILED_PRECONDITION").inc()
-            context.abort(grpc.StatusCode.FAILED_PRECONDITION, f"bundle {b.version} has no ranking models")
+            context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION, f"bundle {b.version} has no ranking models"
+            )
         if len(request.candidates) > MAX_RANK_CANDIDATES or len(request.ads) > MAX_ADS:
             admin.CALLS.labels("Rank", "INVALID_ARGUMENT").inc()
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "too many candidates")
@@ -180,7 +184,10 @@ class ModelServer(pb_grpc.ModelServerServicer):
             if request.ads:
                 t = time.perf_counter()
                 ads = list(request.ads)
-                rel = np.asarray([a.relevance if a.HasField("relevance") else np.nan for a in ads], dtype=np.float32)
+                rel = np.asarray(
+                    [a.relevance if a.HasField("relevance") else np.nan for a in ads],
+                    dtype=np.float32,
+                )
                 missing = np.isnan(rel)
                 if missing.any() and history:
                     user = b.encode([history])

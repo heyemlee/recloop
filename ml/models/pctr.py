@@ -38,7 +38,9 @@ SAMPLES = paths.ARTIFACTS / "samples" / "train"
 OUT = paths.ARTIFACTS / "models" / "pctr"
 REFERENCE_POSITION = 3
 POSITION_BUCKETS = tuple(f"pos_{p}" for p in range(1, 11)) + ("pos_11_20", "pos_21_up")
-PRICE_COLUMNS = tuple(f"price_{b}" for b in range(len(feat.PRICE_EDGES_CENTS) + 1)) + ("price_unknown",)
+PRICE_COLUMNS = tuple(f"price_{b}" for b in range(len(feat.PRICE_EDGES_CENTS) + 1)) + (
+    "price_unknown",
+)
 CONTINUOUS = ("sasrec_score", "pop_log", "n_sources", "cat2_overlap", "leaf_overlap")
 COLUMNS = (*CONTINUOUS, "sasrec_missing", *PRICE_COLUMNS, "sponsored", *POSITION_BUCKETS)
 C_GRID = (0.01, 0.1, 1.0, 10.0)
@@ -87,9 +89,17 @@ def load_samples(directory: Path = SAMPLES) -> pd.DataFrame:
 
 
 def matrices(df: pd.DataFrame):
-    x = np.stack(df.features.map(lambda v: np.asarray([np.nan if f is None else f for f in v], dtype=np.float64)).to_numpy())
+    x = np.stack(
+        df.features.map(
+            lambda v: np.asarray([np.nan if f is None else f for f in v], dtype=np.float64)
+        ).to_numpy()
+    )
     sponsored = (df.slot == "sponsored").to_numpy()
-    return design(x, df.pos.to_numpy(), sponsored), df.label.to_numpy().astype(np.int64), df.weight.to_numpy()
+    return (
+        design(x, df.pos.to_numpy(), sponsored),
+        df.label.to_numpy().astype(np.int64),
+        df.weight.to_numpy(),
+    )
 
 
 class Standardizer:
@@ -199,7 +209,9 @@ def main() -> None:
     pos_cols = [COLUMNS.index(c) for c in ("sponsored", *POSITION_BUCKETS)]
     from sklearn.linear_model import LogisticRegression
 
-    base = LogisticRegression(C=best, max_iter=2000).fit(x[:b][:, pos_cols], y[:b], sample_weight=w[:b])
+    base = LogisticRegression(C=best, max_iter=2000).fit(
+        x[:b][:, pos_cols], y[:b], sample_weight=w[:b]
+    )
     p_base = base.predict_proba(x[b:][:, pos_cols])[:, 1]
     held_out["logloss_position_only"] = weighted_logloss(y[b:], p_base, w[b:])
     held_out["auc_position_only"] = weighted_auc(y[b:], p_base, w[b:])

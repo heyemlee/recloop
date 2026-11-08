@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import hashlib
 import itertools
-import json
 import time
 
 import numpy as np
@@ -69,7 +68,9 @@ def fold_of_users(users: np.ndarray, folds: int = FOLDS, seed: int = FOLD_SEED) 
 
 
 def _dataset(lgb, x, y, groups):
-    return lgb.Dataset(x, label=y, group=groups, feature_name=list(feat.FEATURES), free_raw_data=False)
+    return lgb.Dataset(
+        x, label=y, group=groups, feature_name=list(feat.FEATURES), free_raw_data=False
+    )
 
 
 def _held_out(booster, rounds, x_q, items, split_target, tie_pos) -> dict:
@@ -136,7 +137,14 @@ def main() -> None:
                 valid_sets=[dvalid],
                 callbacks=[lgb.early_stopping(params.early_stopping, verbose=False)],
             )
-            held = _held_out(booster, booster.best_iteration, x_all[all_idx], c.items[all_idx], everyone.target, ev.tie_pos)
+            held = _held_out(
+                booster,
+                booster.best_iteration,
+                x_all[all_idx],
+                c.items[all_idx],
+                everyone.target,
+                ev.tie_pos,
+            )
             folds_out.append(
                 {
                     "fold": k,
@@ -150,7 +158,10 @@ def main() -> None:
                 f"  {params.label():45s} fold {k}: {booster.best_iteration:4d} rounds, "
                 f"held-out NDCG@10 {held['NDCG@10']:.4f}  ({folds_out[-1]['seconds']:.0f}s)"
             )
-        mean = {m: float(np.mean([f["held_out"][m] for f in folds_out])) for m in folds_out[0]["held_out"]}
+        mean = {
+            m: float(np.mean([f["held_out"][m] for f in folds_out]))
+            for m in folds_out[0]["held_out"]
+        }
         trials.append({"params": params.__dict__, "folds": folds_out, "cv": mean})
     best = max(trials, key=lambda t: (t["cv"][SELECT_BY], t["cv"]["HR@10"]))
     params = RankerParams(**best["params"])
@@ -183,7 +194,8 @@ def main() -> None:
             f: {"gain": float(gv), "splits": int(sv)}
             for f, gv, sv in zip(feat.FEATURES, gain, split_counts, strict=True)
         },
-        "recall": recall_info | {"sasrec_sha256": _sha256(train_sasrec.CHECKPOINT), "weights": cand_mod.CONTROL_WEIGHTS},
+        "recall": recall_info
+        | {"sasrec_sha256": _sha256(train_sasrec.CHECKPOINT), "weights": cand_mod.CONTROL_WEIGHTS},
         "lightgbm": lgb.__version__,
         "seconds": round(time.monotonic() - t0, 1),
     }

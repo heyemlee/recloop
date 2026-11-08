@@ -25,13 +25,22 @@ from sim.client import uuid7_ms
 class Traffic:
     """sim.run's sessions in a background thread, one ledger per run."""
 
-    def __init__(self, out: Path, api_url: str, concurrency: int = 16, seed: int = world_mod.SEED,
-                 world: Path = world_mod.DEFAULT_WORLD, dwell_ms=(0.0, 0.0)):
+    def __init__(
+        self,
+        out: Path,
+        api_url: str,
+        concurrency: int = 16,
+        seed: int = world_mod.SEED,
+        world: Path = world_mod.DEFAULT_WORLD,
+        dwell_ms=(0.0, 0.0),
+    ):
         self.out = Path(out)
         self.out.mkdir(parents=True, exist_ok=True)
         self.ledger = run_mod.Ledger(self.out / "ledger.jsonl")
         w = world_mod.load(world)
-        self.sim = run_mod.Simulator(w, api_url, run_mod.Faults(), self.ledger, seed=seed, dwell_ms=dwell_ms)
+        self.sim = run_mod.Simulator(
+            w, api_url, run_mod.Faults(), self.ledger, seed=seed, dwell_ms=dwell_ms
+        )
         self.concurrency = concurrency
         self.thread: threading.Thread | None = None
         self.stats = None
@@ -79,7 +88,9 @@ def summarize(pages: dict, events: list, errors: list, t0: float, t1: float, arm
     """Per arm (arm(page) -> name; None: skip), over pages served in [t0, t1): page views,
     users, failed page views (not attributable to an arm: reported for the window), degraded
     share, client latency P50 / P99, impressions, clicks and CTR."""
-    by_arm = defaultdict(lambda: {"pages": 0, "users": set(), "degraded": 0, "ms": [], "imps": 0, "clicks": 0})
+    by_arm = defaultdict(
+        lambda: {"pages": 0, "users": set(), "degraded": 0, "ms": [], "imps": 0, "clicks": 0}
+    )
     rid_arm = {}
     for rid, p in pages.items():
         if t0 <= p["t"] < t1:
@@ -120,7 +131,11 @@ def summarize(pages: dict, events: list, errors: list, t0: float, t1: float, arm
             "ctr": d["clicks"] / d["imps"] if d["imps"] else float("nan"),
         }
     failed = [e for e in errors if t0 <= e["t"] < t1]
-    return {"arms": out, "failed_page_views": len(failed), "failed_by_status": _count(failed, "status")}
+    return {
+        "arms": out,
+        "failed_page_views": len(failed),
+        "failed_by_status": _count(failed, "status"),
+    }
 
 
 def _count(rows: list, key: str) -> dict:
@@ -133,7 +148,10 @@ def _count(rows: list, key: str) -> dict:
 def timeline(pages: dict, errors: list, t0: float, t1: float, step: float = 10.0) -> list[dict]:
     """Per `step` seconds: page views by bundle version, failed page views, P99 latency."""
     n = max(1, int(np.ceil((t1 - t0) / step)))
-    rows = [{"t": round(i * step, 1), "versions": defaultdict(int), "failed": 0, "ms": []} for i in range(n)]
+    rows = [
+        {"t": round(i * step, 1), "versions": defaultdict(int), "failed": 0, "ms": []}
+        for i in range(n)
+    ]
     for p in pages.values():
         i = int((p["t"] - t0) // step)
         if 0 <= i < n:
@@ -151,9 +169,15 @@ def timeline(pages: dict, errors: list, t0: float, t1: float, step: float = 10.0
     return rows
 
 
-def ctr_by_user(pages: dict, events: list, t0: float, t1: float, arm) -> dict[str, dict[int, list[int]]]:
+def ctr_by_user(
+    pages: dict, events: list, t0: float, t1: float, arm
+) -> dict[str, dict[int, list[int]]]:
     """arm -> user -> [impressions, clicks] (for a user-level bootstrap of the CTR difference)."""
-    rid = {r: (arm(p), p["user_id"]) for r, p in pages.items() if t0 <= p["t"] < t1 and arm(p) is not None}
+    rid = {
+        r: (arm(p), p["user_id"])
+        for r, p in pages.items()
+        if t0 <= p["t"] < t1 and arm(p) is not None
+    }
     out = defaultdict(lambda: defaultdict(lambda: [0, 0]))
     seen = set()
     for e in events:
@@ -169,7 +193,9 @@ def ctr_by_user(pages: dict, events: list, t0: float, t1: float, arm) -> dict[st
     return {a: dict(us) for a, us in out.items()}
 
 
-def bootstrap_ctr_diff(a: dict, b: dict, reps: int = 2000, seed: int = 20261108) -> tuple[float, float, float]:
+def bootstrap_ctr_diff(
+    a: dict, b: dict, reps: int = 2000, seed: int = 20261108
+) -> tuple[float, float, float]:
     """CTR(b) - CTR(a) with a 95% interval from resampling users (ratio of sums per replicate)."""
     rng = np.random.default_rng(seed)
     xa = np.asarray(list(a.values()), dtype=np.float64)

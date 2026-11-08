@@ -37,8 +37,7 @@ from ml import paths
 from ml.data import preprocess
 from ml.eval import bootstrap, calc_check, metrics, minionerec_sasrec, report
 from ml.eval.splits import NUM_ITEMS, Split, item_sids, load_split, sid_codes, train_sequences
-from ml.models import train_sasrec
-from ml.models import train_ranker
+from ml.models import train_ranker, train_sasrec
 from ml.models.itemcf import ItemCF, ItemCFParams, cooccurrence
 from ml.models.pop import Pop
 from ml.models.ranker import LambdaRank
@@ -229,7 +228,10 @@ def ranking_summary(rrf: RRF, test: Split, tuning: dict) -> dict:
         "candidates": cand_mod.CANDIDATE_DEPTH,
         "source_k": cand_mod.SOURCE_K,
         "rrf_k": cand_mod.RRF_K,
-        "weights": {"control": cand_mod.CONTROL_WEIGHTS, "sasrec_heavy": cand_mod.SASREC_HEAVY_WEIGHTS},
+        "weights": {
+            "control": cand_mod.CONTROL_WEIGHTS,
+            "sasrec_heavy": cand_mod.SASREC_HEAVY_WEIGHTS,
+        },
         "test_target_in_candidates": float(found.mean()),
         "features": list(feat.FEATURES),
         "tuning": {k: v for k, v in tuning.items() if k != "trials"}
@@ -273,7 +275,9 @@ def main() -> None:
     sasrec, tuning = load_sasrec()
     sources = {"sasrec": sasrec, "itemcf": itemcf, "pop": pop}
     rrf = RRF(sources, cand_mod.CONTROL_WEIGHTS)
-    rrf_heavy = RRF(sources, cand_mod.SASREC_HEAVY_WEIGHTS, name="RRF-heavy", variant="sasrec_heavy")
+    rrf_heavy = RRF(
+        sources, cand_mod.SASREC_HEAVY_WEIGHTS, name="RRF-heavy", variant="sasrec_heavy"
+    )
     ranker, ranker_tuning = load_ranker(rrf, pop.counts)
     if ranker_tuning["recall"]["itemcf_params"] != best_params.__dict__:
         raise SystemExit("the ranker was trained on another ItemCF: run `make train-ranker` again")

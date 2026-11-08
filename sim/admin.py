@@ -17,7 +17,9 @@ class Admin:
         self.actor = actor
 
     def _post(self, path: str, body: dict | None = None) -> dict:
-        status, resp = self.api.post_json(f"/internal/admin/{path}", {"actor": self.actor, **(body or {})})
+        status, resp = self.api.post_json(
+            f"/internal/admin/{path}", {"actor": self.actor, **(body or {})}
+        )
         if status != 200:
             raise AdminError(f"POST /internal/admin/{path}: {status} {resp}")
         return resp or {}

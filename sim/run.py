@@ -218,7 +218,12 @@ class Session:
             if status != 200 or not resp:
                 # The release drill counts failed page views over time (M4).
                 self.sim.ledger.write(
-                    "error", user_id=user, surface=kind, t=round(time.time(), 3), status=status, ms=round(ms, 2)
+                    "error",
+                    user_id=user,
+                    surface=kind,
+                    t=round(time.time(), 3),
+                    status=status,
+                    ms=round(ms, 2),
                 )
                 surface, item, cursor = "home", None, None
                 continue
@@ -322,7 +327,9 @@ class Simulator:
                 while True:
                     with lock:
                         # self.deadline, not the argument: a drill may move it while running.
-                        if started[0] >= sessions or (self.deadline and time.time() > self.deadline):
+                        if started[0] >= sessions or (
+                            self.deadline and time.time() > self.deadline
+                        ):
                             break
                         started[0] += 1
                     Session(self, rng, api, st).run()

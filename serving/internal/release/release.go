@@ -286,7 +286,8 @@ func (c *Controller) Rollback(ctx context.Context, actor, note string) (string, 
 	// retired_at and the active version's activated_at (PostgreSQL's now() is per transaction).
 	for i := range all {
 		v := &all[i]
-		if v.Status == "retired" && v.RetiredAt != nil && v.RetiredAt.Equal(*active.ActivatedAt) {
+		// ActivatedAt: it served as the active version once (an aborted canary never did).
+		if v.Status == "retired" && v.RetiredAt != nil && v.ActivatedAt != nil && v.RetiredAt.Equal(*active.ActivatedAt) {
 			target = v
 		}
 	}

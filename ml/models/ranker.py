@@ -66,7 +66,14 @@ class RankerParams:
 class LambdaRank:
     name = "LambdaRank"
 
-    def __init__(self, rrf: RRF, tables: feat.ItemTables, booster=None, params: RankerParams | None = None, rounds: int | None = None):
+    def __init__(
+        self,
+        rrf: RRF,
+        tables: feat.ItemTables,
+        booster=None,
+        params: RankerParams | None = None,
+        rounds: int | None = None,
+    ):
         self.rrf, self.tables = rrf, tables
         self.booster, self.params, self.rounds = booster, params or RankerParams(), rounds
 

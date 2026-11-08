@@ -35,7 +35,8 @@ def lightgbm_inputs(x: np.ndarray) -> np.ndarray:
 
 def float32_floor(t: float) -> float:
     """The largest float32 value <= t."""
-    f = np.float32(t)
+    with np.errstate(over="ignore"):  # thresholds beyond float32's range become +-inf first
+        f = np.float32(t)
     if float(f) > t:
         f = np.nextafter(f, np.float32(-np.inf))
     return float(f)
@@ -91,11 +92,20 @@ def booster_to_onnx(booster, num_features: int) -> onnx.ModelProto:
             if missing == "NaN":
                 miss = int(bool(node["default_left"]))
             elif missing == "None":
-                miss = int(0.0 <= t)  # NaN is read as 0.0
+                miss = int(t >= 0.0)  # NaN is read as 0.0
             else:
                 raise ValueError(f"unsupported missing type {missing!r}")
             pos = len(a["nodes_nodeids"])
-            add(tree_idx, nid, int(node["split_feature"]), float32_floor(t), "BRANCH_LEQ", -1, -1, miss)
+            add(
+                tree_idx,
+                nid,
+                int(node["split_feature"]),
+                float32_floor(t),
+                "BRANCH_LEQ",
+                -1,
+                -1,
+                miss,
+            )
             left = visit(node["left_child"])
             right = visit(node["right_child"])
             a["nodes_truenodeids"][pos] = left
@@ -123,7 +133,10 @@ def booster_to_onnx(booster, num_features: int) -> onnx.ModelProto:
     )
     model = helper.make_model(
         graph,
-        opset_imports=[helper.make_opsetid("", ONNX_OPSET), helper.make_opsetid("ai.onnx.ml", ONNX_ML_OPSET)],
+        opset_imports=[
+            helper.make_opsetid("", ONNX_OPSET),
+            helper.make_opsetid("ai.onnx.ml", ONNX_ML_OPSET),
+        ],
         producer_name="recloop-ml",
     )
     model.ir_version = 9

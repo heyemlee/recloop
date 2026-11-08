@@ -55,11 +55,15 @@ class ItemTables:
     @classmethod
     def build(cls, pop_count: np.ndarray, catalog: pd.DataFrame | None = None) -> ItemTables:
         if catalog is None:
-            catalog = pd.read_parquet(paths.CATALOG_PARQUET, columns=["item_id", "categories", "price_cents"])
+            catalog = pd.read_parquet(
+                paths.CATALOG_PARQUET, columns=["item_id", "categories", "price_cents"]
+            )
         catalog = catalog.sort_values("item_id")
         assert np.array_equal(catalog.item_id.to_numpy(), np.arange(len(pop_count)))
         price = catalog.price_cents.astype("Float64").to_numpy(dtype=np.float64, na_value=np.nan)
-        bucket = np.where(np.isnan(price), np.nan, np.searchsorted(PRICE_EDGES_CENTS, price, side="right"))
+        bucket = np.where(
+            np.isnan(price), np.nan, np.searchsorted(PRICE_EDGES_CENTS, price, side="right")
+        )
         cats = [list(c) if c is not None else [] for c in catalog.categories]
         cat2 = _codes([c[CATEGORY_LEVEL] if len(c) > CATEGORY_LEVEL else None for c in cats])
         leaf = _codes([" > ".join(c) if c else None for c in cats])

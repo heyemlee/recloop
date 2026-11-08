@@ -48,7 +48,9 @@ ORDER BY event_id
 
 
 def database_url() -> str:
-    return os.environ.get("DATABASE_URL", "postgres://recloop:recloop@localhost:15432/recloop?sslmode=disable")
+    return os.environ.get(
+        "DATABASE_URL", "postgres://recloop:recloop@localhost:15432/recloop?sslmode=disable"
+    )
 
 
 def export_day(conn, day: dt.date, raw: Path = RAW, batch: int = 50_000) -> dict[str, int]:
@@ -66,7 +68,12 @@ def export_day(conn, day: dt.date, raw: Path = RAW, batch: int = 50_000) -> dict
             cur.execute(QUERY, (day, typ))
             while rows := cur.fetchmany(batch):
                 cols = list(zip(*rows, strict=True))
-                writer.write_table(pa.Table.from_arrays([pa.array(c, type=f.type) for c, f in zip(cols, SCHEMA, strict=True)], schema=SCHEMA))
+                writer.write_table(
+                    pa.Table.from_arrays(
+                        [pa.array(c, type=f.type) for c, f in zip(cols, SCHEMA, strict=True)],
+                        schema=SCHEMA,
+                    )
+                )
                 n += len(rows)
         writer.close()
         shutil.rmtree(target, ignore_errors=True)
@@ -81,7 +88,9 @@ def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--day", action="append", default=[], type=dt.date.fromisoformat)
     p.add_argument(
-        "--around", type=dt.date.fromisoformat, help="the day before, the day and the day after (what the job reads)"
+        "--around",
+        type=dt.date.fromisoformat,
+        help="the day before, the day and the day after (what the job reads)",
     )
     p.add_argument("--out", type=Path, default=RAW)
     args = p.parse_args(argv)

@@ -83,7 +83,9 @@ class Registry:
                 state = "loading"
             else:
                 self._loading[version] = state = "loading"
-                threading.Thread(target=self._load, args=(version,), name=f"load-{version}", daemon=True).start()
+                threading.Thread(
+                    target=self._load, args=(version,), name=f"load-{version}", daemon=True
+                ).start()
         if wait:
             while self.state(version) == "loading":
                 time.sleep(0.05)

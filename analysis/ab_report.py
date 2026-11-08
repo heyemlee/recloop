@@ -54,8 +54,26 @@ def load_impressions(directory: Path = IMPRESSIONS) -> pd.DataFrame:
     days = sorted(directory.glob("day=*"))
     if not days:
         raise SystemExit(f"no impressions under {directory}: run `make samples`")
-    cols = ["impression_id", "request_id", "user_id", "item_id", "pos", "surface", "slot", "price", "exp_id_rank",
-            "exp_rank", "bucket_rank", "degraded", "clicked", "carted", "purchased", "final", "t_impression", "ranker"]
+    cols = [
+        "impression_id",
+        "request_id",
+        "user_id",
+        "item_id",
+        "pos",
+        "surface",
+        "slot",
+        "price",
+        "exp_id_rank",
+        "exp_rank",
+        "bucket_rank",
+        "degraded",
+        "clicked",
+        "carted",
+        "purchased",
+        "final",
+        "t_impression",
+        "ranker",
+    ]
     return pd.concat([pd.read_parquet(d, columns=cols) for d in days], ignore_index=True)
 
 
@@ -65,7 +83,9 @@ def user_totals(df: pd.DataFrame) -> pd.DataFrame:
     home = df[df.surface == "home"]
     sp = home[home.slot == "sponsored"]
     g = home.groupby(["exp_rank", "user_id"])
-    out = pd.DataFrame({"impressions": g.size(), "clicks": g.clicked.sum(), "carts": g.carted.sum()})
+    out = pd.DataFrame(
+        {"impressions": g.size(), "clicks": g.clicked.sum(), "carts": g.carted.sum()}
+    )
     gs = sp.groupby(["exp_rank", "user_id"])
     out["sp_impressions"] = gs.size()
     out["sp_clicks"] = gs.clicked.sum()
@@ -123,9 +143,17 @@ def srm(df: pd.DataFrame, variants: list[dict]) -> dict:
     chi2, p = stats.chisquare(observed, expected)
     # Every user's arm is the one the bucketing gives (Python twin of serving/internal/experiment).
     exp = {"layer": "rank", "bucket_from": 0, "bucket_to": 1000, "variants": variants}
-    mismatch = sum(srm_mod.assign([exp], "rank", str(uid)) != row["first"] for uid, row in users.iterrows())
-    return {"observed": dict(zip(names, observed, strict=True)), "chi2": float(chi2), "p": float(p),
-            "switchers": int((users["nunique"] > 1).sum()), "bucketing_mismatch": mismatch, "ok": p >= SRM_ALPHA}
+    mismatch = sum(
+        srm_mod.assign([exp], "rank", str(uid)) != row["first"] for uid, row in users.iterrows()
+    )
+    return {
+        "observed": dict(zip(names, observed, strict=True)),
+        "chi2": float(chi2),
+        "p": float(p),
+        "switchers": int((users["nunique"] > 1).sum()),
+        "bucketing_mismatch": mismatch,
+        "ok": p >= SRM_ALPHA,
+    }
 
 
 def resalt(totals: pd.DataFrame, n: int = RESALTS) -> dict:
@@ -142,8 +170,14 @@ def resalt(totals: pd.DataFrame, n: int = RESALTS) -> dict:
         ps.append(float(2 * stats.norm.sf(abs(z))))
     ps = np.asarray(ps)
     ks = stats.kstest(ps, "uniform")
-    return {"n": n, "p_values": ps.tolist(), "below_005": int((ps < 0.05).sum()), "ks_stat": float(ks.statistic), "ks_p": float(ks.pvalue),
-            "deciles": np.histogram(ps, bins=10, range=(0, 1))[0].tolist()}
+    return {
+        "n": n,
+        "p_values": ps.tolist(),
+        "below_005": int((ps < 0.05).sum()),
+        "ks_stat": float(ks.statistic),
+        "ks_p": float(ks.pvalue),
+        "deciles": np.histogram(ps, bins=10, range=(0, 1))[0].tolist(),
+    }
 
 
 def ledger_guardrails(path: Path, exp_id: str) -> dict:
@@ -161,8 +195,15 @@ def ledger_guardrails(path: Path, exp_id: str) -> dict:
             d["ms"].append(r["ms"])
             d["degraded"] += bool(r["degraded"])
             d["n"] += 1
-    return {a: {"requests": d["n"], "degraded": d["degraded"] / d["n"], "p50": float(np.percentile(d["ms"], 50)),
-                "p99": float(np.percentile(d["ms"], 99))} for a, d in by.items()}
+    return {
+        a: {
+            "requests": d["n"],
+            "degraded": d["degraded"] / d["n"],
+            "p50": float(np.percentile(d["ms"], 50)),
+            "p99": float(np.percentile(d["ms"], 99)),
+        }
+        for a, d in by.items()
+    }
 
 
 def analyse(df: pd.DataFrame, phase: dict, ledger: Path) -> dict:
@@ -180,11 +221,15 @@ def analyse(df: pd.DataFrame, phase: dict, ledger: Path) -> dict:
         "users": int(sub.user_id.nunique()),
         "not_final": int((~sub.final).sum()),
         "srm": srm(sub, phase["variants"]),
-        "metrics": {key: compare(a, b, num, den, rng) | {"label": label} for key, label, num, den in METRICS},
+        "metrics": {
+            key: compare(a, b, num, den, rng) | {"label": label} for key, label, num, den in METRICS
+        },
         "clicks_per_user": _welch(a.clicks.to_numpy(float), b.clicks.to_numpy(float)),
         "rpm": compare(a, b, "revenue", "impressions", rng),
         "guardrails": ledger_guardrails(ledger, phase["exp_id"]),
-        "rankers": sub.groupby("exp_rank").ranker.agg(lambda s: s.value_counts().to_dict()).to_dict(),
+        "rankers": sub.groupby("exp_rank")
+        .ranker.agg(lambda s: s.value_counts().to_dict())
+        .to_dict(),
     }
     out["rpm"] = {k: (v * 1000 if k in ("a", "b", "diff") else v) for k, v in out["rpm"].items()}
     out["rpm"]["ci_delta"] = tuple(x * 1000 for x in out["rpm"]["ci_delta"])
@@ -196,7 +241,12 @@ def analyse(df: pd.DataFrame, phase: dict, ledger: Path) -> dict:
 
 def _welch(a: np.ndarray, b: np.ndarray) -> dict:
     t = stats.ttest_ind(b, a, equal_var=False)
-    return {"a": float(a.mean()), "b": float(b.mean()), "diff": float(b.mean() - a.mean()), "p": float(t.pvalue)}
+    return {
+        "a": float(a.mean()),
+        "b": float(b.mean()),
+        "diff": float(b.mean() - a.mean()),
+        "p": float(t.pvalue),
+    }
 
 
 # ------------------------------------------------------------------------ rendering
@@ -211,17 +261,49 @@ def _ci(ci, d: int = 4) -> str:
 
 
 def _table(header: list[str], rows: list[list[str]]) -> list[str]:
-    return ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)] + ["| " + " | ".join(r) + " |" for r in rows]
+    return ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)] + [
+        "| " + " | ".join(r) + " |" for r in rows
+    ]
 
 
 def _metric_rows(res: dict) -> list[list[str]]:
     rows = []
     for m in res["metrics"].values():
-        rows.append([m["label"], _f(m["a"]), _f(m["b"]), f"{m['diff']:+.4f} ({m['rel']:+.1%})", _ci(m["ci_delta"]), _ci(m["ci_boot"]), _f(m["p"], 3)])
+        rows.append(
+            [
+                m["label"],
+                _f(m["a"]),
+                _f(m["b"]),
+                f"{m['diff']:+.4f} ({m['rel']:+.1%})",
+                _ci(m["ci_delta"]),
+                _ci(m["ci_boot"]),
+                _f(m["p"], 3),
+            ]
+        )
     r = res["rpm"]
-    rows.append(["Ad revenue per 1,000 home impressions (cents)", _f(r["a"], 1), _f(r["b"], 1), f"{r['diff']:+.1f} ({r['rel']:+.1%})", _ci(r["ci_delta"], 1), _ci(r["ci_boot"], 1), _f(r["p"], 3)])
+    rows.append(
+        [
+            "Ad revenue per 1,000 home impressions (cents)",
+            _f(r["a"], 1),
+            _f(r["b"], 1),
+            f"{r['diff']:+.1f} ({r['rel']:+.1%})",
+            _ci(r["ci_delta"], 1),
+            _ci(r["ci_boot"], 1),
+            _f(r["p"], 3),
+        ]
+    )
     c = res["clicks_per_user"]
-    rows.append(["Home-feed clicks per user", _f(c["a"], 2), _f(c["b"], 2), f"{c['diff']:+.2f}", "", "", _f(c["p"], 3)])
+    rows.append(
+        [
+            "Home-feed clicks per user",
+            _f(c["a"], 2),
+            _f(c["b"], 2),
+            f"{c['diff']:+.2f}",
+            "",
+            "",
+            _f(c["p"], 3),
+        ]
+    )
     return rows
 
 
@@ -245,11 +327,23 @@ def render(run: dict, results: dict, offline: dict | None) -> str:
     rows = []
     for name, ph in run["phases"].items():
         pv = sum(ph["page_views"].values())
-        rows.append([
-            name.upper(), f"`{ph['exp_id']}`", ", ".join(f"{v['name']} {v['share']}% ({v['params']['ranker']})" for v in ph["variants"]),
-            f"{(ph['to'] - ph['from']) / 60:.0f} min", f"{ph['sessions']:,}", f"{pv:,}", str(ph.get("evicted_keys", "n/a")),
-        ])
-    lines += _table(["Phase", "Experiment", "Arms", "Traffic", "Sessions", "Page views", "Redis evictions"], rows)
+        rows.append(
+            [
+                name.upper(),
+                f"`{ph['exp_id']}`",
+                ", ".join(
+                    f"{v['name']} {v['share']}% ({v['params']['ranker']})" for v in ph["variants"]
+                ),
+                f"{(ph['to'] - ph['from']) / 60:.0f} min",
+                f"{ph['sessions']:,}",
+                f"{pv:,}",
+                str(ph.get("evicted_keys", "n/a")),
+            ]
+        )
+    lines += _table(
+        ["Phase", "Experiment", "Arms", "Traffic", "Sessions", "Page views", "Redis evictions"],
+        rows,
+    )
     lines += [
         "",
         "Each phase started from the same state: the consumers caught up, Redis reseeded with the dataset users' training "
@@ -258,7 +352,7 @@ def render(run: dict, results: dict, offline: dict | None) -> str:
         "sample job (`ml/samples/job.py`): every impression joined to its served record, labelled by a click within 30 minutes.",
         "",
     ]
-    for key, res, title in (("aa", aa, "A/A"), ("ab", ab, "A/B")):
+    for res, title in ((aa, "A/A"), (ab, "A/B")):
         if res is None:
             continue
         s = res["srm"]
@@ -268,18 +362,39 @@ def render(run: dict, results: dict, offline: dict | None) -> str:
             f"{res['users']:,} users, {res['home_impressions']:,} home-feed impressions ({res['impressions']:,} in all); "
             f"{res['not_final']:,} impressions still inside their attribution window were left out.",
             "",
-            "Sample ratio: " + ", ".join(f"{k} {v:,}" for k, v in s["observed"].items())
+            "Sample ratio: "
+            + ", ".join(f"{k} {v:,}" for k, v in s["observed"].items())
             + f" users; chi-square p = {s['p']:.3f} ({'no mismatch' if s['ok'] else '**MISMATCH**'} at {SRM_ALPHA}); "
             f"{s['switchers']} users seen in two arms; {s['bucketing_mismatch']} users whose arm differs from the Python bucketing.",
             "",
-            *_table([f"Metric ({res['arms'][1]} vs {res['arms'][0]})", res["arms"][0], res["arms"][1], "Difference", "95% CI (delta)", "95% CI (bootstrap)", "p"], _metric_rows(res)),
+            *_table(
+                [
+                    f"Metric ({res['arms'][1]} vs {res['arms'][0]})",
+                    res["arms"][0],
+                    res["arms"][1],
+                    "Difference",
+                    "95% CI (delta)",
+                    "95% CI (bootstrap)",
+                    "p",
+                ],
+                _metric_rows(res),
+            ),
             "",
         ]
         g = res["guardrails"]
         if g:
             lines += _table(
                 ["Arm", "Requests", "Degraded", "Client P50 (ms)", "Client P99 (ms)"],
-                [[a, f"{v['requests']:,}", f"{v['degraded']:.2%}", f"{v['p50']:.1f}", f"{v['p99']:.1f}"] for a, v in sorted(g.items())],
+                [
+                    [
+                        a,
+                        f"{v['requests']:,}",
+                        f"{v['degraded']:.2%}",
+                        f"{v['p50']:.1f}",
+                        f"{v['p99']:.1f}",
+                    ]
+                    for a, v in sorted(g.items())
+                ],
             )
             lines += [""]
         if "resalt" in res:
@@ -288,13 +403,18 @@ def render(run: dict, results: dict, offline: dict | None) -> str:
                 f"Re-split {r['n']} times with other salts (`rank-aa-resalt-<k>`), the A/A's CTR test gives p < 0.05 in "
                 f"{r['below_005']} of {r['n']} splits (expected ~5); the p-values against the uniform distribution: "
                 f"Kolmogorov-Smirnov D = {r['ks_stat']:.3f}, p = {r['ks_p']:.2f}. P-values per decile: "
-                + ", ".join(str(x) for x in r["deciles"]) + ".",
+                + ", ".join(str(x) for x in r["deciles"])
+                + ".",
                 "",
             ]
     if ab is not None:
         m = ab["metrics"]["ctr"]
         verdict = (
-            "higher" if m["ci_delta"][0] > 0 else "lower" if m["ci_delta"][1] < 0 else "not significantly different"
+            "higher"
+            if m["ci_delta"][0] > 0
+            else "lower"
+            if m["ci_delta"][1] < 0
+            else "not significantly different"
         )
         lines += [
             "## Reading",
@@ -321,13 +441,18 @@ def main() -> None:
         raise SystemExit(f"{RUN} is missing: run `make ab` first")
     run = json.loads(RUN.read_text())
     df = load_impressions()
-    results = {name: analyse(df, ph, RUN.parent / name / "ledger.jsonl") for name, ph in run["phases"].items()}
+    results = {
+        name: analyse(df, ph, RUN.parent / name / "ledger.jsonl")
+        for name, ph in run["phases"].items()
+    }
     offline = json.loads(OFFLINE.read_text()) if OFFLINE.exists() else None
     OUT.write_text(render(run, results, offline))
     (RUN.parent / "report.json").write_text(json.dumps(results, indent=2, default=float) + "\n")
     for name, res in results.items():
         m = res["metrics"]["ctr"]
-        print(f"ab       {name}: CTR {m['a']:.4f} vs {m['b']:.4f}, diff {m['diff']:+.4f} {_ci(m['ci_delta'])}, p {m['p']:.3g}; SRM p {res['srm']['p']:.3f}")
+        print(
+            f"ab       {name}: CTR {m['a']:.4f} vs {m['b']:.4f}, diff {m['diff']:+.4f} {_ci(m['ci_delta'])}, p {m['p']:.3g}; SRM p {res['srm']['p']:.3f}"
+        )
     print(f"wrote {OUT.relative_to(ROOT)}")
 
 

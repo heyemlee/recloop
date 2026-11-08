@@ -128,7 +128,13 @@ def first_by(df, key: str, order: str):
     return df.withColumn("_rn", F.row_number().over(w)).filter("_rn = 1").drop("_rn")
 
 
-def build(spark, day: dt.date, raw: Path = export.RAW, complete_through: dt.datetime | None = None, rate: float = NEGATIVE_RATE):
+def build(
+    spark,
+    day: dt.date,
+    raw: Path = export.RAW,
+    complete_through: dt.datetime | None = None,
+    rate: float = NEGATIVE_RATE,
+):
     """(impressions, samples, meta) for the impressions of `day`."""
     from pyspark.sql import functions as F
 
@@ -144,7 +150,12 @@ def build(spark, day: dt.date, raw: Path = export.RAW, complete_through: dt.date
             "purchase": [day, day + one],
         },
     )
-    meta: dict = {"day": day.isoformat(), "window_minutes": WINDOW_MINUTES, "negative_rate": rate, "hash_seed": HASH_SEED}
+    meta: dict = {
+        "day": day.isoformat(),
+        "window_minutes": WINDOW_MINUTES,
+        "negative_rate": rate,
+        "hash_seed": HASH_SEED,
+    }
     read = {t: df.count() for t, df in ev.items()}
     ev = {t: first_by(df, "event_id", "server_ts").cache() for t, df in ev.items()}  # 2.
     unique = {t: df.count() for t, df in ev.items()}
@@ -153,21 +164,32 @@ def build(spark, day: dt.date, raw: Path = export.RAW, complete_through: dt.date
     if complete_through is None:
         newest = [df.agg(F.max("event_ts")).first()[0] for df in ev.values()]
         newest = [x for x in newest if x is not None]
-        complete_through = max(newest) if newest else dt.datetime.combine(day + one, dt.time(), dt.UTC)
+        complete_through = (
+            max(newest) if newest else dt.datetime.combine(day + one, dt.time(), dt.UTC)
+        )
     if complete_through.tzinfo is None:  # the process runs in UTC (spark_session)
         complete_through = complete_through.replace(tzinfo=dt.UTC)
     meta["complete_through"] = complete_through.astimezone(dt.UTC).isoformat()
 
     # 3. impressions: reported ones, then implied ones (a click without an impression).
-    imp_all = first_by(ev["impression"].filter(F.col("impression_id").isNotNull()), "impression_id", "event_ts")
+    imp_all = first_by(
+        ev["impression"].filter(F.col("impression_id").isNotNull()), "impression_id", "event_ts"
+    )
     clicks = ev["click"].filter(F.col("impression_id").isNotNull())
     first_click = first_by(clicks, "impression_id", "event_ts")
     implied = first_click.join(imp_all.select("impression_id"), "impression_id", "left_anti")
-    imp = imp_all.select("impression_id", "user_id", "item_id", "event_ts", F.lit(False).alias("implied")).unionByName(
-        implied.select("impression_id", "user_id", "item_id", "event_ts", F.lit(True).alias("implied"))
+    imp = imp_all.select(
+        "impression_id", "user_id", "item_id", "event_ts", F.lit(False).alias("implied")
+    ).unionByName(
+        implied.select(
+            "impression_id", "user_id", "item_id", "event_ts", F.lit(True).alias("implied")
+        )
     )
     imp = imp.filter(F.to_date("event_ts") == F.lit(day))  # this day's impressions only
-    meta["impressions"] = {"reported": imp.filter(~F.col("implied")).count(), "implied": imp.filter("implied").count()}
+    meta["impressions"] = {
+        "reported": imp.filter(~F.col("implied")).count(),
+        "implied": imp.filter("implied").count(),
+    }
     imp = (
         imp.withColumn("request_id", F.split("impression_id", ":").getItem(0))
         .withColumn("pos", F.split("impression_id", ":").getItem(1).cast("int"))
@@ -207,9 +229,13 @@ def build(spark, day: dt.date, raw: Path = export.RAW, complete_through: dt.date
     )
     joined = imp.join(served_items, ["request_id", "pos"], "left")
     no_served = joined.filter(F.col("served_item_id").isNull())
-    mismatch = joined.filter(F.col("served_item_id").isNotNull() & (F.col("served_item_id") != F.col("imp_item_id")))
+    mismatch = joined.filter(
+        F.col("served_item_id").isNotNull() & (F.col("served_item_id") != F.col("imp_item_id"))
+    )
     meta["dropped"] = {"no_served_record": no_served.count(), "item_mismatch": mismatch.count()}
-    att = joined.filter(F.col("served_item_id").isNotNull() & (F.col("served_item_id") == F.col("imp_item_id")))
+    att = joined.filter(
+        F.col("served_item_id").isNotNull() & (F.col("served_item_id") == F.col("imp_item_id"))
+    )
 
     # 5. labels.
     window = F.expr(f"INTERVAL {WINDOW_MINUTES} MINUTES")
@@ -227,7 +253,11 @@ def build(spark, day: dt.date, raw: Path = export.RAW, complete_through: dt.date
         .drop("click_times", "in_window", "clicks_all")
     )
     for typ, name in (("add_to_cart", "carted"), ("purchase", "purchased")):
-        follow = ev[typ].select(F.col("user_id").alias("f_user"), F.col("item_id").alias("f_item"), F.col("event_ts").alias("f_ts"))
+        follow = ev[typ].select(
+            F.col("user_id").alias("f_user"),
+            F.col("item_id").alias("f_item"),
+            F.col("event_ts").alias("f_ts"),
+        )
         hit = (
             att.filter("clicked = 1")
             .select("impression_id", "imp_user_id", "imp_item_id", "t_click")
@@ -242,10 +272,14 @@ def build(spark, day: dt.date, raw: Path = export.RAW, complete_through: dt.date
             .distinct()
             .withColumn(name, F.lit(1))
         )
-        att = att.join(hit, "impression_id", "left").withColumn(name, F.coalesce(F.col(name), F.lit(0)))
+        att = att.join(hit, "impression_id", "left").withColumn(
+            name, F.coalesce(F.col(name), F.lit(0))
+        )
 
     # 6. label delay.
-    att = att.withColumn("final", F.col("t_impression") + window <= F.lit(complete_through.astimezone(dt.UTC)))
+    att = att.withColumn(
+        "final", F.col("t_impression") + window <= F.lit(complete_through.astimezone(dt.UTC))
+    )
     impressions = att.select(
         F.lit(day.isoformat()).alias("day"),
         "impression_id",
@@ -270,9 +304,18 @@ def build(spark, day: dt.date, raw: Path = export.RAW, complete_through: dt.date
         "candidate_cache",
         "ranker",
         "pctr_model",
-        *[F.col("exp").getItem(layer).getField("variant").alias(f"exp_{layer}") for layer in LAYERS],
-        *[F.col("exp").getItem(layer).getField("exp_id").alias(f"exp_id_{layer}") for layer in LAYERS],
-        *[F.col("exp").getItem(layer).getField("bucket").alias(f"bucket_{layer}") for layer in LAYERS],
+        *[
+            F.col("exp").getItem(layer).getField("variant").alias(f"exp_{layer}")
+            for layer in LAYERS
+        ],
+        *[
+            F.col("exp").getItem(layer).getField("exp_id").alias(f"exp_id_{layer}")
+            for layer in LAYERS
+        ],
+        *[
+            F.col("exp").getItem(layer).getField("bucket").alias(f"bucket_{layer}")
+            for layer in LAYERS
+        ],
         "feature_names",
         F.col("f").alias("features"),
         "lgbm",
@@ -286,11 +329,17 @@ def build(spark, day: dt.date, raw: Path = export.RAW, complete_through: dt.date
     ).cache()
 
     # 7. training samples: final, home feed, with served features; negatives downsampled.
-    u = (F.pmod(F.xxhash64(F.lit(HASH_SEED), F.col("impression_id")), F.lit(1_000_000)) / F.lit(1_000_000.0))
-    eligible = impressions.filter(F.col("final") & (F.col("surface") == TRAIN_SURFACE) & F.col("features").isNotNull())
+    u = F.pmod(F.xxhash64(F.lit(HASH_SEED), F.col("impression_id")), F.lit(1_000_000)) / F.lit(
+        1_000_000.0
+    )
+    eligible = impressions.filter(
+        F.col("final") & (F.col("surface") == TRAIN_SURFACE) & F.col("features").isNotNull()
+    )
     samples = (
         eligible.filter((F.col("clicked") == 1) | (u < F.lit(rate)))
-        .withColumn("weight", F.when(F.col("clicked") == 1, F.lit(1.0)).otherwise(F.lit(1.0 / rate)))
+        .withColumn(
+            "weight", F.when(F.col("clicked") == 1, F.lit(1.0)).otherwise(F.lit(1.0 / rate))
+        )
         .select(
             "day",
             "impression_id",
@@ -332,7 +381,9 @@ def build(spark, day: dt.date, raw: Path = export.RAW, complete_through: dt.date
         "negatives_kept": n_samples - n_pos,
         "negatives_before": n_elig - n_pos,
         "rows": n_samples,
-        "without_features": impressions.filter(F.col("final") & (F.col("surface") == TRAIN_SURFACE) & F.col("features").isNull()).count(),
+        "without_features": impressions.filter(
+            F.col("final") & (F.col("surface") == TRAIN_SURFACE) & F.col("features").isNull()
+        ).count(),
     }
     return impressions, samples, meta
 
@@ -348,7 +399,14 @@ def write(df, out: Path, day: dt.date) -> None:
     staging.rename(target)
 
 
-def run(day: dt.date, raw: Path = export.RAW, out: Path = SAMPLES, complete_through=None, rate: float = NEGATIVE_RATE, spark=None) -> dict:
+def run(
+    day: dt.date,
+    raw: Path = export.RAW,
+    out: Path = SAMPLES,
+    complete_through=None,
+    rate: float = NEGATIVE_RATE,
+    spark=None,
+) -> dict:
     t0 = time.monotonic()
     own = spark is None
     spark = spark or spark_session()
@@ -362,7 +420,9 @@ def run(day: dt.date, raw: Path = export.RAW, out: Path = SAMPLES, complete_thro
     meta["seconds"] = round(time.monotonic() - t0, 1)
     meta["spark"] = _spark_version()
     (out / "meta").mkdir(parents=True, exist_ok=True)
-    (out / "meta" / f"{day.isoformat()}.json").write_text(json.dumps(meta, indent=2, default=str) + "\n")
+    (out / "meta" / f"{day.isoformat()}.json").write_text(
+        json.dumps(meta, indent=2, default=str) + "\n"
+    )
     return meta
 
 

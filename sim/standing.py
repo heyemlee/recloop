@@ -29,7 +29,12 @@ def ensure(ads: ads_mod.Ads) -> list[dict]:
         ads.end([c["campaign_id"] for c in mine])
     items = ads.pick_items(CAMPAIGNS * ITEMS, SEED)
     specs = [
-        {"bid": 8 + 4 * i, "budget": 100_000, "freq_cap": 30, "items": items[i * ITEMS : (i + 1) * ITEMS]}
+        {
+            "bid": 8 + 4 * i,
+            "budget": 100_000,
+            "freq_cap": 30,
+            "items": items[i * ITEMS : (i + 1) * ITEMS],
+        }
         for i in range(CAMPAIGNS)
     ]
     return ads.create(NAME, specs)
@@ -38,10 +43,15 @@ def ensure(ads: ads_mod.Ads) -> list[dict]:
 def main() -> None:
     ads = ads_mod.Ads(
         os.environ.get("RECLOOP_API_URL", "http://127.0.0.1:18080"),
-        os.environ.get("DATABASE_URL", "postgres://recloop:recloop@localhost:15432/recloop?sslmode=disable"),
+        os.environ.get(
+            "DATABASE_URL", "postgres://recloop:recloop@localhost:15432/recloop?sslmode=disable"
+        ),
     )
     cs = ensure(ads)
-    print(f"standing {len(cs)} campaigns: " + ", ".join(f"{c['campaign_id']} ({c['bid_cpc_cents']}c)" for c in cs))
+    print(
+        f"standing {len(cs)} campaigns: "
+        + ", ".join(f"{c['campaign_id']} ({c['bid_cpc_cents']}c)" for c in cs)
+    )
     ads.close()
 
 

@@ -49,7 +49,9 @@ SLO_P99_MS = 100.0
 
 
 def events_since(t0: float) -> list[dict]:
-    url = os.environ.get("DATABASE_URL", "postgres://recloop:recloop@localhost:15432/recloop?sslmode=disable")
+    url = os.environ.get(
+        "DATABASE_URL", "postgres://recloop:recloop@localhost:15432/recloop?sslmode=disable"
+    )
     with psycopg.connect(url) as conn:
         rows = conn.execute(
             "SELECT version, from_status, to_status, at, actor, note FROM model_version_events "
@@ -65,7 +67,9 @@ def events_since(t0: float) -> list[dict]:
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--api", default=os.environ.get("RECLOOP_API_URL", "http://127.0.0.1:18080"))
-    p.add_argument("--new", required=True, help="the version to release (built under artifacts/bundles)")
+    p.add_argument(
+        "--new", required=True, help="the version to release (built under artifacts/bundles)"
+    )
     p.add_argument("--bad", required=True, help="the bad version for the rollback")
     p.add_argument("--canary-percent", type=int, default=5)
     p.add_argument("--warmup-seconds", type=float, default=60)
@@ -83,7 +87,14 @@ def main(argv: list[str] | None = None) -> None:
     admin.stop_layer("rank")  # the drill's users are split by the canary only
     before = admin.overview()
     old = before["active"]
-    log = {"api": args.api, "old": old, "new": args.new, "bad": args.bad, "steps": [], "args": vars(args) | {"out": str(args.out)}}
+    log = {
+        "api": args.api,
+        "old": old,
+        "new": args.new,
+        "bad": args.bad,
+        "steps": [],
+        "args": vars(args) | {"out": str(args.out)},
+    }
     log["campaigns"] = len(campaigns)
 
     def step(name: str, f):
@@ -93,13 +104,24 @@ def main(argv: list[str] | None = None) -> None:
             ok = True
         except SystemExit as e:
             resp, ok = str(e), False
-        log["steps"].append({"step": name, "t": t, "seconds": round(time.time() - t, 3), "ok": ok, "response": resp})
-        print(f"drill    {time.strftime('%H:%M:%S')} {name}: {'ok' if ok else 'FAILED'} ({time.time() - t:.2f}s)")
+        log["steps"].append(
+            {"step": name, "t": t, "seconds": round(time.time() - t, 3), "ok": ok, "response": resp}
+        )
+        print(
+            f"drill    {time.strftime('%H:%M:%S')} {name}: {'ok' if ok else 'FAILED'} ({time.time() - t:.2f}s)"
+        )
         if not ok:
             raise SystemExit(f"{name} failed: {resp}")
         return resp
 
-    total = args.warmup_seconds + args.canary_seconds + args.full_seconds + args.bad_seconds + args.after_seconds + 600
+    total = (
+        args.warmup_seconds
+        + args.canary_seconds
+        + args.full_seconds
+        + args.bad_seconds
+        + args.after_seconds
+        + 600
+    )
     traffic = traffic_mod.Traffic(args.out / "traffic", args.api, args.concurrency)
     t0 = traffic.start(total)
     log["t0"] = t0
@@ -109,37 +131,64 @@ def main(argv: list[str] | None = None) -> None:
             step(f"register {v}", lambda v=v: admin.register(v))
         step(f"validate {args.new}", lambda: admin.validate(args.new))
         t_canary = time.time()
-        step(f"canary {args.new} {args.canary_percent}%", lambda: admin.canary(args.new, args.canary_percent))
+        step(
+            f"canary {args.new} {args.canary_percent}%",
+            lambda: admin.canary(args.new, args.canary_percent),
+        )
         time.sleep(args.canary_seconds)
         t_canary_end = time.time()
 
         # Guardrails over the canary phase (from 15 s after the start: the experiment reload).
         pages, events, errors = _snapshot(traffic)
         lo = t_canary + 15
-        arm = lambda pg: "canary" if pg.get("model_version") == args.new else ("rest" if pg.get("model_version") == old else None)  # noqa: E731
+
+        def arm(pg: dict) -> str | None:
+            v = pg.get("model_version")
+            return "canary" if v == args.new else "rest" if v == old else None
+
         summary = traffic_mod.summarize(pages, events, errors, lo, t_canary_end, arm)
         users = traffic_mod.ctr_by_user(pages, events, lo, t_canary_end, arm)
         diff = traffic_mod.bootstrap_ctr_diff(users.get("rest", {}), users.get("canary", {}))
         c, r = summary["arms"].get("canary"), summary["arms"].get("rest")
         checks = {
             "failed_page_views": summary["failed_page_views"] == 0,
-            "degraded": c is not None and r is not None and c["degraded_share"] <= r["degraded_share"] + 0.01,
+            "degraded": c is not None
+            and r is not None
+            and c["degraded_share"] <= r["degraded_share"] + 0.01,
             "p99": c is not None and c["p99_ms"] < SLO_P99_MS,
             "ctr_not_lower": diff[2] > 0,
         }
-        log["canary"] = {"from": lo, "to": t_canary_end, "summary": summary, "ctr_diff": diff, "checks": checks, "pass": all(checks.values())}
-        print(f"drill    canary guardrails: {checks}; CTR canary - rest {diff[0]:+.4f} [{diff[1]:+.4f}, {diff[2]:+.4f}]")
+        log["canary"] = {
+            "from": lo,
+            "to": t_canary_end,
+            "summary": summary,
+            "ctr_diff": diff,
+            "checks": checks,
+            "pass": all(checks.values()),
+        }
+        print(
+            f"drill    canary guardrails: {checks}; CTR canary - rest {diff[0]:+.4f} [{diff[1]:+.4f}, {diff[2]:+.4f}]"
+        )
         if not all(checks.values()):
-            step("abort canary", lambda: admin.abort_canary("guardrails failed: " + json.dumps(checks)))
+            step(
+                "abort canary",
+                lambda: admin.abort_canary("guardrails failed: " + json.dumps(checks)),
+            )
             raise SystemExit("canary failed its guardrails: aborted")
         t_full = time.time()
-        step(f"full rollout {args.new}", lambda: admin.activate(args.new, "canary passed its guardrails"))
+        step(
+            f"full rollout {args.new}",
+            lambda: admin.activate(args.new, "canary passed its guardrails"),
+        )
         time.sleep(args.full_seconds)
         t_full_end = time.time()
 
         step(f"validate {args.bad}", lambda: admin.validate(args.bad))
         t_bad = time.time()
-        step(f"activate {args.bad} (no canary)", lambda: admin.activate(args.bad, "bad release: pushed without a canary"))
+        step(
+            f"activate {args.bad} (no canary)",
+            lambda: admin.activate(args.bad, "bad release: pushed without a canary"),
+        )
         time.sleep(args.bad_seconds)
         t_rollback = time.time()
         step("rollback", lambda: admin.rollback("bad release: CTR below the previous version"))
@@ -149,7 +198,10 @@ def main(argv: list[str] | None = None) -> None:
         traffic.stop()
 
     pages, events, errors = _snapshot(traffic)
-    version_arm = lambda pg: pg.get("model_version")  # noqa: E731
+
+    def version_arm(pg: dict) -> str | None:
+        return pg.get("model_version")
+
     phases = {
         "before": (t0, t_canary),
         "canary": (t_canary, t_full),
@@ -157,9 +209,16 @@ def main(argv: list[str] | None = None) -> None:
         "bad": (t_bad, t_rollback),
         "after": (t_rollback, t_end),
     }
-    log["phases"] = {k: {"from": a, "to": b, **traffic_mod.summarize(pages, events, errors, a, b, version_arm)} for k, (a, b) in phases.items()}
-    full_users = traffic_mod.ctr_by_user(pages, events, t_full + 15, t_full_end, version_arm).get(args.new, {})
-    bad_users = traffic_mod.ctr_by_user(pages, events, t_bad + 5, t_rollback, version_arm).get(args.bad, {})
+    log["phases"] = {
+        k: {"from": a, "to": b, **traffic_mod.summarize(pages, events, errors, a, b, version_arm)}
+        for k, (a, b) in phases.items()
+    }
+    full_users = traffic_mod.ctr_by_user(pages, events, t_full + 15, t_full_end, version_arm).get(
+        args.new, {}
+    )
+    bad_users = traffic_mod.ctr_by_user(pages, events, t_bad + 5, t_rollback, version_arm).get(
+        args.bad, {}
+    )
     log["bad_vs_full_ctr"] = traffic_mod.bootstrap_ctr_diff(full_users, bad_users)
     log["switch"] = {
         "full": _switch_time(pages, t_full, args.new),
@@ -172,7 +231,9 @@ def main(argv: list[str] | None = None) -> None:
     log["after"] = admin.overview()
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "drill.json").write_text(json.dumps(log, indent=2, default=str) + "\n")
-    print(f"drill    done: {len(pages):,} page views, {len(errors)} failed -> {(args.out / 'drill.json').relative_to(ROOT)}")
+    print(
+        f"drill    done: {len(pages):,} page views, {len(errors)} failed -> {(args.out / 'drill.json').relative_to(ROOT)}"
+    )
 
 
 def _snapshot(traffic: traffic_mod.Traffic):
@@ -184,7 +245,11 @@ def _switch_time(pages: dict, t: float, version: str) -> dict:
     """After a step at t: seconds until the first page and until the last page of another
     version (requests in flight finish on the version they started with). First pages only: a
     next page keeps the version of the list it pages through."""
-    after = sorted((p["t"], p.get("model_version")) for p in pages.values() if p["t"] >= t and p["surface"] != "next_page")
+    after = sorted(
+        (p["t"], p.get("model_version"))
+        for p in pages.values()
+        if p["t"] >= t and p["surface"] != "next_page"
+    )
     first = next((ts for ts, v in after if v == version), None)
     last_other = max((ts for ts, v in after if v != version and ts < t + 120), default=None)
     return {

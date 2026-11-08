@@ -46,7 +46,9 @@ class Bundle:
     index: faiss.Index
     item_ids: np.ndarray  # FAISS row -> item_id
     manifest: dict = field(default_factory=dict, repr=False)
-    item_vectors: np.ndarray | None = field(default=None, repr=False)  # (num_items, dim), row = item_id
+    item_vectors: np.ndarray | None = field(
+        default=None, repr=False
+    )  # (num_items, dim), row = item_id
     ranking: ranking_mod.Ranking | None = field(default=None, repr=False)
 
     def window(self, history: Sequence[int]) -> list[int]:
@@ -132,7 +134,9 @@ def load(path: Path, check_golden: bool = True) -> Bundle:
 
     vectors = np.load(real / "item_vectors.npy").astype(np.float32)
     if vectors.shape != (num_items, dim):
-        raise BundleError(f"{real}: item_vectors.npy is {vectors.shape}, expected ({num_items}, {dim})")
+        raise BundleError(
+            f"{real}: item_vectors.npy is {vectors.shape}, expected ({num_items}, {dim})"
+        )
     try:
         rank = ranking_mod.load(real, manifest, check_golden=check_golden)
     except (ranking_mod.RankingError, KeyError, OSError, ValueError) as e:

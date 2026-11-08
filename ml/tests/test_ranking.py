@@ -38,11 +38,19 @@ def test_fuse_orders_like_the_go_mixer():
         if s == "itemcf":  # ItemCF lists can be short
             items[:, rng.integers(3, k) :] = -1
         lists[s] = (items, np.where(items >= 0, rng.random((n, k)), np.nan))
-    for weights in (cm.CONTROL_WEIGHTS, cm.SASREC_HEAVY_WEIGHTS, {"sasrec": 1.0, "itemcf": 1.0, "pop": 1.0}):
+    for weights in (
+        cm.CONTROL_WEIGHTS,
+        cm.SASREC_HEAVY_WEIGHTS,
+        {"sasrec": 1.0, "itemcf": 1.0, "pop": 1.0},
+    ):
         c = cm.fuse(lists, weights, num_items, depth=20)
         for i in range(n):
-            want = go_rrf({s: [int(x) for x in v[0][i] if x >= 0] for s, v in lists.items()}, weights, 20)
-            got = [(int(it), float(sc)) for it, sc in zip(c.items[i], c.rrf[i], strict=True) if it >= 0]
+            want = go_rrf(
+                {s: [int(x) for x in v[0][i] if x >= 0] for s, v in lists.items()}, weights, 20
+            )
+            got = [
+                (int(it), float(sc)) for it, sc in zip(c.items[i], c.rrf[i], strict=True) if it >= 0
+            ]
             assert [g[0] for g in got] == [w[0] for w in want]
             assert [g[1] for g in got] == [w[1] for w in want]  # same sums in the same order
 
@@ -57,7 +65,9 @@ def test_fuse_keeps_each_sources_rank_and_score():
     items = [int(x) for x in c.items[0] if x >= 0]
     assert sorted(items) == [1, 3, 5, 7, 9]
     j = items.index(3)
-    assert c.ranks["sasrec"][0][j] == 2 and c.ranks["itemcf"][0][j] == 1 and c.ranks["pop"][0][j] == 0
+    assert (
+        c.ranks["sasrec"][0][j] == 2 and c.ranks["itemcf"][0][j] == 1 and c.ranks["pop"][0][j] == 0
+    )
     assert c.scores["itemcf"][0][j] == 2.5 and np.isnan(c.scores["pop"][0][j])
     assert c.n_sources()[0][j] == 2
     assert c.items[0][-1] == -1 and np.isnan(c.rrf[0][-1])  # only 5 distinct items
@@ -90,7 +100,9 @@ def tables() -> feat.ItemTables:
 
 def test_item_tables():
     t = tables()
-    assert t.price_bucket[[0, 1, 3, 4]].tolist() == [0.0, 1.0, 5.0, 2.0] and np.isnan(t.price_bucket[2])
+    assert t.price_bucket[[0, 1, 3, 4]].tolist() == [0.0, 1.0, 5.0, 2.0] and np.isnan(
+        t.price_bucket[2]
+    )
     assert t.cat2[0] == t.cat2[1] == t.cat2[4] != t.cat2[2] and t.cat2[3] == -1
     assert t.leaf[0] == t.leaf[4] != t.leaf[1] and t.leaf[3] == -1
     doc = t.to_json()
@@ -102,7 +114,11 @@ def test_compute_features():
     c = cm.Candidates(
         items=np.array([[4, 2, 3, -1]]),
         rrf=np.array([[0.03, 0.02, 0.01, np.nan]]),
-        ranks={"sasrec": np.array([[1, 0, 2, 0]]), "itemcf": np.array([[0, 3, 0, 0]]), "pop": np.array([[5, 0, 0, 0]])},
+        ranks={
+            "sasrec": np.array([[1, 0, 2, 0]]),
+            "itemcf": np.array([[0, 3, 0, 0]]),
+            "pop": np.array([[5, 0, 0, 0]]),
+        },
         scores={
             "sasrec": np.array([[1.5, np.nan, 0.5, np.nan]]),
             "itemcf": np.array([[np.nan, 0.2, np.nan, np.nan]]),
@@ -117,9 +133,13 @@ def test_compute_features():
     assert f["n_sources"][:3].tolist() == [2, 1, 1]
     assert f["pop_log"][0] == pytest.approx(np.log1p(7.0))
     # item 4 (Paper / Copy Paper) against history 0 (Paper / Copy Paper), 1 (Paper / Notebooks), 2 (Pens)
-    assert f["cat2_overlap"][0] == pytest.approx(2 / 3) and f["leaf_overlap"][0] == pytest.approx(1 / 3)
+    assert f["cat2_overlap"][0] == pytest.approx(2 / 3) and f["leaf_overlap"][0] == pytest.approx(
+        1 / 3
+    )
     assert f["cat2_overlap"][1] == pytest.approx(1 / 3)  # item 2 (Pens): itself in the history
-    assert np.isnan(f["cat2_overlap"][2]) and np.isnan(f["price_bucket"][1])  # no category; no price
+    assert np.isnan(f["cat2_overlap"][2]) and np.isnan(
+        f["price_bucket"][1]
+    )  # no category; no price
     assert np.isnan(x[0, 3]).all()  # padding
     assert x.dtype == np.float32
 
@@ -146,7 +166,14 @@ def test_onnx_ranker_matches_lightgbm():
     y = np.zeros(q * d, dtype=np.float32)
     for i in range(q):
         y[i * d + int(np.argmax(rel[i * d : (i + 1) * d]))] = 1
-    params = {"objective": "lambdarank", "num_leaves": 15, "min_data_in_leaf": 5, "verbose": -1, "num_threads": 1, "deterministic": True}
+    params = {
+        "objective": "lambdarank",
+        "num_leaves": 15,
+        "min_data_in_leaf": 5,
+        "verbose": -1,
+        "num_threads": 1,
+        "deterministic": True,
+    }
     booster = lgb.train(params, lgb.Dataset(x, y, group=[d] * q), num_boost_round=40)
     model = onnx_trees.booster_to_onnx(booster, f)
     # Inputs exactly on, just above and just below every threshold, plus NaNs.
@@ -157,12 +184,18 @@ def test_onnx_ranker_matches_lightgbm():
         node = stack.pop()
         if "split_index" in node:
             t = node["threshold"]
-            for v in (t, np.nextafter(np.float32(t), np.float32(np.inf)), np.nextafter(np.float32(t), np.float32(-np.inf))):
+            for v in (
+                t,
+                np.nextafter(np.float32(t), np.float32(np.inf)),
+                np.nextafter(np.float32(t), np.float32(-np.inf)),
+            ):
                 row = rng.normal(size=f).astype(np.float32)
                 row[node["split_feature"]] = np.float32(v)
                 probes.append(row)
             stack += [node["left_child"], node["right_child"]]
-    probe = np.vstack([x, np.asarray(probes, dtype=np.float32), np.full((1, f), np.nan, dtype=np.float32)])
+    probe = np.vstack(
+        [x, np.asarray(probes, dtype=np.float32), np.full((1, f), np.nan, dtype=np.float32)]
+    )
     want = booster.predict(probe, raw_score=True)
     got = onnx_trees.onnx_scores(model.SerializeToString(), probe)
     assert np.abs(got - want).max() < 1e-5

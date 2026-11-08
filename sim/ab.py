@@ -40,7 +40,10 @@ OUT = ROOT / "artifacts" / "ab"
 PHASES = {
     "aa": {
         "exp_id": "rank-aa-v1",
-        "variants": [{"name": "a", "share": 50, "params": {"ranker": "rrf"}}, {"name": "b", "share": 50, "params": {"ranker": "rrf"}}],
+        "variants": [
+            {"name": "a", "share": 50, "params": {"ranker": "rrf"}},
+            {"name": "b", "share": 50, "params": {"ranker": "rrf"}},
+        ],
     },
     "ab": {
         "exp_id": "rank-ab-v1",
@@ -81,12 +84,21 @@ def main(argv: list[str] | None = None) -> None:
         admin.stop_layer("rank", keep=spec["exp_id"])
         reset_state()
         version = admin.put_experiment(
-            {"exp_id": spec["exp_id"], "layer": "rank", "status": "running", "bucket_from": 0, "bucket_to": 1000, "variants": spec["variants"]}
+            {
+                "exp_id": spec["exp_id"],
+                "layer": "rank",
+                "status": "running",
+                "bucket_from": 0,
+                "bucket_to": 1000,
+                "variants": spec["variants"],
+            }
         )
         admin.wait_config(version)
         traffic = traffic_mod.Traffic(args.out / name, args.api, args.concurrency)
         t0 = traffic.start(args.seconds)
-        print(f"ab       {time.strftime('%H:%M:%S')} {name}: {spec['exp_id']} running, {args.seconds:.0f}s of traffic")
+        print(
+            f"ab       {time.strftime('%H:%M:%S')} {name}: {spec['exp_id']} running, {args.seconds:.0f}s of traffic"
+        )
         traffic.thread.join()
         traffic.stop()
         t1 = time.time()
@@ -107,7 +119,9 @@ def main(argv: list[str] | None = None) -> None:
         }
         args.out.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(run, indent=2) + "\n")
-        print(f"ab       {name} done: {s.sessions:,} sessions, {sum(s.page_views.values()):,} page views")
+        print(
+            f"ab       {name} done: {s.sessions:,} sessions, {sum(s.page_views.values()):,} page views"
+        )
     admin.close()
 
 

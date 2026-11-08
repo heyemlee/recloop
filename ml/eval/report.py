@@ -340,7 +340,9 @@ def _ranking_section(out: dict) -> list[str]:
                 ],
                 [
                     "Grid",
-                    "; ".join(f"{k} in {{{', '.join(map(str, v))}}}" for k, v in tun["grid"].items())
+                    "; ".join(
+                        f"{k} in {{{', '.join(map(str, v))}}}" for k, v in tun["grid"].items()
+                    )
                     + f"; learning rate {p['learning_rate']}, L2 {p['lambda_l2']}, "
                     f"lambdarank truncation level {p['truncation_level']}, early stopping after "
                     f"{p['early_stopping']} rounds without a better NDCG@10",
@@ -394,7 +396,12 @@ def _ranking_section(out: dict) -> list[str]:
         *_table(
             ["Feature", "Definition", "Gain share", "Splits"],
             [
-                [f"`{f}`", FEATURE_TEXT.get(f, ""), f"{imp[f]['gain'] / total_gain:.1%}", f"{imp[f]['splits']:,}"]
+                [
+                    f"`{f}`",
+                    FEATURE_TEXT.get(f, ""),
+                    f"{imp[f]['gain'] / total_gain:.1%}",
+                    f"{imp[f]['splits']:,}",
+                ]
                 for f in sorted(r["features"], key=lambda f: -imp[f]["gain"])
             ],
         ),

@@ -20,7 +20,9 @@ OUT = ROOT / "docs" / "results" / "release.md"
 
 
 def _table(header: list[str], rows: list[list[str]]) -> list[str]:
-    return ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)] + ["| " + " | ".join(r) + " |" for r in rows]
+    return ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)] + [
+        "| " + " | ".join(r) + " |" for r in rows
+    ]
 
 
 def _utc(t: float) -> str:
@@ -41,7 +43,9 @@ def _bundle(version: str) -> str:
         return ""
     man = json.loads(m.read_text())
     sas = man["models"]["sasrec"]["config"]
-    parts = [f"SASRec {sas['loss'].upper()} loss, best epoch {man['models']['sasrec']['best_epoch']}"]
+    parts = [
+        f"SASRec {sas['loss'].upper()} loss, best epoch {man['models']['sasrec']['best_epoch']}"
+    ]
     r = man.get("ranking", {}).get("ranker")
     if r:
         parts.append(f"LightGBM ranker ({r['rounds']} trees)")
@@ -55,8 +59,17 @@ def _bundle(version: str) -> str:
 
 def arm_rows(summary: dict) -> list[list[str]]:
     return [
-        [a, f"{v['page_views']:,}", f"{v['users']:,}", _pct(v["degraded_share"]), _ms(v["p50_ms"]), _ms(v["p99_ms"]),
-         f"{v['impressions']:,}", f"{v['clicks']:,}", _pct(v["ctr"])]
+        [
+            a,
+            f"{v['page_views']:,}",
+            f"{v['users']:,}",
+            _pct(v["degraded_share"]),
+            _ms(v["p50_ms"]),
+            _ms(v["p99_ms"]),
+            f"{v['impressions']:,}",
+            f"{v['clicks']:,}",
+            _pct(v["ctr"]),
+        ]
         for a, v in summary["arms"].items()
     ]
 
@@ -88,7 +101,16 @@ def render(d: dict) -> str:
         "",
         *_table(
             ["t (s)", "UTC", "Step", "Took (s)", "Result"],
-            [[f"{s['t'] - t0:.0f}", _utc(s["t"]), s["step"], f"{s['seconds']:.2f}", "ok" if s["ok"] else "**failed**"] for s in steps],
+            [
+                [
+                    f"{s['t'] - t0:.0f}",
+                    _utc(s["t"]),
+                    s["step"],
+                    f"{s['seconds']:.2f}",
+                    "ok" if s["ok"] else "**failed**",
+                ]
+                for s in steps
+            ],
         ),
         "",
     ]
@@ -102,7 +124,20 @@ def render(d: dict) -> str:
             f"{d['args']['canary_percent'] * 10}) to the new version (`pin_version`); everyone else stays on the active one. "
             "Both arms over the same minutes:",
             "",
-            *_table(["Arm", "Page views", "Users", "Degraded", "Client P50 (ms)", "Client P99 (ms)", "Impressions", "Clicks", "CTR"], arm_rows(c["summary"])),
+            *_table(
+                [
+                    "Arm",
+                    "Page views",
+                    "Users",
+                    "Degraded",
+                    "Client P50 (ms)",
+                    "Client P99 (ms)",
+                    "Impressions",
+                    "Clicks",
+                    "CTR",
+                ],
+                arm_rows(c["summary"]),
+            ),
             "",
             f"Failed page views in the window: {c['summary']['failed_page_views']}. CTR canary - rest: {diff[0]:+.4f}, "
             f"95% CI [{diff[1]:+.4f}, {diff[2]:+.4f}] (user-level bootstrap).",
@@ -110,10 +145,22 @@ def render(d: dict) -> str:
             *_table(
                 ["Guardrail", "Rule", "Result"],
                 [
-                    ["Failed page views", "none", "pass" if c["checks"]["failed_page_views"] else "**fail**"],
-                    ["Degraded share", "canary at most 1 point above the rest", "pass" if c["checks"]["degraded"] else "**fail**"],
+                    [
+                        "Failed page views",
+                        "none",
+                        "pass" if c["checks"]["failed_page_views"] else "**fail**",
+                    ],
+                    [
+                        "Degraded share",
+                        "canary at most 1 point above the rest",
+                        "pass" if c["checks"]["degraded"] else "**fail**",
+                    ],
                     ["Client P99", "under 100 ms", "pass" if c["checks"]["p99"] else "**fail**"],
-                    ["CTR", "not significantly lower (upper end of the CI above 0)", "pass" if c["checks"]["ctr_not_lower"] else "**fail**"],
+                    [
+                        "CTR",
+                        "not significantly lower (upper end of the CI above 0)",
+                        "pass" if c["checks"]["ctr_not_lower"] else "**fail**",
+                    ],
                 ],
             ),
             "",
@@ -123,10 +170,22 @@ def render(d: dict) -> str:
     sw = d.get("switch", {})
     lines += ["## Switches", ""]
     lines += _table(
-        ["Switch", "First page on the new version after (s)", "Last first page on another version after (s)"],
         [
-            [label, str(sw.get(k, {}).get("first_page_s")), str(sw.get(k, {}).get("last_other_page_s"))]
-            for k, label in (("full", "full rollout"), ("bad", "bad release"), ("rollback", "rollback"))
+            "Switch",
+            "First page on the new version after (s)",
+            "Last first page on another version after (s)",
+        ],
+        [
+            [
+                label,
+                str(sw.get(k, {}).get("first_page_s")),
+                str(sw.get(k, {}).get("last_other_page_s")),
+            ]
+            for k, label in (
+                ("full", "full rollout"),
+                ("bad", "bad release"),
+                ("rollback", "rollback"),
+            )
         ],
     )
     lines += [
@@ -141,8 +200,29 @@ def render(d: dict) -> str:
     rows = []
     for name, ph in d["phases"].items():
         for arm, v in ph["arms"].items():
-            rows.append([name, f"`{arm}`", f"{v['page_views']:,}", _pct(v["degraded_share"]), _ms(v["p99_ms"]), _pct(v["ctr"]), str(ph["failed_page_views"])])
-    lines += _table(["Phase", "Version", "Page views", "Degraded", "Client P99 (ms)", "CTR", "Failed page views (phase)"], rows)
+            rows.append(
+                [
+                    name,
+                    f"`{arm}`",
+                    f"{v['page_views']:,}",
+                    _pct(v["degraded_share"]),
+                    _ms(v["p99_ms"]),
+                    _pct(v["ctr"]),
+                    str(ph["failed_page_views"]),
+                ]
+            )
+    lines += _table(
+        [
+            "Phase",
+            "Version",
+            "Page views",
+            "Degraded",
+            "Client P99 (ms)",
+            "CTR",
+            "Failed page views (phase)",
+        ],
+        rows,
+    )
     bad = d.get("bad_vs_full_ctr")
     if bad:
         lines += [
@@ -154,10 +234,22 @@ def render(d: dict) -> str:
     lines += ["", "## Release record (`model_version_events`)", ""]
     lines += _table(
         ["UTC", "Version", "From", "To", "Actor", "Note"],
-        [[_utc(e["at"]), f"`{e['version']}`", e["from"] or "", e["to"], e["actor"], (e["note"] or "").replace("|", "\\|")] for e in d["events"]],
+        [
+            [
+                _utc(e["at"]),
+                f"`{e['version']}`",
+                e["from"] or "",
+                e["to"],
+                e["actor"],
+                (e["note"] or "").replace("|", "\\|"),
+            ]
+            for e in d["events"]
+        ],
     )
     lines += ["", "## Traffic per 10 s around the switches", ""]
-    marks = [s["t"] - t0 for s in steps if s["step"].startswith(("full rollout", "activate", "rollback"))]
+    marks = [
+        s["t"] - t0 for s in steps if s["step"].startswith(("full rollout", "activate", "rollback"))
+    ]
     rows = []
     for r in d["timeline"]:
         if any(m - 20 <= r["t"] <= m + 30 for m in marks):

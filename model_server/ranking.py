@@ -55,7 +55,9 @@ class PCTRModel:
     @classmethod
     def from_json(cls, m: dict) -> PCTRModel:
         if tuple(m["features"]) != FEATURES:
-            raise RankingError(f"pctr.json is over {m['features']}, this server computes {FEATURES}")
+            raise RankingError(
+                f"pctr.json is over {m['features']}, this server computes {FEATURES}"
+            )
         return cls(
             tuple(m["columns"]),
             frozenset(m["continuous"]),
@@ -107,9 +109,13 @@ class PCTRModel:
 class Ranking:
     def __init__(self, tables: dict, ranker=None, pctr: PCTRModel | None = None):
         if tuple(tables["features"]) != FEATURES:
-            raise RankingError(f"features.json lists {tables['features']}, this server computes {FEATURES}")
+            raise RankingError(
+                f"features.json lists {tables['features']}, this server computes {FEATURES}"
+            )
         self.pop_log = np.log1p(np.asarray(tables["pop_count"], dtype=np.float64))
-        self.price_bucket = np.asarray([math.nan if v is None else float(v) for v in tables["price_bucket"]])
+        self.price_bucket = np.asarray(
+            [math.nan if v is None else float(v) for v in tables["price_bucket"]]
+        )
         self.cat2 = np.asarray(tables["cat2"], dtype=np.int64)
         self.leaf = np.asarray(tables["leaf"], dtype=np.int64)
         self.num_items = len(self.cat2)
@@ -128,7 +134,9 @@ class Ranking:
             out.append(np.where(cand < 0, np.nan, share))
         return out[0], out[1]
 
-    def features(self, history: list[int], items: list[int], hits: list[list[tuple[str, int, float]]]) -> np.ndarray:
+    def features(
+        self, history: list[int], items: list[int], hits: list[list[tuple[str, int, float]]]
+    ) -> np.ndarray:
         """(n, F) float32 for organic candidates with their sources' (source, rank, score)."""
         ids = np.asarray(items, dtype=np.int64)
         n = len(ids)
@@ -147,7 +155,9 @@ class Ranking:
         self._fill_item_columns(x, col, history, ids, n_src)
         return x.astype(np.float32)
 
-    def ad_features(self, history: list[int], items: list[int], relevance: np.ndarray) -> np.ndarray:
+    def ad_features(
+        self, history: list[int], items: list[int], relevance: np.ndarray
+    ) -> np.ndarray:
         """(n, F) float32 for ad candidates: no recall hits, SASRec relevance as sasrec_score."""
         ids = np.asarray(items, dtype=np.int64)
         x = np.full((len(ids), len(FEATURES)), np.nan)
@@ -195,7 +205,9 @@ def load(path: Path, manifest: dict, check_golden: bool = True) -> Ranking | Non
         pctr = PCTRModel.from_json(pctr_doc)
     r = Ranking(tables, ranker, pctr)
     if r.num_items != int(manifest["num_items"]):
-        raise RankingError(f"features.json has {r.num_items} items, the manifest {manifest['num_items']}")
+        raise RankingError(
+            f"features.json has {r.num_items} items, the manifest {manifest['num_items']}"
+        )
     if check_golden:
         if "ranker" in spec:
             golden_ranker(r, json.loads((path / spec["ranker"]["golden_file"]).read_text()))
@@ -215,11 +227,19 @@ def golden_ranker(r: Ranking, golden: dict) -> dict:
         x = r.features(q["history"], q["items"], hits)
         want = np.asarray([_nan(row) for row in q["features"]])
         if not np.array_equal(np.isnan(x), np.isnan(want)):
-            raise RankingError(f"rank_golden.json: missing features differ (valid row {q['valid_row']})")
+            raise RankingError(
+                f"rank_golden.json: missing features differ (valid row {q['valid_row']})"
+            )
         diff = np.nan_to_num(np.abs(x - want), nan=0.0)
         worst_f = max(worst_f, float(diff.max(initial=0.0)))
-        worst_s = max(worst_s, float(np.abs(r.scores(x) - np.asarray(q["scores"])).max(initial=0.0)))
-    out = {"queries": len(golden["queries"]), "max_feature_diff": worst_f, "max_score_diff": worst_s}
+        worst_s = max(
+            worst_s, float(np.abs(r.scores(x) - np.asarray(q["scores"])).max(initial=0.0))
+        )
+    out = {
+        "queries": len(golden["queries"]),
+        "max_feature_diff": worst_f,
+        "max_score_diff": worst_s,
+    }
     if worst_f > golden["feature_tolerance"] or worst_s > golden["score_tolerance"]:
         raise RankingError(f"rank_golden.json disagrees: {out}")
     return out
@@ -228,7 +248,9 @@ def golden_ranker(r: Ranking, golden: dict) -> dict:
 def golden_pctr(m: PCTRModel, golden: dict) -> dict:
     rows = golden["rows"]
     x = np.asarray([_nan(g["features"]) for g in rows])
-    got = m.predict(x, np.asarray([g["pos"] for g in rows]), np.asarray([g["sponsored"] for g in rows]))
+    got = m.predict(
+        x, np.asarray([g["pos"] for g in rows]), np.asarray([g["sponsored"] for g in rows])
+    )
     worst = float(np.abs(got - np.asarray([g["pctr"] for g in rows])).max(initial=0.0))
     if worst > golden["tolerance"]:
         raise RankingError(f"pctr.json golden rows disagree: max |diff| {worst:.2e}")
