@@ -46,6 +46,10 @@ def _scrub(text: str) -> str:
     return _PATH.sub(r"\1", text)
 
 
+def _reasons(r: dict | None) -> str:
+    return ", ".join(f"{k} {n:,}" for k, n in (r or {}).items()) or "none"
+
+
 def _s(x) -> str:
     return "none" if x is None else str(x)
 
@@ -254,6 +258,7 @@ def render(d: dict) -> str:
                     f"`{arm}`",
                     f"{v['page_views']:,}",
                     _pct(v["degraded_share"]),
+                    _reasons(v.get("degraded_reasons")),
                     _ms(v["p99_ms"]),
                     _pct(v["ctr"]),
                     str(ph["failed_page_views"]),
@@ -265,12 +270,46 @@ def render(d: dict) -> str:
             "Version",
             "Page views",
             "Degraded",
+            "Most frequent reasons",
             "Client P99 (ms)",
             "CTR",
             "Failed page views (phase)",
         ],
         rows,
     )
+    lines += [
+        "",
+        "A phase runs from the step that started it to the next one, by the steps' own times"
+        + (
+            "; a version that served a handful of pages at the start of a phase is the in-flight requests of the switch"
+            if any(len(ph["arms"]) > 1 and name != "canary" for name, ph in d["phases"].items())
+            else ""
+        )
+        + ". Degradation reasons are "
+        "the api's (`<dependency>_timeout`: a call over its stage's budget, the request served without it; "
+        "`pctr_error`: no pCTR, so no ads on that page)."
+        + (
+            f" These tables were re-derived from the drill's ledger and steps afterwards (`{d['analysed']['by']}`)."
+            if d.get("analysed")
+            else ""
+        ),
+    ]
+    fails = d.get("failures") or []
+    if fails:
+        lines += ["", "Failed page views:", ""]
+        lines += _table(
+            ["t (s)", "Surface", "Status", "Client ms", "Degradations within 5 s"],
+            [
+                [
+                    f"{f['t'] - t0:.1f}",
+                    str(f["surface"]),
+                    str(f["status"]),
+                    _ms(f["ms"]),
+                    _reasons(f["degraded_around"]),
+                ]
+                for f in fails
+            ],
+        )
     bad = d.get("bad_vs_full_ctr")
     if bad:
         lower = bad[2] < 0

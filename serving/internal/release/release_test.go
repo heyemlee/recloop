@@ -12,6 +12,7 @@ import (
 	"slices"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -326,5 +327,59 @@ func TestReconcileLoadsWhatServesAndUnloadsExpiredVersions(t *testing.T) {
 	}
 	if other.Bundles.Get("v0") != nil || ms.loaded["v0"] {
 		t.Fatal("v0 still loaded 31 minutes after its retirement")
+	}
+}
+
+// stallStore hands out a ModelVersions snapshot and then holds that caller until released: a
+// Reconcile that read the release state just before an activation.
+type stallStore struct {
+	*memStore
+	armed   atomic.Bool
+	read    chan struct{} // closed once the stalled call has its snapshot
+	release chan struct{}
+}
+
+func (s *stallStore) ModelVersions(ctx context.Context) ([]store.ModelVersion, error) {
+	out, err := s.memStore.ModelVersions(ctx)
+	if s.armed.CompareAndSwap(true, false) {
+		close(s.read)
+		<-s.release
+	}
+	return out, err
+}
+
+func TestAStaleReconcileDoesNotUndoAnActivation(t *testing.T) {
+	c, st, ms, _ := setup(t)
+	ctx := context.Background()
+	if err := c.Register(ctx, "v1", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Validate(ctx, "v1", "test"); err != nil {
+		t.Fatal(err)
+	}
+	ss := &stallStore{memStore: st, read: make(chan struct{}), release: make(chan struct{})}
+	c.Store = ss
+	ss.armed.Store(true)
+	rec := make(chan error, 1)
+	go func() { rec <- c.Reconcile(ctx) }() // reads "v0 is active", then stalls
+	<-ss.read
+	act := make(chan error, 1)
+	go func() {
+		_, err := c.Activate(ctx, "v1", "test", "go")
+		act <- err
+	}()
+	time.Sleep(50 * time.Millisecond) // time for the activation to finish, were it not blocked
+	close(ss.release)
+	if err := <-rec; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-act; err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Bundles.Active().Version; got != "v1" {
+		t.Fatalf("the api serves %s after the activation of v1 and a stale reconcile", got)
+	}
+	if ms.def != "v1" {
+		t.Fatalf("model server default %s", ms.def)
 	}
 }

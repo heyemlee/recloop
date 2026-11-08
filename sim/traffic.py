@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -116,7 +116,15 @@ def summarize(pages: dict, events: list, errors: list, t0: float, t1: float, arm
     users, failed page views (not attributable to an arm: reported for the window), degraded
     share, client latency P50 / P99, impressions, clicks and CTR."""
     by_arm = defaultdict(
-        lambda: {"pages": 0, "users": set(), "degraded": 0, "ms": [], "imps": 0, "clicks": 0}
+        lambda: {
+            "pages": 0,
+            "users": set(),
+            "degraded": 0,
+            "reasons": Counter(),
+            "ms": [],
+            "imps": 0,
+            "clicks": 0,
+        }
     )
     rid_arm = {}
     for rid, p in pages.items():
@@ -129,6 +137,7 @@ def summarize(pages: dict, events: list, errors: list, t0: float, t1: float, arm
             d["pages"] += 1
             d["users"].add(p["user_id"])
             d["degraded"] += bool(p["degraded"])
+            d["reasons"].update(p["degraded"])
             if "ms" in p:
                 d["ms"].append(p["ms"])
     seen_click = set()
@@ -151,6 +160,7 @@ def summarize(pages: dict, events: list, errors: list, t0: float, t1: float, arm
             "page_views": d["pages"],
             "users": len(d["users"]),
             "degraded_share": d["degraded"] / d["pages"] if d["pages"] else float("nan"),
+            "degraded_reasons": dict(d["reasons"].most_common(3)),
             "p50_ms": float(np.nanpercentile(ms, 50)),
             "p99_ms": float(np.nanpercentile(ms, 99)),
             "impressions": d["imps"],
@@ -218,6 +228,15 @@ def ctr_by_user(
             seen.add(imp)
             out[a][u][1] += 1
     return {a: dict(us) for a, us in out.items()}
+
+
+def degraded_reasons(pages: dict, t0: float, t1: float, top: int = 3) -> dict[str, int]:
+    """The most frequent degradation reasons of the pages served in [t0, t1)."""
+    c = Counter()
+    for p in pages.values():
+        if t0 <= p["t"] < t1:
+            c.update(p["degraded"])
+    return dict(c.most_common(top))
 
 
 # Bins of a user's home-page count within a run: (first, last) page number, last None = open.

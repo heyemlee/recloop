@@ -111,6 +111,32 @@ def test_snapshot_reads_an_open_and_a_closed_ledger(tmp_path):
     assert list(pages) == ["r1"] and len(errors) == 1
 
 
+def test_drill_phases_follow_the_steps_times(tmp_path):
+    from sim import release_drill
+
+    led, t0 = ledger(tmp_path)  # vA serves pages 0-19, vB pages 20-39 (one per second)
+    log = {
+        "t0": t0,
+        "t_end": t0 + 40,
+        "new": "vB",
+        "bad": "vC",
+        "steps": [
+            {"step": "canary vB 5%", "t": t0 + 10, "ok": True},
+            # the rollout's step: phases start at a step's own time, not at a variable taken
+            # before some analysis
+            {"step": "full rollout vB", "t": t0 + 19.5, "ok": True},
+        ],
+    }
+    n, e = release_drill.analyse(log, led)
+    assert (n, e) == (40, 1)
+    ph = log["phases"]
+    assert list(ph) == ["before", "canary", "full"]
+    assert ph["full"]["from"] == t0 + 19.5 and ph["full"]["to"] == t0 + 40
+    assert ph["full"]["arms"]["vB"]["page_views"] == 20 and "vA" not in ph["full"]["arms"]
+    assert log["switch"]["full"]["first_page_s"] == pytest.approx(0.5)
+    assert [f["status"] for f in log["failures"]] == [503]
+
+
 def test_ratio_delta_matches_its_formula():
     rng = np.random.default_rng(0)
     i = rng.integers(5, 50, 400).astype(float)
@@ -252,6 +278,7 @@ def test_release_report_renders(tmp_path, monkeypatch):
                 "impressions": 50,
                 "clicks": 1,
                 "ctr": 0.02,
+                "degraded_reasons": {"user_state_timeout": 2},
             }
         },
         "failed_page_views": 0,
@@ -285,6 +312,15 @@ def test_release_report_renders(tmp_path, monkeypatch):
             {"pages": [64, None], "arm": None, "impressions": 50, "clicks": 0, "ctr": 0.0},
         ],
         "phases": {"before": {"from": 1000.0, "to": 1100.0, **summary}},
+        "failures": [
+            {
+                "t": 1050.0,
+                "surface": "next_page",
+                "status": 503,
+                "ms": 52.0,
+                "degraded_around": {"pages_timeout": 3},
+            }
+        ],
         "redis": {
             "state": {
                 "policy": "noeviction",
@@ -336,4 +372,6 @@ def test_release_report_renders(tmp_path, monkeypatch):
         and "CTR: -0.0040, 95% CI [-0.0070, -0.0010] (user-level bootstrap over the two phases' users); lower."
         in md
         and "| 64 and later | 50 | 0 | 0.00% |" in md
+        and "| 50.0 | next_page | 503 | 52.0 | pages_timeout 3 |" in md
+        and "| user_state_timeout 2 |" in md
     )

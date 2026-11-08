@@ -73,10 +73,13 @@ def version_arm(pg: dict) -> str | None:
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--api", default=os.environ.get("RECLOOP_API_URL", "http://127.0.0.1:18080"))
+    p.add_argument("--new", help="the version to release (built under artifacts/bundles)")
+    p.add_argument("--bad", help="the bad version for the rollback")
     p.add_argument(
-        "--new", required=True, help="the version to release (built under artifacts/bundles)"
+        "--analyse",
+        action="store_true",
+        help="only redo the tables of the drill in --out from its ledger (no traffic, no steps)",
     )
-    p.add_argument("--bad", required=True, help="the bad version for the rollback")
     p.add_argument("--canary-percent", type=int, default=5)
     p.add_argument("--warmup-seconds", type=float, default=60)
     p.add_argument("--canary-seconds", type=float, default=600)
@@ -92,6 +95,15 @@ def main(argv: list[str] | None = None) -> None:
     )
     p.add_argument("--out", type=Path, default=OUT)
     args = p.parse_args(argv)
+    if args.analyse:
+        log = json.loads((args.out / "drill.json").read_text())
+        n, e = analyse(log, args.out / "traffic" / "ledger.jsonl")
+        log["analysed"] = {"at": time.time(), "by": "sim.release_drill --analyse"}
+        _write(args.out, log)
+        print(f"drill    re-analysed: {n:,} page views, {e} failed")
+        return
+    if not (args.new and args.bad):
+        p.error("--new and --bad are required (or --analyse)")
 
     admin = Admin(args.api, actor="release-drill")
     ads = ads_mod.Ads(args.api, os.environ.get("DATABASE_URL", ""))
@@ -205,18 +217,20 @@ def main(argv: list[str] | None = None) -> None:
             lambda: admin.activate(args.bad, "bad release: pushed without a canary"),
         )
         time.sleep(args.bad_seconds)
-        t_rollback = time.time()
         # The evidence goes into the release record with the decision: the bad release's CTR
-        # against the full rollout before it (user-level bootstrap).
+        # against the full rollout before it (user-level bootstrap), over what had been served
+        # when it was read. The rollback's own time is its step's (reading takes a few seconds).
+        t_decide = time.time()
         pages, events, errors = _snapshot(traffic)
         full_users = traffic_mod.ctr_by_user(
             pages, events, t_full + 15, t_full_end, version_arm
         ).get(args.new, {})
-        bad_users = traffic_mod.ctr_by_user(pages, events, t_bad + 5, t_rollback, version_arm).get(
+        bad_users = traffic_mod.ctr_by_user(pages, events, t_bad + 5, t_decide, version_arm).get(
             args.bad, {}
         )
         bad = traffic_mod.bootstrap_ctr_diff(full_users, bad_users)
         log["bad_vs_full_ctr"] = bad
+        log["bad_vs_full_windows"] = [[t_full + 15, t_full_end], [t_bad + 5, t_decide]]
         step(
             "rollback",
             lambda: admin.rollback(
@@ -225,8 +239,8 @@ def main(argv: list[str] | None = None) -> None:
             ),
         )
         time.sleep(args.after_seconds)
-        t_end = time.time()
     finally:
+        log["t_end"] = time.time()
         traffic.stop()
         log["redis"] = redis_stats.delta(redis_before, redis_stats.counters())
         print(f"drill    {redis_stats.describe(log['redis'])}")
@@ -234,32 +248,72 @@ def main(argv: list[str] | None = None) -> None:
         # ledger next to it holds the traffic).
         _write(args.out, log)
 
-    pages, events, errors = _snapshot(traffic)
-    phases = {
-        "before": (t0, t_canary),
-        "canary": (t_canary, t_full),
-        "full": (t_full, t_bad),
-        "bad": (t_bad, t_rollback),
-        "after": (t_rollback, t_end),
-    }
-    log["phases"] = {
-        k: {"from": a, "to": b, **traffic_mod.summarize(pages, events, errors, a, b, version_arm)}
-        for k, (a, b) in phases.items()
-    }
-    log["switch"] = {
-        "full": _switch_time(pages, t_full, args.new),
-        "bad": _switch_time(pages, t_bad, args.bad),
-        "rollback": _switch_time(pages, t_rollback, args.new),
-    }
-    log["timeline"] = traffic_mod.timeline(pages, errors, t0, t_end)
-    log["ctr_by_page_count"] = traffic_mod.ctr_by_page_count(pages, events, t0, t_end)
-    log["events"] = events_since(t0 - 1)
-    log["t_end"] = t_end
+    pages, errors = analyse(log, traffic.ledger.f.name)
+    log["events"] = events_since(log["t0"] - 1)
     log["after"] = admin.overview()
     _write(args.out, log)
     print(
-        f"drill    done: {len(pages):,} page views, {len(errors)} failed -> {(args.out / 'drill.json').relative_to(ROOT)}"
+        f"drill    done: {pages:,} page views, {errors} failed -> {(args.out / 'drill.json').relative_to(ROOT)}"
     )
+
+
+# Steps that change which version serves, by the phase they start.
+PHASE_STEPS = (
+    ("canary ", "canary"),
+    ("abort canary", "aborted"),
+    ("full rollout ", "full"),
+    ("activate ", "bad"),
+    ("rollback", "after"),
+)
+
+
+def analyse(log: dict, ledger: str | Path) -> tuple[int, int]:
+    """The drill's tables, from its recorded steps and the traffic ledger: phases (each from
+    the step that started it to the next one: the steps' own times), the switches, the traffic
+    per 10 s, CTR by a user's page count, every failed page view with the degradations around
+    it. Re-runnable on a finished drill: `python -m sim.release_drill --analyse`."""
+    pages, events, errors = traffic_mod.read_ledger(Path(ledger))
+    t0, t_end = log["t0"], log["t_end"]
+    marks = [("before", t0)]
+    for s in log["steps"]:
+        for prefix, phase in PHASE_STEPS:
+            if s["step"].startswith(prefix) and s["ok"]:
+                marks.append((phase, s["t"]))
+    bounds = [
+        (name, a, b) for (name, a), (_, b) in zip(marks, marks[1:] + [("", t_end)], strict=True)
+    ]
+    log["phases"] = {
+        name: {
+            "from": a,
+            "to": b,
+            **traffic_mod.summarize(pages, events, errors, a, b, version_arm),
+        }
+        for name, a, b in bounds
+    }
+    at = dict(marks)
+    log["switch"] = {
+        key: _switch_time(pages, at[phase], v)
+        for key, phase, v in (
+            ("full", "full", log["new"]),
+            ("bad", "bad", log["bad"]),
+            ("rollback", "after", log["new"]),
+        )
+        if phase in at
+    }
+    log["timeline"] = traffic_mod.timeline(pages, errors, t0, t_end)
+    log["ctr_by_page_count"] = traffic_mod.ctr_by_page_count(pages, events, t0, t_end)
+    log["failures"] = [
+        {
+            "t": e["t"],
+            "surface": e.get("surface"),
+            "status": e.get("status"),
+            "ms": e.get("ms"),
+            "degraded_around": traffic_mod.degraded_reasons(pages, e["t"] - 5, e["t"] + 5),
+        }
+        for e in sorted(errors, key=lambda e: e["t"])
+        if t0 <= e["t"] < t_end
+    ]
+    return len(pages), len(errors)
 
 
 def _write(out: Path, log: dict) -> None:

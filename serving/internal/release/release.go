@@ -310,6 +310,11 @@ func (c *Controller) Rollback(ctx context.Context, actor, note string) (string, 
 // version and the canary loaded and active / default, a retired version kept loaded for
 // KeepPrevious and then unloaded.
 func (c *Controller) Reconcile(ctx context.Context) error {
+	// Under the release lock: a reconcile that read model_versions just before an activation
+	// or a rollback in this process would otherwise switch the api back to the version it read
+	// (until its next pass, 2 s later).
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	all, err := c.Store.ModelVersions(ctx)
 	if err != nil {
 		return err
