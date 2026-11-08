@@ -36,6 +36,7 @@ from pathlib import Path
 import psycopg
 
 from sim import ads as ads_mod
+from sim import redis_stats
 from sim import run as run_mod
 from sim import verify as verify_mod
 
@@ -148,8 +149,8 @@ def main(argv: list[str] | None = None) -> None:
     try:
         for name in args.configs.split(","):
             margin, paced = parse_config(name)
-            # Every configuration starts from the same user state, with Redis far from its
-            # memory cap (an evicted spend counter would corrupt the measurement).
+            # Every configuration starts from the same user state (both Redis instances
+            # reseeded); the state Redis must neither evict nor refuse a write (sim.redis_stats).
             ads_mod.reset_redis()
             ads.set_policy(EXP_ID, margin, paced)
             ads.wait_policy(margin, paced, user=1)
@@ -172,21 +173,22 @@ def main(argv: list[str] | None = None) -> None:
                  "--dwell-ms", args.dwell_ms, "--seed", str(args.seed), "--out", str(run_dir),
                  "--api", api_url]
             )  # fmt: skip
-            evicted = ads_mod.evicted_keys()
+            before = redis_stats.counters()
             summary = run_mod.run_main(sim_args)
             ads.end(ids)
             verify_mod.wait_for_consumers(("billing",))
-            evicted = ads_mod.evicted_keys() - evicted
+            rd = redis_stats.delta(before, redis_stats.counters())
+            evicted = rd["state"]["evicted_keys"]
             with psycopg.connect(db_url) as conn:
                 per = measure(conn, ids, t0, args.window, read_pages(run_dir / "ledger.jsonl"))
             res = {"config": name, "margin": margin, "pacing": paced, "t0": t0,
                    "campaigns": per, "summary": summarize(per), "sim": summary,
-                   "evicted_keys": evicted}  # fmt: skip
+                   "evicted_keys": evicted, "redis": rd}  # fmt: skip
             results.append(res)
             s = res["summary"]
             print(f"  overdelivery {s['overdelivery']:.2%}, spent {s['spent']:.1%}, "
                   f"{s['exhausted']}/{s['campaigns']} ran out (median {s['ran_out_median']}), "
-                  f"serving stopped at {s['stopped_median']}, Redis evicted {evicted} keys",
+                  f"serving stopped at {s['stopped_median']}; {redis_stats.describe(rd)}",
                   flush=True)  # fmt: skip
     finally:
         ads.stop_policy(EXP_ID)

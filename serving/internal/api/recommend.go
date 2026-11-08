@@ -454,7 +454,8 @@ func (s *Server) recommend(q *request, specs []mixer.Spec, limit int, debugOn bo
 	}
 
 	// Page (for the cursor) and, after a fresh and complete recall, the candidate cache entry:
-	// one Redis round trip. The assistant reads one list: chat results are not paged.
+	// one round trip to the cache Redis (cmd/api builds Pages and Cands on the same client). The
+	// assistant reads one list: chat results are not paged.
 	page := &cache.Page{
 		RequestID: requestID, UserID: q.uid, Surface: q.surface, Seed: q.seed, ModelVer: s.Bundle.Version,
 		Exp: assign, ConfigVersion: configVersion, Degraded: q.degraded, HV: uc.HV, Items: list, CreatedAt: q.now,
@@ -468,7 +469,7 @@ func (s *Server) recommend(q *request, specs []mixer.Spec, limit int, debugOn bo
 		_, span = q.span("page_store")
 		storeCands := useCache && cacheResult != CacheHit && complete && (userOK || q.surface == recall.SurfaceItem)
 		status, err = q.redis(q.budget.For(plan.Tail, renderReserve), func(c context.Context) error {
-			pipe := s.Redis.Pipeline()
+			pipe := s.Pages.R.Pipeline()
 			if err := s.Pages.PutCmd(c, pipe, page); err != nil {
 				return err
 			}

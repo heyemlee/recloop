@@ -38,6 +38,7 @@ import (
 
 	"github.com/heyemlee/recloop/serving/internal/adtoken"
 	"github.com/heyemlee/recloop/serving/internal/store/db"
+	"github.com/heyemlee/recloop/serving/internal/userstate"
 )
 
 // Click is a click event on a sponsored slot.
@@ -228,9 +229,12 @@ func (s *Service) Handle(ctx context.Context, c Click) (Result, error) {
 		return Result{}, err
 	}
 	if res.Outcome == Charged && res.BilledCents > 0 && s.Spend != nil {
-		if err := s.Spend.Add(ctx, c.EventID, res.CampaignID, res.Day, res.BilledCents); err != nil && s.Log != nil {
-			s.Log.Warn("spend counter not updated; reconciliation repairs it",
-				"event_id", c.EventID, "campaign_id", res.CampaignID, "cents", res.BilledCents, "err", err)
+		if err := s.Spend.Add(ctx, c.EventID, res.CampaignID, res.Day, res.BilledCents); err != nil {
+			userstate.CountError("billing", "spend", err)
+			if s.Log != nil {
+				s.Log.Warn("spend counter not updated; reconciliation repairs it",
+					"event_id", c.EventID, "campaign_id", res.CampaignID, "cents", res.BilledCents, "err", err)
+			}
 		}
 	}
 	return res, nil
