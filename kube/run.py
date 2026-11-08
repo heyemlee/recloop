@@ -519,6 +519,9 @@ def keda_metric(name: str, t0: float, t1: float) -> list[dict]:
 # ---------------------------------------------------------------- driver
 
 
+API_ENV = ("GOMAXPROCS", "GOMEMLIMIT", "BREAKER_WINDOW", "RECLOOP_RESILIENCE", "CANDIDATE_CACHE")
+
+
 def environment() -> dict:
     from ml.eval import machine as m
 
@@ -558,6 +561,8 @@ def environment() -> dict:
             ),
         },
         "images": images,
+        # The api's settings that shape its latency under load (the chart's values).
+        "api_env": {k: api_env[k] for k in API_ENV if k in api_env},
         "containers": k8s.containers_resources(),
         "hpa": k8s.kubectl_json("get", "hpa", "api")["spec"],
         "scaledobjects": {
@@ -597,10 +602,11 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--rollout-rate", type=int, default=150)
     p.add_argument("--rollout-seconds", type=int, default=150)
     p.add_argument("--hpa-base", type=int, default=100)
-    # 650/s (~0.7 ms of api CPU per page view with Rank): past one pod's knee (its half core
-    # throttled, P99 ~50 ms), well within two or three pods (cluster runs of 2026-11-08: one
-    # pod took 500/s cleanly; at 800/s the first pod stayed saturated after the scale-out).
-    p.add_argument("--hpa-step", type=int, default=650)
+    # 500/s: one api pod takes it at ~70 % of its half core (~0.7 ms of CPU per page view with
+    # Rank), well above the HPA's 50 %. At 650 and 800/s the scaled-out pods stayed degraded
+    # (rank breaker open, Redis budgets missed) with the node's CPU at ~2.4 of 8 cores: the
+    # single-node stack, not the api's CPU, was the limit (cluster runs of 2026-11-08).
+    p.add_argument("--hpa-step", type=int, default=500)
     p.add_argument("--hpa-hold", type=int, default=240)
     p.add_argument("--conn-close", type=float, default=0.02)
     p.add_argument("--keda-rate", type=int, default=300)

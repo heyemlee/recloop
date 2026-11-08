@@ -125,7 +125,10 @@ def rollout_stats(r: dict) -> dict:
     done = action_time(r, "rollback complete") or action_time(r, "rollout complete")
     start = r["k6"]["windows"][0]["t"] if r["k6"]["windows"] else r["started"]
     before = phase(windows_in(r, start + 10, trig))  # the first 10 s warm the connections
-    during = phase(windows_in(r, (trig or 0) - 5, (done or 0) + 5))
+    # From the trigger to the end of the load: without a probe the Deployment calls the rollout
+    # complete before its new pods serve, and what that costs comes after.
+    end = r["k6"]["windows"][-1]["t"] + 1 if r["k6"]["windows"] else None
+    during = phase(windows_in(r, (trig or 0) - 5, end))
     whole = phase(r["k6"]["windows"])
     pods = r["watch"]["pods"]
     new = [
@@ -184,8 +187,8 @@ def rollout_summary(runs: list[dict]) -> list[str]:
     out = [
         f"- **{head}** In "
         f"{len(gated)} rolling updates of both model-server pods under {rate} page views/s "
-        f"(open loop), {err} of {n:,} requests failed and {deg} of the {dn:,} answered during "
-        f"the rollouts were degraded ({pct(deg, dn)}). A new pod got traffic only once its "
+        f"(open loop), {err} of {n:,} requests failed and {deg} of the {dn:,} answered from "
+        f"the trigger on were degraded ({pct(deg, dn)}). A new pod got traffic only once its "
         f"bundle had loaded and passed its checks: Ready {rng([med(s['ready_after_start']) for s in gated], secs1)} "
         f"after its container started; never fewer than "
         f"{min((s['min_ready'] for s in gated if s['min_ready'] is not None), default='–')} ready pods."
@@ -206,18 +209,19 @@ def rollout_summary(runs: list[dict]) -> list[str]:
         nm = sum(ms_degraded(r) for r in runs if r["variant"] == "no-probe")
         out.append(
             f"  The same rollout without the readiness probe (pods get traffic as soon as they "
-            f"start): {pct(nd, nn)} of the requests during the rollouts degraded, {ne} failed; "
-            f"answers degraded for the model server (`sasrec_*`): {nm:,.0f} without the probe, "
-            f"{gm:,.0f} with it."
+            f"start): {pct(nd, nn)} of the requests from the trigger on degraded, {ne} failed; "
+            f"degradation reasons that point at the model server (`sasrec_*`, `rank_*`): "
+            f"{nm:,.0f} without the probe, {gm:,.0f} with it."
         )
     return out
 
 
-MS_REASONS = ("sasrec_", "model_version_mismatch")
+MS_REASONS = ("sasrec_", "rank_", "model_version_mismatch")
 
 
 def ms_degraded(r: dict) -> float:
-    """Answers degraded because of the model server (SASRec recall), over the whole run."""
+    """Degradation reasons that point at the model server (SASRec recall, Rank), over the
+    whole run; one answer can carry several."""
     return sum(v for k, v in r["server"]["degraded_reasons"].items() if k.startswith(MS_REASONS))
 
 
@@ -237,8 +241,10 @@ def rollout_section(runs: list[dict]) -> list[str]:
         "(`maxSurge 1`, `maxUnavailable 0`, `minReadySeconds 5`). The api calls the model "
         "server over one gRPC connection per api pod; an old pod first leaves the Service "
         "(preStop sleep 5 s), then stops with `grpc.server.stop(grace=5)`, which tells the "
-        "clients to reconnect (GOAWAY) and lets running calls finish. *During* = from the "
-        "trigger to the end of the rollout (± one 5 s window).",
+        "clients to reconnect (GOAWAY) and lets running calls finish. *After the trigger* = "
+        "from the trigger (− one 5 s window) to the end of the load: without a probe the "
+        "Deployment calls the rollout complete before its new pods serve, and what that costs "
+        "comes after that.",
         "",
         "- **gated**: the chart. Readiness = the gRPC health service says SERVING, which the "
         "server does only after `model_server/bundle.py` accepted the bundle (checksums, item "
@@ -264,8 +270,9 @@ def rollout_section(runs: list[dict]) -> list[str]:
             rng([med(s["ready_after_start"]) for s in ss], secs1),
         ])  # fmt: skip
     out += table(
-        ["variant", "runs", "requests", "failed", "degraded during", "P99 before (median window)",
-         "P99 during (worst window)", "rollout", "fewest ready pods", "Ready after start"],
+        ["variant", "runs", "requests", "failed", "degraded after the trigger",
+         "P99 before (median window)", "P99 after the trigger (worst window)", "rollout",
+         "fewest ready pods", "Ready after start"],
         rows,
     )  # fmt: skip
     out += [
@@ -422,6 +429,9 @@ def hpa_section(runs: list[dict], meta: dict | None = None) -> list[str]:
         else f"The api pod's CPU request is {req}, its limit {lim} (utilisation is relative to "
         "the request)"
     )
+    procs = (((meta or {}).get("environment") or {}).get("api_env") or {}).get("GOMAXPROCS")
+    if procs:
+        share += f" and runs Go with `GOMAXPROCS={procs}`"
     out += [
         f"k6 open loop: {r0['base']} page views/s for 60 s, {r0['step']}/s for {r0['hold']} s, "
         f"then {r0['base']}/s for 120 s. {share}; HPA between "
