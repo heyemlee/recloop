@@ -337,6 +337,8 @@ services:
       DATABASE_URL: postgres://recloop:recloop@postgres:5432/recloop?sslmode=disable
       REDIS_URL: ${BENCH_REDIS_URL:-redis://toxiproxy:16391/0}
       MODEL_SERVER_ADDR: ${BENCH_MODEL_SERVER_ADDR:-toxiproxy:18091}
+      # M4: releases load and switch bundle versions on the model server's admin port.
+      MODEL_SERVER_ADMIN_URL: http://model-server:18082
       KAFKA_BROKERS: redpanda:9092
       RECLOOP_BUNDLE: /bundles/current
       RECLOOP_RESILIENCE: ${RECLOOP_RESILIENCE:-full}
