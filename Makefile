@@ -246,9 +246,11 @@ latency-report: ## Re-render docs/results/latency.md from artifacts/latency/resu
 
 # ---------------------------------------------------------------- M3: ads and billing
 
-# Both runs need the stack (billing included), the api and the model server; each creates
-# campaigns of its own through the api and ends them afterwards.
-billing: overdelivery billing-drill ## Over-delivery study + 30-minute billing drill -> docs/results/billing.md (~70 min)
+# Both runs need the stack (billing included), the model server and the api, the latter run as
+# `CANDIDATE_CACHE=off make serve-api` (otherwise 30 minutes of simulated traffic fill Redis's
+# 384 MB and it evicts keys; the runs record evictions, the drill fails on any). Each run
+# reseeds Redis, creates campaigns of its own through the api and ends them afterwards.
+billing: overdelivery billing-drill ## Over-delivery study + 30-minute billing drill -> docs/results/billing.md (~75 min)
 
 overdelivery: sim-world build-aggregator build-billing ## Safety margins 0 / 5 / 20 clicks, with and without pacing (~35 min) -> artifacts/billing/overdelivery.json, billing.md
 	$(PY) -m sim.overdelivery $(OVERDELIVERY_FLAGS)
