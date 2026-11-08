@@ -20,7 +20,7 @@ export const SOURCE_STYLE: Record<string, string> = {
 };
 
 /** Reports an impression once the tile is at least 50% visible for 1 second (design §7.1). */
-function useImpression(
+export function useImpression(
   ref: React.RefObject<HTMLElement | null>,
   userId: number | null,
   itemId: number,

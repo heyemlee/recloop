@@ -139,10 +139,15 @@ func newFixtureWith(t *testing.T, o fixtureOpts) *fixture {
 				{Source: recall.Pop{B: b}, Timeout: 50 * time.Millisecond, K: 200},
 			},
 			recall.SurfaceItem: {{Source: recall.ItemCF{B: b}, Timeout: 50 * time.Millisecond, K: 100}},
+			recall.SurfaceChat: {
+				{Source: recall.ItemCF{B: b}, Timeout: 50 * time.Millisecond, K: 200},
+				{Source: recall.Pop{B: b}, Timeout: 50 * time.Millisecond, K: 200},
+			},
 		},
 		Weights: map[string]map[string]float64{
 			recall.SurfaceHome: {"sasrec": 1, "itemcf": 1, "pop": 0.3},
 			recall.SurfaceItem: {"itemcf": 1, "text": 1},
+			recall.SurfaceChat: {"sasrec": 1, "itemcf": 1, "pop": 0.3},
 		},
 		Log: log, Now: time.Now,
 	}

@@ -21,9 +21,14 @@ write-ups in `docs/results/`.
 - `docs/results/*.md` are generated (`make eval` writes `offline.md`, `make ann` writes
   `ann.md`, `make load` writes `latency.md`; `make latency-report` re-renders it from
   `artifacts/latency/results.json`; `make billing` writes `billing.md`, `make billing-report`
-  re-renders it from `artifacts/billing/`); change the generator, not the file. The committed `offline.md` is `make setup`, then `make paper-sasrec`, then
-  `make eval`. `make eval` re-runs give the same bytes; `make train` runs on the CPU with fixed
-  seeds, and two runs with the same worker / thread counts gave identical weights.
+  re-renders it from `artifacts/billing/`; `make agent-eval` writes `agent.md`, `make
+  agent-latency` adds its chat-path section); change the generator, not the file. The committed `offline.md` is `make setup`, then `make paper-sasrec`,
+  then `make eval`. `make eval` re-runs give the same bytes; `make train` runs on the CPU with fixed
+  seeds, and two runs with the same worker / thread counts gave identical weights. The committed
+  `agent.md` is a fresh database (`make setup`: no orders, stock as ingested), then `make
+  agent-eval`, then `make agent-latency` with the services up; re-runs differ only in their
+  latency sections, and the report says when the database had orders (each one took a unit of
+  stock).
 - Generated code is committed: `serving/gen` and `model_server/gen` (`make proto`),
   `serving/internal/store/db` (`make sqlc`). Edit the `.proto` / SQL, then regenerate.
 - Adapted third-party code keeps its licence: `licenses/` (SASRec.pytorch, Apache-2.0).
@@ -76,7 +81,8 @@ ml/                         Python 3.12 uv project (own .venv); run modules from
 minionerec/                 Python 3.12 uv project (own .venv, Apple Silicon only): MiniOneRec's
                             evaluate.py + evaluate.py.patch on MPS (upstream, generate, cost)
 web/                        Next.js 16 + shadcn/ui (:13000); /api/v1/* is proxied to the Go api
-                            (/internal is not); e2e/; /advertiser is the advertiser console
+                            (/internal is not), /api/v1/chat to the agent service; e2e/;
+                            /advertiser is the advertiser console, /chat the shopping assistant
 sim/                        traffic simulator (world, click model, sessions + fault switches, verify,
                             drill; ads, billing_drill, billing_verify, overdelivery); runs in the
                             ml environment (`$(PY) -m sim.<module>`)
@@ -85,7 +91,17 @@ analysis/                   served_attribution.sql, srm.py, billing_report.py (b
 tools/                      go.mod pinning buf, protoc-gen-go(-grpc), sqlc (built into .cache/bin);
                             tools/k6/go.mod pins k6 (own module)
 testdata/                   bucket_vectors.json, shared by the Go and Python bucketing tests
-agent/                      later milestones
+agent/                      Python 3.12 uv project (own .venv): the shopping assistant (design §10)
+  agent, parsing, schema    one turn; LLM / rule parsing into ShoppingRequest (Pydantic)
+  catalog, tools, text      search_items (BM25 + pgvector, RRF, SQL filters), details, history,
+                            get_recommendations
+  history                   purchase history: orders + the dataset users' training period
+  constraints, compat       code checks of every constraint; device matching with evidence
+  llm, prompts, render      Claude Messages API adapter, prompts, replies rendered from rows
+  store_api                 the Go api as a client: surface=chat recommendations, /internal/ads/select
+  chat, server              ChatService (one turn -> events), FastAPI POST /v1/chat (SSE, :18083)
+  eval/                     cases.jsonl (150, generated), harness, metrics, judge, report,
+                            chat_latency (the chat path through the running services)
 data/        (ignored) raw/ downloads, hf/ model files, processed/ outputs of `make data`
 third_party/ (ignored) MiniOneRec and SASRec.pytorch clones
 artifacts/   (ignored) models/sasrec, bundles/<version> + bundles/current, eval/, e2e/, logs/,
@@ -113,7 +129,8 @@ make rebuild-redis # seed + replay events_raw (FROM=db, default) or the event lo
 make serve-model   # model server on :18081 (bundle: artifacts/bundles/current)
 make serve-api     # Go api on :18080
 make serve-web     # Next.js dev server on :13000
-make test          # ruff + pytest (ml, model_server) + go vet/test; DB/Redis tests skip when down
+make test          # ruff + pytest (ml, model_server, minionerec, agent) + go vet/test; DB/Redis tests
+                   # skip when down
 make test-props    # long run of the ads / ad_token / billing property tests (CHECKS=2000, ~4 min)
 make test-web      # tsc + eslint for web/
 make e2e           # Playwright (local Chrome): click an item, reload, the feed follows (servers up)
@@ -135,6 +152,15 @@ make billing-drill # 30 min of traffic, kill -9 billing, Redpanda restarts, Post
                    # for billing; then the ledger against the simulator's truth, charge by charge
 make billing-report  # re-render billing.md from artifacts/billing/
 make k6            # build k6 v2.3.0 (tools/k6) into .cache/bin
+make agent-cases   # regenerate agent/eval/cases.jsonl from the items table (read-only)
+make agent-eval    # shopping assistant: baseline + oracle agents -> docs/results/agent.md (~1 min)
+make serve-agent   # shopping assistant service on :18083 (POST /v1/chat; rules parser unless
+                   # RECLOOP_AGENT_MODEL is set); needs the api
+make agent-latency # chat path through the running services -> agent.md's chat section (~1 min;
+                   # waits up to 20 min for a 1-minute load below 2; LATENCY_FLAGS)
+make agent-eval-llm-smoke  # paid: 5 cases x 3 models + Sonnet judge, $1 in all (needs the key)
+make agent-eval-llm  # paid: Opus / Sonnet / Haiku 5.5 x 3 runs, caps $12 / $6 / $1 per run, $60
+                     # in all, Sonnet judge -> agent.md (needs the user's ANTHROPIC_API_KEY)
 make proto / sqlc  # regenerate gRPC / SQL code (tools built once into .cache/bin)
 make down          # stop the stack; `make down-volumes` also deletes its volumes
 make clean-processed / clean-artifacts   # rm data/processed / artifacts/{models,bundles,eval}
@@ -147,9 +173,11 @@ make minionerec       # score the runs like make eval -> docs/results/minionerec
 
 Python: `uv run --project ml --frozen python -m ml.<package>.<module>` from the repo root (the
 Makefile's `PY`); the model server is `uv run --project model_server ...` (`MS`), MiniOneRec
-`uv run --project minionerec ...` (`MR`). Go:
+`uv run --project minionerec ...` (`MR`), the agent `uv run --project agent ...` (`AG`; `AGE`
+adds the optional `encoder` group: torch + sentence-transformers for the query encoder, not
+installed by tests or CI). Go:
 `cd serving && go ...`; goose is a Go tool (`go tool goose`), built with tags that drop every
-driver but Postgres (`GOOSE_TAGS`). `.claude/launch.json` starts the three servers for the
+driver but Postgres (`GOOSE_TAGS`). `.claude/launch.json` starts the four servers for the
 preview browser. Ports and URLs are in `.env.example`.
 
 Go integration tests use `DATABASE_URL` / `REDIS_URL`: each test package gets its own database
@@ -162,7 +190,8 @@ the repo. Inside the Claude Code sandbox these must run outside it: docker, anyt
 connects to localhost (PostgreSQL, Redis, Redpanda, the servers, k6, the simulator), anything
 that binds a local port (the servers, the model_server gRPC and admin tests, Go httptest,
 miniredis), `git clone`, downloads (Go modules, npm, uv, Hugging Face), MPS (Metal) and
-Playwright. `make eval`, `make train` and the non-network tests work inside it.
+Playwright. `make eval`, `make train` and the non-network tests work inside it; `make
+agent-cases` and `make agent-eval` read PostgreSQL, so they run outside.
 
 torch and faiss-cpu each ship an OpenMP runtime and crash when loaded together on macOS: keep
 faiss out of torch processes (`ml/bundle/faiss_index.py` runs as a subprocess; the model server
@@ -320,6 +349,65 @@ interpreter at exit: `ORT_DISABLE_TELEMETRY=1` (Makefile, model-server image, `m
   step must match the database exactly; concurrent workers must give the order-independent
   truth (one charge per clicked impression, spend = min(budget, prices), each outcome counted
   once). `make test` runs 30 cases each, `make test-props` 2,000.
+
+## Shopping assistant (M6)
+
+- One turn (`agent/agent.py`): parse -> `get_purchase_history` (only when the request refers to
+  an earlier purchase) -> `search_items` -> `get_item_details` -> code checks -> device
+  matching -> personalisation -> reasons -> the sponsored item -> reply rendered from the item
+  rows (titles, prices). The model never picks or orders items.
+- Personalisation (store only): `get_recommendations` = `GET /v1/recommendations?surface=chat
+  &seed_items=...` (the first 5 checked items as seeds). The chat surface runs the home sources
+  over history + seeds (the first seed as the most recent item), no ads, no candidate cache, no
+  paging, no seen-today filter. Its ranks re-order only the first 10 checked items: RRF of the
+  checked order and the recommendation rank, the latter weighted 0.1 (its first pick can pass 6
+  places, its 50th 3); it never adds or removes an item; confirmed-compatible items stay first.
+- Sponsored item (store only): `POST /internal/ads/select` with the checked items the reply does
+  not show (a named device: confirmed only) as candidates, the shown ones excluded, the budget
+  as max price; at most one, dropped unless it is one of the candidates; "Sponsored" label and
+  reason by code. Its card carries the ads module's impression_id and ad_token, which the chat
+  page sends with its impression and click (billing, frequency caps). Failures of either call
+  leave the reply and are listed in `degraded` (`recommendations_*`, `ads_*`).
+- Service (`agent/server.py`, FastAPI; `make serve-agent`, :18083): `POST /v1/chat {user_id,
+  message}` streams server-sent events: meta (reply_id), status per stage, reply (text, intro,
+  item cards, sponsored card, footer, constraints, degraded), done (timings, LLM calls, cost).
+  Organic cards' impression_id is `{reply_id}:{position}` (reply_id a UUIDv7; no served row).
+  The web app proxies `/api/v1/chat` to it (`RECLOOP_AGENT_URL`); `/chat` is the page.
+  `RECLOOP_AGENT_MODEL` empty = rules parser, no API calls.
+- Parsing: `ShoppingRequest` (category key from `agent/taxonomy.py`, budget in cents, brands,
+  excluded brands, genuine-only, device, last-purchase relation, search text). A reply that
+  fails validation goes back once with the error; a second failure ends the turn.
+- Hard constraints (price, stock, category) and brands are checked by code on the rows: an
+  unknown price never meets a budget, an item without a category path never meets a category.
+  Price, stock and category are also SQL filters of `search_items`.
+- Devices (`agent/compat.py`): code match in title, features, description (the model as
+  written, or a bare number in a list opened by the series prefix or a family word); the model
+  judges the rest only when the code confirmed fewer than 3, and its "compatible" needs a quote
+  that is in the named field and contains the model number. Otherwise: "not confirmed".
+- Search: BM25 in-process on `agent/text.py` tokens (`WF-2760` = `WF2760` = 'wf2760'; there is
+  no tsvector column, PostgreSQL's `english` parser splits model numbers), exact pgvector KNN of
+  the bge query embedding (with bge's query instruction), RRF k = 60, 30 results.
+  The query encoder is bge-small-en-v1.5 at ml/'s library versions, its files checked against
+  `ml/data/download.py`; `RECLOOP_TEXT_MODEL` points at another copy of the model directory.
+- Purchase history (`agent/history.py`): in the store it is what the feed counts as bought,
+  `orders` plus the dataset users' training-period interactions (the items `make seed` puts in
+  `u:{uid}:bought`), read once from `data/processed/interactions.parquet`
+  (`RECLOOP_INTERACTIONS`). A store-facing agent passes `StorePurchases` as `purchases`; without
+  it the agent reads `orders` only, and the evaluation passes each case's own list.
+- Database access is a read-only session (`SET SESSION CHARACTERISTICS AS TRANSACTION READ
+  ONLY`) on `items` and `orders`.
+- Claude (`agent/llm.py`, anthropic 2.3.0): structured outputs, effort low, cached system
+  prompt, `fallbacks="default"` on Opus 5.5 / Sonnet 5.5, cost per reply at the serving model's
+  price. Nothing calls it except the paid targets and a service started with
+  `RECLOOP_AGENT_MODEL`; tests use a scripted fake. Paid runs stop before a case (or judge call)
+  that could pass their cap: twice the dearest so far.
+- Evaluation: `agent/eval/cases.jsonl` (150 cases, 12 templates, gold constraints, purchase
+  histories as fixtures, user ids from 900000); agents `baseline` (rules), `oracle` (gold
+  constraints) and search ablations; LLM agents and the Sonnet judge (grades per (case, item),
+  shared by every agent that showed it) wait for the user's key (design §19, 2026-11-08).
+- Chat path latency (`make agent-latency`): the 150 messages x 3 through `/v1/chat`, one at a
+  time, from a fixed sample of dataset users with history, after 30 warm-up replies; records
+  load and the other projects' containers, and marks a busy start "indicative".
 
 ## Evaluation protocol
 

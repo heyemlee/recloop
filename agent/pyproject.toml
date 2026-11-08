@@ -1,0 +1,48 @@
+[project]
+name = "recloop-agent"
+version = "0.1.0"
+description = "RecLoop shopping assistant: request parsing, catalog tools, code-checked constraints, evaluation"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "anthropic==2.3.0",       # 2.x sends API version 2026-10-21; released 2026-10-23
+    "numpy==2.5.4",           # same as ml/
+    "psycopg[binary,pool]==3.3.8", # same as ml/; the pool for the chat service
+    "fastapi==0.162.2",       # the chat service (/v1/chat, server-sent events)
+    "uvicorn==0.54.0",
+    "pyarrow==26.0.1",        # same as ml/; reads the dataset users' purchases (history.py)
+    "pydantic>=2.9",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.8",
+]
+# Query encoder for the vector half of search_items. Pinned to the versions in ml/uv.lock, which
+# computed items.text_emb, so queries and items are embedded by the same code. Not installed by
+# default (the unit tests and CI use a fake encoder): `uv run --group encoder ...`.
+encoder = [
+    "sentence-transformers==6.2.0",
+    "tokenizers==0.23.3",
+    "torch==2.15.0",
+    "transformers==5.22.2",
+]
+
+[tool.uv]
+# Not an installable package: modules run from the repo root as `python -m agent.<module>`.
+package = false
+
+[tool.pytest.ini_options]
+# rootdir is agent/; ".." puts the repo root on sys.path so `import agent...` works.
+pythonpath = [".."]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "NPY"]
+ignore = ["E501"]

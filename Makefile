@@ -12,10 +12,14 @@ API_PORT ?= 18080
 MODEL_SERVER_PORT ?= 18081
 MODEL_SERVER_ADMIN_PORT ?= 18082
 WEB_PORT ?= 13000
+# M6: the shopping assistant's service (POST /v1/chat; the web app proxies /api/v1/chat to it).
+AGENT_PORT ?= 18083
+RECLOOP_AGENT_URL ?= http://127.0.0.1:$(AGENT_PORT)
 API_ADDR ?= 127.0.0.1:$(API_PORT)
 MODEL_SERVER_ADDR ?= 127.0.0.1:$(MODEL_SERVER_PORT)
 RECLOOP_API_URL ?= http://$(API_ADDR)
 RECLOOP_BUNDLE ?= $(CURDIR)/artifacts/bundles/current
+RECLOOP_TEXT_MODEL ?= $(CURDIR)/data/hf/bge-small-en-v1.5
 # M2: event log, monitoring, tracing, the bench profile's api.
 RECLOOP_KAFKA_PORT ?= 19092
 KAFKA_BROKERS ?= localhost:$(RECLOOP_KAFKA_PORT)
@@ -31,8 +35,9 @@ AD_TOKEN_KEYS ?= dev1:recloop-dev-only-ad-token-key-not-a-secret-0001
 RECLOOP_PG_PROXY_PORT ?= 18475
 PG_PROXY_URL ?= http://localhost:$(RECLOOP_PG_PROXY_PORT)
 export RECLOOP_PG_PORT RECLOOP_REDIS_PORT DATABASE_URL REDIS_URL API_ADDR MODEL_SERVER_PORT \
-	MODEL_SERVER_ADMIN_PORT MODEL_SERVER_ADDR RECLOOP_API_URL RECLOOP_BUNDLE RECLOOP_KAFKA_PORT \
-	KAFKA_BROKERS PROMETHEUS_URL RECLOOP_BENCH_API_PORT AD_TOKEN_KEYS PG_PROXY_URL
+	MODEL_SERVER_ADMIN_PORT MODEL_SERVER_ADDR RECLOOP_API_URL RECLOOP_BUNDLE RECLOOP_TEXT_MODEL \
+	RECLOOP_KAFKA_PORT KAFKA_BROKERS PROMETHEUS_URL RECLOOP_BENCH_API_PORT AD_TOKEN_KEYS PG_PROXY_URL \
+	AGENT_PORT RECLOOP_AGENT_URL
 # onnxruntime's telemetry uploader (macOS) can crash the interpreter at exit: off everywhere.
 export ORT_DISABLE_TELEMETRY := 1
 
@@ -52,6 +57,9 @@ UV := uv run --project ml --frozen
 PY := $(UV) python
 MS := uv run --project model_server --frozen
 MR := uv run --project minionerec --frozen
+AG := uv run --project agent --frozen
+# The agent's query encoder (sentence-transformers + torch) is an optional dependency group.
+AGE := $(AG) --group encoder
 # goose's CLI links every SQL driver it supports; build it with Postgres only.
 GOOSE_TAGS := no_clickhouse,no_libsql,no_mssql,no_mysql,no_sqlite3,no_vertica,no_ydb
 GOOSE := cd serving && GOFLAGS="-modcacherw -tags=$(GOOSE_TAGS)" \
@@ -65,9 +73,10 @@ TOOL_PKGS := github.com/bufbuild/buf/cmd/buf google.golang.org/protobuf/cmd/prot
 .PHONY: help setup images up down down-volumes bench-up bench-down migrate migrate-status data \
 	data-weights ingest train paper-sasrec eval ann bundle seed build-aggregator build-billing \
 	rebuild-redis tools k6 proto sqlc generate build-api serve-model serve-api serve-web web-install \
-	test lint test-ml test-model-server test-minionerec test-go test-web test-props e2e fmt sim-world \
-	sim srm drill load load-smoke latency-report billing overdelivery billing-drill billing-report \
-	minionerec-gen minionerec-cost minionerec clean-processed clean-artifacts
+	test lint test-ml test-model-server test-minionerec test-agent test-go test-web test-props e2e \
+	fmt sim-world sim srm drill load load-smoke latency-report billing overdelivery billing-drill \
+	billing-report minionerec-gen minionerec-cost minionerec agent-cases agent-eval agent-eval-llm \
+	agent-eval-llm-smoke serve-agent agent-latency clean-processed clean-artifacts
 
 help: ## List targets
 	@grep -E '^[a-z0-9-]+:.*## ' $(MAKEFILE_LIST) \
@@ -263,14 +272,55 @@ billing-drill: sim-world build-aggregator build-billing ## 30 min of traffic, ki
 billing-report: ## Re-render docs/results/billing.md from artifacts/billing/
 	$(PY) -m analysis.billing_report
 
-test: lint test-ml test-model-server test-minionerec test-go ## Lint and run the Python and Go tests (DB / Redis tests skip when the stack is down)
+# ---------------------------------------------------------------- M6: shopping assistant
+
+# Claude only where it is used, and only from the environment or .env (never on a command line):
+# RECLOOP_AGENT_MODEL empty = the rules parser, no API calls.
+serve-agent agent-eval-llm agent-eval-llm-smoke: export ANTHROPIC_API_KEY := $(ANTHROPIC_API_KEY)
+serve-agent: export RECLOOP_AGENT_MODEL := $(RECLOOP_AGENT_MODEL)
+
+serve-agent: ## Shopping assistant on AGENT_PORT: POST /v1/chat (SSE); needs the api (RECLOOP_API_URL)
+	$(AGE) python -m agent.server --port $(AGENT_PORT)
+
+agent-cases: ## Regenerate agent/eval/cases.jsonl from the catalog (reads items, read-only)
+	$(AG) python -m agent.eval.build_cases
+
+agent-eval: ## Shopping assistant: baseline + oracle agents -> docs/results/agent.md (no API calls)
+	$(AGE) python -m agent.eval.run
+
+# Needs the stack, the model server, the api and the agent service (make serve-agent); a quiet
+# machine. LATENCY_FLAGS: --repeats N, --warmup N, --limit N.
+agent-latency: ## Chat path (/v1/chat) latency through the running services -> agent.md (~1 min)
+	$(AG) python -m agent.eval.chat_latency $(LATENCY_FLAGS)
+	$(AG) python -m agent.eval.run --report-only
+
+# Paid (design §19, 2026-11-08): needs the user's ANTHROPIC_API_KEY (in .env); without it the
+# runner stops before any call. Defaults are the plan: three models, caps per run and in all,
+# relevance graded by Sonnet. LLM_MODELS / LLM_CAPS / REPEATS / TOTAL_CAP_USD / LLM_JUDGE override.
+LLM_MODELS ?= claude-opus-5-5 claude-sonnet-5-5 claude-haiku-5-5
+LLM_CAPS ?= claude-opus-5-5=12,claude-sonnet-5-5=6,claude-haiku-5-5=1
+LLM_JUDGE ?= claude-sonnet-5-5
+
+agent-eval-llm-smoke: ## Paid smoke: 5 cases x the 3 models + judge, $1 in all (report untouched)
+	$(AGE) python -m agent.eval.run --skip-offline --runs-dir artifacts/eval/agent/smoke --limit 5 \
+		$(foreach m,$(LLM_MODELS),--llm $(m)) --repeats 1 --max-cost-usd $(LLM_CAPS) \
+		--total-cap-usd 1 --judge $(LLM_JUDGE)
+
+agent-eval-llm: ## Paid: 3 models x 3 runs (caps $12 / $6 / $1 per run) + Sonnet judge, $60 in all -> agent.md
+	$(AGE) python -m agent.eval.run --skip-offline $(foreach m,$(LLM_MODELS),--llm $(m)) \
+		--repeats $(or $(REPEATS),3) --max-cost-usd $(LLM_CAPS) \
+		--total-cap-usd $(or $(TOTAL_CAP_USD),60) --judge $(LLM_JUDGE)
+
+test: lint test-ml test-model-server test-minionerec test-agent test-go ## Lint and run the Python and Go tests (DB / Redis tests skip when the stack is down)
 
 PYDIRS := ml sim loadtest analysis minionerec
-lint: ## ruff check + format check (ml, sim, loadtest, analysis, minionerec, model_server)
+lint: ## ruff check + format check (ml, sim, loadtest, analysis, minionerec, model_server, agent)
 	$(UV) ruff check $(PYDIRS)
 	$(UV) ruff format --check $(PYDIRS)
 	$(MS) ruff check model_server
 	$(MS) ruff format --check model_server
+	$(AG) ruff check agent
+	$(AG) ruff format --check agent
 
 # test_ann.py loads faiss, so it gets a pytest process of its own: torch (test_sasrec.py) and
 # faiss in one process abort on macOS (two OpenMP runtimes).
@@ -285,6 +335,11 @@ test-model-server:
 test-minionerec:
 	@if [ "$$(uname -sm)" = "Darwin arm64" ]; then $(MR) pytest minionerec/tests; \
 	else echo "skip minionerec tests: the environment is Apple Silicon only"; fi
+
+# Scripted language model and an in-memory catalog; the database and encoder tests skip when the
+# stack is down or the `encoder` group / model files are missing. Never calls a paid API.
+test-agent:
+	$(AG) pytest agent/tests
 
 test-go:
 	@cd serving && unformatted="$$(gofmt -l cmd internal)" && \
@@ -309,6 +364,8 @@ fmt: ## Format and auto-fix
 	$(UV) ruff check --fix $(PYDIRS)
 	$(MS) ruff format model_server
 	$(MS) ruff check --fix model_server
+	$(AG) ruff format agent
+	$(AG) ruff check --fix agent
 	cd serving && gofmt -w cmd internal
 
 clean-processed: ## Delete data/processed (keeps downloads and third_party/)
