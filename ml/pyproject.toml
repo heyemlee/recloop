@@ -57,4 +57,4 @@ ignore = ["E501"]
 
 [tool.ruff.lint.isort]
 # The repo-level packages that run in this environment (sim/, analysis/, loadtest/).
-known-first-party = ["ml", "sim", "analysis", "loadtest"]
+known-first-party = ["ml", "sim", "analysis", "loadtest", "model_server"]

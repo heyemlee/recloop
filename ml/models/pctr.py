@@ -72,7 +72,8 @@ def design(x: np.ndarray, pos: np.ndarray, sponsored: np.ndarray) -> np.ndarray:
     return out
 
 
-def load_samples(directory: Path = SAMPLES) -> pd.DataFrame:
+def load_samples(directory: Path | None = None) -> pd.DataFrame:
+    directory = directory or SAMPLES
     days = sorted(directory.glob("day=*"))
     if not days:
         raise SystemExit(f"no samples under {directory}: run `make samples`")
@@ -238,7 +239,7 @@ def main() -> None:
         f"pctr     {n:,} rows ({int(y.sum()):,} clicks) from {', '.join(info['days'])}; C {best}; held-out "
         f"AUC {held_out['auc']:.3f} (position only {held_out['auc_position_only']:.3f}), log loss "
         f"{held_out['logloss']:.4f} vs constant {held_out['logloss_constant']:.4f}; predicted CTR "
-        f"{held_out['predicted_ctr']:.4f} vs observed {held_out['observed_ctr']:.4f} -> {OUT.relative_to(paths.ROOT)}"
+        f"{held_out['predicted_ctr']:.4f} vs observed {held_out['observed_ctr']:.4f} -> {OUT}"
     )
 
 
