@@ -53,7 +53,7 @@ catalogs of up to 1M items, and studies incremental index updates against full r
 search is enough until it needs about 1 ms of CPU per query (about 250K items); at 1M items
 IVF-Flat reaches recall@100 0.995 at a P99 of 152 µs ([results](docs/results/ann.md)).
 
-M7, done ahead of M4–M6: MiniOneRec, a generative recommender (Qwen2.5-1.5B fine-tuned to
+M7, done ahead of M4 and M5: MiniOneRec, a generative recommender (Qwen2.5-1.5B fine-tuned to
 emit an item's semantic ID, decoded with beam search constrained to the catalog), was re-run
 with its published Office checkpoint on this Mac's GPU. Its result reproduces: its own calc.py
 gives HR@10 0.1570 and NDCG@10 0.1237 against the paper's 0.1634 and 0.1242, both inside our
@@ -62,8 +62,20 @@ gives HR@10 0.1570 and NDCG@10 0.1237 against the paper's 0.1634 and 0.1242, bot
 50-beam request takes 3.1 s on the GPU against 0.15 ms for SASRec on one CPU thread
 ([results](docs/results/minionerec.md)).
 
-Next up: a LightGBM ranker with a gradual release and A/B tests (M4), the shopping assistant
-(M6) and a local Kubernetes deployment (M5).
+M6, the shopping assistant, is done except for its runs with Claude. On the store's chat page
+a shopper asks in plain English ("Ink cartridges for my Canon PIXMA MG3620 under $25"); the
+language model only turns the request into constraints and writes one sentence per item. Code
+checks every constraint (price, stock, category, brand, genuine parts, the last purchase) on
+the catalog rows and confirms printer models from quoted text, the reply is personalized
+through the recommendation API, and it carries at most one sponsored item from the same
+auction, labelled by the rendering code. On 150 generated requests, a rule-based parser in
+front of the same pipeline meets the hard constraints for 88.8 % of the items it shows and the
+gold constraints reach 100 %, so the misses are parsing errors; a reply takes 15 ms (P50)
+without a model. The runs with Claude (Opus 5.5 by default, against Sonnet 5.5 and Haiku 5.5)
+wait for an API key ([results](docs/results/agent.md)).
+
+Next up: a LightGBM ranker with a gradual release and A/B tests (M4) and a local Kubernetes
+deployment (M5).
 
 ## Run
 
@@ -75,6 +87,7 @@ make setup        # the stack (PostgreSQL, Redis, Redpanda, consumers, monitorin
 make serve-model  # gRPC model server   :18081
 make serve-api    # Go API              :18080
 make serve-web    # web store           http://localhost:13000
+make serve-agent  # shopping assistant  :18083 (the store's /chat page)
 make test         # Python and Go tests; make e2e runs the browser check
 make drill        # duplicates + consumer crashes under simulated traffic, then a consistency check
 make load         # latency experiments on CPU-limited containers -> docs/results/latency.md
