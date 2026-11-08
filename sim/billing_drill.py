@@ -187,7 +187,10 @@ def repairs_during(since: float) -> dict:
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--minutes", type=float, default=30)
-    p.add_argument("--concurrency", type=int, default=12)
+    # 8 sessions at a time, ~40 page views/s: 30 minutes of result pages (5 KB each, kept 10
+    # minutes) and dedup markers (one per event, 7 days) stay well under Redis's 384 MB, so
+    # nothing is evicted (at 12, ~64/s, the dev Redis filled up and evicted keys).
+    p.add_argument("--concurrency", type=int, default=8)
     p.add_argument("--think-ms", default="50,300")
     p.add_argument("--faults", default=FAULTS)
     p.add_argument("--pg-latency-ms", type=int, default=200)

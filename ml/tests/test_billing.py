@@ -198,8 +198,9 @@ def test_report_renders_both_runs_deterministically():
         in text
     )
     assert (
-        "0 clicks 3.28 % (100 % of the budgets spent), 5 clicks 0.00 % (100 % of the budgets spent); "
-        "with pacing: 0 clicks 1.64 % (100 % of the budgets spent)"
+        "0 clicks 3.28 % (the first campaign spent 100 % of its budget), 5 clicks 0.00 % (the first "
+        "campaign spent 100 % of its budget); with pacing: 0 clicks 1.64 % (the first campaign spent "
+        "100 % of its budget)"
     ) in text
     assert "| 60.0 | kill -9 billing |" in text
     assert (
@@ -208,9 +209,10 @@ def test_report_renders_both_runs_deterministically():
     )
     assert "2 went over it (at most 21)" in text
     assert "added 51 ¢" in text
-    assert "| 0 | on | 1.64 % |" in text
+    assert "| 0 | on | 1.64 % | $0.41 | 1 | 100.0 % | 1 / 1 | 100 % | 50 % | 50 % | 60 |" in text
+    assert "margin 0: $0.82 not billed, 1 clicks billed 0" in text
     failed = drill_doc()
     failed["ok"] = False
     failed["checks"][0] = {**failed["checks"][0], "actual": 2, "ok": False}
-    assert "**1 check(s) failed**" in billing_report.render(failed, None)
+    assert "**1 ledger check(s) failed**" in billing_report.render(failed, None)
     assert "Not run yet: `make overdelivery`." in billing_report.render(failed, None)

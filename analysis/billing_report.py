@@ -64,8 +64,8 @@ def drill_summary(d: dict) -> list[str]:
     failed = [c["check"] for c in d["checks"] if not c["ok"]]
     verdict = (
         "**The ledger equals the simulator's truth charge by charge**"
-        if d["ok"]
-        else f"**{len(failed)} check(s) failed**: " + "; ".join(failed)
+        if not failed
+        else f"**{len(failed)} ledger check(s) failed**: " + "; ".join(failed)
     )
     by = {c["check"]: c for c in d["checks"]}
     over = by["amounts: charges above budget"]
@@ -91,7 +91,9 @@ def drill_summary(d: dict) -> list[str]:
         f"click events ({d['forged_click_events']} with a forged token) became "
         f"{d['charges']:,} charges. {verdict}: {d['charges_expected']:,} expected, "
         f"{d['charges']:,} in the ledger. **{over['actual']} campaign-days with charges above "
-        f"budget**; {agreement}.",
+        f"budget**; {agreement}. The event-pipeline checks of the same run "
+        f"{'passed' if d['pipeline']['ok'] else '**failed**'}; Redis evicted "
+        f"{d.get('evicted_keys', '?')} keys during it.",
     ]
 
 
@@ -237,10 +239,12 @@ def overdelivery_summary(o: dict) -> list[str]:
     by = {(r["margin"], r["pacing"]): r["summary"] for r in o["results"]}
     margins = sorted({r["margin"] for r in o["results"]})
 
+    lead = {(r["margin"], r["pacing"]): r["campaigns"][0] for r in o["results"]}
+
     def parts(paced: bool) -> str:
         return ", ".join(
-            f"{m} clicks {pct(by[(m, paced)]['overdelivery'], 2)} ({pct(by[(m, paced)]['spent'], 0)} "
-            "of the budgets spent)"
+            f"{m} clicks {pct(by[(m, paced)]['overdelivery'], 2)} (the first campaign spent "
+            f"{pct(lead[(m, paced)]['billed'] / lead[(m, paced)]['budget'], 0)} of its budget)"
             for m in margins
             if (m, paced) in by
         )
@@ -275,28 +279,46 @@ def overdelivery_section(o: dict) -> list[str]:
         + " keys during the six runs.",
         "",
         "- *overdelivery*: the auction price of clicks not billed (the budget was spent when they "
-        "came in) / the budgets;",
-        "- *spent*: billed / the budgets;",
-        "- *ran out at*: when the last billed click of a campaign that spent its whole budget "
-        "came in, as a share of the window (median over those campaigns);",
-        "- *stopped at*: when a campaign's last sponsored slot was served (median over the four).",
+        "came in) / the four budgets; *billed 0*: those clicks;",
+        "- *spent*: billed / the four budgets;",
+        "- *first campaign*: the highest bid, served the most, the one that meets its budget: "
+        "the share of its budget it spent, when its last sponsored slot was served (as a share "
+        "of the window) and, if it spent the whole budget, when the last billed click came in.",
         "",
     ]
     rows = []
     for r in o["results"]:
         s = r["summary"]
         m, pace = config_name(r)
+        lead = r["campaigns"][0]
         rows.append([
-            m, pace, pct(s["overdelivery"], 2), dollars(s["unbilled"]), pct(s["spent"]),
-            f"{s['exhausted']} / {s['campaigns']}", share(s["ran_out_median"]),
-            share(s["stopped_median"]), s["clicks"], s["zero_billed"],
+            m, pace, pct(s["overdelivery"], 2), dollars(s["unbilled"]), s["zero_billed"],
+            pct(s["spent"]), f"{s['exhausted']} / {s['campaigns']}",
+            pct(lead["billed"] / lead["budget"], 0), share(lead["stopped_at"]),
+            share(lead["ran_out_at"]), s["clicks"],
         ])  # fmt: skip
     out += table(
-        ["margin (clicks)", "pacing", "overdelivery", "not billed", "spent", "budgets spent",
-         "ran out at", "stopped at", "clicks", "billed 0"],
+        ["margin (clicks)", "pacing", "overdelivery", "not billed", "billed 0", "spent",
+         "budgets spent", "first campaign: spent", "stopped at", "ran out at", "clicks"],
         rows,
-        "rlrrrrrrrr",
+        "rlrrrrrrrrr",
     )  # fmt: skip
+    single = [r for r in o["results"] if r["summary"]["exhausted"]]
+    if single:
+        out += [
+            "",
+            "A configuration's overdelivery comes from the moments a campaign spent its whole "
+            "budget, at most "
+            + str(max(r["summary"]["exhausted"] for r in single))
+            + " per configuration here: one event each, not an average ("
+            + "; ".join(
+                f"margin {r['margin']}{' paced' if r['pacing'] else ''}: "
+                f"{dollars(r['summary']['unbilled'])} not billed, {r['summary']['zero_billed']} "
+                "clicks billed 0"
+                for r in single
+            )
+            + ").",
+        ]
     out += [
         "",
         "How to read it: a click is absorbed when its slot was served while the campaign still "
