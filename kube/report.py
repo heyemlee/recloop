@@ -23,7 +23,11 @@ from analysis.billing_report import dollars, table
 ROOT = Path(__file__).resolve().parent.parent
 ART = ROOT / "artifacts" / "deploy"
 DEFAULT_OUT = ROOT / "docs" / "results" / "deploy.md"
-BUSY_LOAD = 2.0  # as ml/eval/machine.py: a 1-minute load above this is not a quiet machine
+# A 1-minute load above this at the start of a run is not a quiet machine. Not ml/eval's 2.0:
+# the cluster under test and k6 run on this machine, and the idle cluster alone keeps the load
+# at 2-3.5 (2026-11-08); 5 is the measurement window's own criterion. Other projects'
+# containers are checked separately.
+BUSY_LOAD = 5.0
 SETTLE_S = 30  # after the last new api pod is ready: its connections spread (CONN_CLOSE)
 DRAINED = 1000  # a backlog below this many records counts as drained
 
