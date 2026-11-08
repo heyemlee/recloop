@@ -362,8 +362,8 @@ def _ranking_section(out: dict) -> list[str]:
                 ],
                 [
                     "Runtime",
-                    f"LightGBM {tun['lightgbm']} built without OpenMP, one thread, fixed seed; "
-                    f"{tun['seconds']:.0f} s for the whole grid and the refit",
+                    f"LightGBM {tun['lightgbm']} built without OpenMP, one thread, fixed seed: "
+                    "training again gives the same model, byte for byte",
                 ],
             ],
         ),

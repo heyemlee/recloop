@@ -115,7 +115,7 @@ The api orders the home feed by weighted reciprocal rank fusion (RRF) of its thr
 | Grid | num_leaves in {7, 15, 31}; min_data_in_leaf in {100, 300}; feature_fraction in {0.7, 1.0}; learning rate 0.05, L2 1.0, lambdarank truncation level 30, early stopping after 100 rounds without a better NDCG@10 |
 | Selection | 4-fold cross-validation over the validation users (a user's samples stay in one fold), by held-out NDCG@10 of every held-out sample (item rule, all items ranked, a target outside the candidates is a miss) |
 | Selected | 15 leaves, at least 100 rows per leaf, feature fraction 0.7; refitted on all training queries with 132 trees (the mean of its folds' best rounds); CV NDCG@10 0.1954, HR@10 0.2541 |
-| Runtime | LightGBM 4.7.0 built without OpenMP, one thread, fixed seed; 432 s for the whole grid and the refit |
+| Runtime | LightGBM 4.7.0 built without OpenMP, one thread, fixed seed: training again gives the same model, byte for byte |
 
 Grid, best first (rounds = each fold's best iteration):
 
