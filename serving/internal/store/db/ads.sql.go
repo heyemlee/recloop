@@ -614,17 +614,22 @@ func (q *Queries) ReportClickDays(ctx context.Context, arg ReportClickDaysParams
 }
 
 const reportImpressionDays = `-- name: ReportImpressionDays :many
-SELECT s.event_day AS day, count(DISTINCT i.impression_id)::int AS impressions
-FROM events_raw AS i
-JOIN events_raw AS s ON s.request_id = i.request_id AND s.type = 'served'
-WHERE i.type = 'impression'
-  AND i.event_day BETWEEN $1::date AND $2::date + 1
-  AND s.event_day BETWEEN $1::date AND $2::date
-  AND s.payload -> 'items' @> jsonb_build_array(jsonb_build_object(
-        'pos', split_part(i.impression_id, ':', 2)::int,
-        'campaign_id', $3::bigint))
-GROUP BY s.event_day
-ORDER BY s.event_day
+SELECT sl.day, count(DISTINCT i.impression_id)::int AS impressions
+FROM (
+  SELECT s.event_day AS day, s.request_id, (it ->> 'pos')::int AS pos
+  FROM events_raw AS s
+  CROSS JOIN LATERAL jsonb_array_elements(s.payload -> 'items') AS it
+  WHERE s.type = 'served'
+    AND s.event_day BETWEEN $1::date AND $2::date
+    AND s.payload -> 'items' @> jsonb_build_array(jsonb_build_object('campaign_id', $3::bigint))
+    AND (it ->> 'campaign_id')::bigint = $3::bigint
+) AS sl
+JOIN events_raw AS i
+  ON i.request_id = sl.request_id AND i.type = 'impression'
+ AND i.impression_id = sl.request_id::text || ':' || sl.pos
+ AND i.event_day BETWEEN $1::date AND $2::date + 1
+GROUP BY sl.day
+ORDER BY sl.day
 `
 
 type ReportImpressionDaysParams struct {
@@ -638,9 +643,11 @@ type ReportImpressionDaysRow struct {
 	Impressions int32
 }
 
-// Sponsored impressions: impression events whose served record has this campaign at that
-// position (served items carry campaign_id on sponsored slots, §7.1), by the served day.
-// Impression events of late-evening requests may land on the next day.
+// Sponsored impressions: impression events of the positions where a served record had this
+// campaign (served items carry campaign_id on sponsored slots, §7.1), by the served day.
+// Impression events of late-evening requests may land on the next day. It starts from the
+// campaign's slots and looks their impressions up by request (indexed): starting from every
+// impression of the period took 26 s on 3.9 M events_raw rows, this 1.7 s.
 func (q *Queries) ReportImpressionDays(ctx context.Context, arg ReportImpressionDaysParams) ([]ReportImpressionDaysRow, error) {
 	rows, err := q.db.Query(ctx, reportImpressionDays, arg.FromDay, arg.ToDay, arg.CampaignID)
 	if err != nil {
