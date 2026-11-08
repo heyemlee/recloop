@@ -46,7 +46,10 @@ binder, the next feed includes items recalled via that binder (outlined in the G
   8 × `kill -9` of billing, Redpanda restarts and a slowed-down PostgreSQL, the ledger equals
   the simulator's truth charge by charge. With a safety margin of 5 clicks no click went
   unbilled in the over-delivery study, at the cost of about 10 % of the top campaign's budget
-  left unspent ([results](docs/results/billing.md)).
+  left unspent ([results](docs/results/billing.md)). Redis keeps user state, dedup markers and
+  the ad counters in an instance that never evicts: when it is full it refuses writes, Grafana
+  raises an alert and the feed shows no ads; result pages and cached candidates live in a
+  second instance that evicts the least recently used.
 
 Ahead of M4, an ANN benchmark compares exact search with IVF, HNSW and IVF-PQ on synthetic
 catalogs of up to 1M items, and studies incremental index updates against full rebuilds. Exact
@@ -92,7 +95,6 @@ make test         # Python and Go tests; make e2e runs the browser check
 make drill        # duplicates + consumer crashes under simulated traffic, then a consistency check
 make load         # latency experiments on CPU-limited containers -> docs/results/latency.md
 make billing      # ad over-delivery study + billing chaos drill -> docs/results/billing.md
-                  # (run the api as CANDIDATE_CACHE=off make serve-api)
 ```
 
 Grafana (dashboard "RecLoop") is at http://localhost:13001, Jaeger at http://localhost:16686,
