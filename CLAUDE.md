@@ -469,7 +469,8 @@ interpreter at exit: `ORT_DISABLE_TELEMETRY=1` (Makefile, model-server image, `m
   server's default follows, the canary ends; rollback = back to the version the active one
   replaced, within 30 minutes (both sides keep it loaded that long); an aborted canary is
   retired without having been active. Every api instance reconciles every 2 s (loads the
-  active, canary and recently retired versions, unloads the rest); at startup the api takes
+  active, canary and recently retired versions, unloads the rest; under the release lock, so a
+  pass never undoes a step it raced with); at startup the api takes
   model_versions' active version (the startup bundle only when there is none). Admin api:
   `/internal/admin/models` (GET, POST {version}), `.../models/{version}/validate|canary|activate`,
   `/internal/admin/canary/abort`, `/internal/admin/rollback`, `/internal/admin/experiments[/{id}
@@ -498,10 +499,14 @@ interpreter at exit: `ORT_DISABLE_TELEMETRY=1` (Makefile, model-server image, `m
   `make samples` and `make train-pctr`, `make bundle` (the release), `make bundle
   BUNDLE_FLAGS="--sasrec artifacts/models/sasrec/trials/8.pt"` (a bad release: the BCE trial),
   `make release-drill NEW=... BAD=...`, `make ab`, `make samples`, `make ab-report`. The runs
-  reseed Redis between phases (`make ab` does it itself). After simulated traffic, `make samples`
-  gets `SAMPLES_FLAGS="--complete-through <the traffic's end + 30 min, UTC>"`: the simulator has
-  stopped, so nothing can arrive later and this reads what a run 30 minutes later would (the
-  default, the newest event, leaves the last 30 minutes not final).
+  reseed Redis between phases (`make ab` does it itself). The drills' traffic (`sim.traffic`)
+  pauses 50-300 ms between a session's page views (16 sessions: ~85 page views/s); unpaced, the
+  simulator is a load test that fills the 1 GB state Redis within 15 minutes. The release drill's
+  phases run from step to step by the steps' own times; `python -m sim.release_drill --analyse`
+  re-derives its tables from `artifacts/release/` (then `make release-report`). After simulated
+  traffic, `make samples` gets `SAMPLES_FLAGS="--complete-through <the traffic's end + 30 min,
+  UTC>"`: the simulator has stopped, so nothing can arrive later and this reads what a run 30
+  minutes later would (the default, the newest event, leaves the last 30 minutes not final).
 
 ## Shopping assistant (M6)
 
