@@ -534,6 +534,9 @@ def environment() -> dict:
     k6v = subprocess.run([str(K6_BIN), "version"], capture_output=True, text=True).stdout.strip()
     current = (BUNDLES / "current").resolve()
     files = set(json.loads((current / "manifest.json").read_text())["files"])
+    api = k8s.kubectl_json("get", "deployment", "api")["spec"]["template"]["spec"]["containers"][0]
+    api_env = {e["name"]: e["value"] for e in api.get("env", []) if "value" in e}
+    exps = k8s.http_json("GET", f"{k8s.API_URL}/internal/admin/experiments")["experiments"]
     return {
         "machine": m.info(),
         "node": k8s.node_info(),
@@ -546,6 +549,13 @@ def environment() -> dict:
             "version": current.name,
             "ranker": "ranker.onnx" in files,
             "pctr": "pctr.json" in files,
+            # How the api uses it: RANK=off skips Rank; the feed's order is the rank-layer
+            # experiment's ranker, else RANKER (the api's defaults: on, rrf).
+            "rank": api_env.get("RANK", "on"),
+            "default_ranker": api_env.get("RANKER", "rrf"),
+            "rank_experiments": sorted(
+                e["exp_id"] for e in exps if e["layer"] == "rank" and e["status"] == "running"
+            ),
         },
         "images": images,
         "containers": k8s.containers_resources(),
@@ -581,10 +591,16 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--repeats", type=int, default=3)
     p.add_argument("--out", default=str(OUT / "results.json"))
     p.add_argument("--resume", metavar="REASON", help="keep the finished runs of --out")
-    p.add_argument("--rollout-rate", type=int, default=200)
+    # 150/s keeps the one api pod at ~30 % of its half core (~1 ms of CPU per page view with
+    # Rank): below the HPA's target and CFS throttling, so a rollout's numbers are the model
+    # server's.
+    p.add_argument("--rollout-rate", type=int, default=150)
     p.add_argument("--rollout-seconds", type=int, default=150)
     p.add_argument("--hpa-base", type=int, default=100)
-    p.add_argument("--hpa-step", type=int, default=800)
+    # 650/s (~0.7 ms of api CPU per page view with Rank): past one pod's knee (its half core
+    # throttled, P99 ~50 ms), well within two or three pods (cluster runs of 2026-11-08: one
+    # pod took 500/s cleanly; at 800/s the first pod stayed saturated after the scale-out).
+    p.add_argument("--hpa-step", type=int, default=650)
     p.add_argument("--hpa-hold", type=int, default=240)
     p.add_argument("--conn-close", type=float, default=0.02)
     p.add_argument("--keda-rate", type=int, default=300)

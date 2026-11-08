@@ -558,7 +558,8 @@ interpreter at exit: `ORT_DISABLE_TELEMETRY=1` (Makefile, model-server image, `m
 - The chart (`deploy/helm/recloop`): every pod `enableServiceLinks: false` (a `model-server`
   Service would inject `MODEL_SERVER_PORT=tcp://...`, which the model server reads as its port);
   api readiness `/healthz`, not `/readyz` (a dependency outage must degrade, not empty the
-  Service), startup probes on the api and the consumers; api CPU request = limit = 500m, HPA 1-4 pods at 60 %;
+  Service), startup probes on the api and the consumers; api CPU request = limit = 500m, HPA
+  1-4 pods at 50 % (kube-proxy places connections: the oldest pod runs hotter than the average);
   model-server readiness = gRPC health (SERVING after the bundle checks), `maxSurge 1`,
   `maxUnavailable 0`, `minReadySeconds 5`, preStop sleep 5 s; aggregator and billing are
   StatefulSets (pod name = static `group.instance.id`), KEDA Kafka scaler 1-3 pods, 20,000

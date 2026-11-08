@@ -64,7 +64,12 @@ api:
     enabled: true
     minReplicas: 1
     maxReplicas: 4
-    cpuUtilization: 60
+    # 50 %: the HPA averages over the pods, but kube-proxy places connections, not requests,
+    # so the oldest pod keeps more of the load than the average shows (2026-11-08, 800 page
+    # views/s: the first pod at its full half core, CFS-throttled, its rank and SASRec
+    # breakers open, while the new ones ran at 0.1-0.3 core). The lower target leaves room for
+    # that skew.
+    cpuUtilization: 50
     # Up: at once, doubling (or +2 pods) every 15 s. Down: after 60 s below target, one pod
     # per 30 s (the default waits 300 s; shorter so repeated runs start from one pod).
     scaleDownStabilizationSeconds: 60

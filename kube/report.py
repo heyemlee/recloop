@@ -176,8 +176,13 @@ def rollout_summary(runs: list[dict]) -> list[str]:
     deg = sum(s["during"]["degraded"] for s in gated)
     dn = sum(s["during"]["requests"] for s in gated)
     rate = runs[0]["rate"]
+    head = (
+        "The model server's rolling update does not interrupt the service."
+        if err == 0
+        else f"The model server's rolling update failed {err:,} requests."
+    )
     out = [
-        f"- **The model server's rolling update does not interrupt the service.** In "
+        f"- **{head}** In "
         f"{len(gated)} rolling updates of both model-server pods under {rate} page views/s "
         f"(open loop), {err} of {n:,} requests failed and {deg} of the {dn:,} answered during "
         f"the rollouts were degraded ({pct(deg, dn)}). A new pod got traffic only once its "
@@ -363,17 +368,37 @@ def hpa_stats(r: dict) -> dict:
     }
 
 
-def hpa_summary(runs: list[dict]) -> list[str]:
+def api_cpu(meta: dict | None) -> tuple[str | None, str | None]:
+    """The api container's CPU request and limit as the cluster had them (e.g. "500m")."""
+    for c in ((meta or {}).get("environment") or {}).get("containers", []):
+        if c.get("workload") == "api" and c.get("container") == "api" and not c.get("init"):
+            return c["requests"].get("cpu"), c["limits"].get("cpu")
+    return None, None
+
+
+def cores(q: str | None) -> str:
+    """A Kubernetes CPU quantity in cores: "500m" -> "0.5"."""
+    if not q:
+        return "?"
+    x = float(q[:-1]) / 1000 if q.endswith("m") else float(q)
+    return f"{x:g}"
+
+
+def hpa_summary(runs: list[dict], meta: dict | None = None) -> list[str]:
     rs = [r for r in runs if r["experiment"] == "hpa"]
     if not rs:
         return []
     ss = [hpa_stats(r) for r in rs]
     r0 = rs[0]
+    req, _ = api_cpu(meta)
+    scaled = max((s["max_replicas"] or 0) for s in ss) > 1
+    head = "The api scales out under load." if scaled else "The api did not scale out."
+    request = f"{cores(req)}-core request" if req else "request"
     return [
-        f"- **The api scales out under load.** At a step from {r0['base']} to {r0['step']} page "
+        f"- **{head}** At a step from {r0['base']} to {r0['step']} page "
         f"views/s ({len(rs)} runs), the HorizontalPodAutoscaler (CPU, target "
-        f"{r0['hpa']['metrics'][0]['resource']['target']['averageUtilization']} % of the 0.5-core "
-        f"request) asked for more pods {rng([s['decide_after'] for s in ss], secs)} after the step "
+        f"{r0['hpa']['metrics'][0]['resource']['target']['averageUtilization']} % of the "
+        f"{request}) asked for more pods {rng([s['decide_after'] for s in ss], secs)} after the step "
         f"and the first new pod was ready {rng([s['first_ready_after'] for s in ss], secs)} after "
         f"it; the api reached {rng([s['max_replicas'] for s in ss], str)} pods. P99 per 5 s window "
         f"(median of the windows): {rng([s['one_pod']['p99_med'] for s in ss], ms)} on one pod, "
@@ -382,17 +407,24 @@ def hpa_summary(runs: list[dict]) -> list[str]:
     ]
 
 
-def hpa_section(runs: list[dict]) -> list[str]:
+def hpa_section(runs: list[dict], meta: dict | None = None) -> list[str]:
     rs = [r for r in runs if r["experiment"] == "hpa"]
     out = ["## 2. The api's HorizontalPodAutoscaler", ""]
     if not rs:
         return out + ["Not run yet: `make deploy-hpa`.", ""]
     r0 = rs[0]
     h = r0["hpa"]
+    req, lim = api_cpu(meta)
+    share = (
+        f"The api pod has exactly {cores(req)} core (request = limit = {req}, so utilisation "
+        "means the share of it)"
+        if req == lim
+        else f"The api pod's CPU request is {req}, its limit {lim} (utilisation is relative to "
+        "the request)"
+    )
     out += [
         f"k6 open loop: {r0['base']} page views/s for 60 s, {r0['step']}/s for {r0['hold']} s, "
-        f"then {r0['base']}/s for 120 s. The api pod has exactly half a core (request = limit "
-        f"= 500m, so utilisation means the share of that half core); HPA between "
+        f"then {r0['base']}/s for 120 s. {share}; HPA between "
         f"{h['minReplicas']} and {h['maxReplicas']} pods at "
         f"{h['metrics'][0]['resource']['target']['averageUtilization']} % CPU, metrics-server "
         "every 15 s, scale-up without stabilisation. kube-proxy places connections, not "
@@ -506,9 +538,15 @@ def keda_summary(runs: list[dict]) -> list[str]:
         return []
     out = []
     b = [keda_stats(r) for r in rs if r["variant"] == "billing"]
+    pg = next((r.get("pg_latency_ms") for r in rs if r["variant"] == "billing"), None)
     if b:
+        head = (
+            "KEDA scales the consumers on their lag."
+            if max((s["max_replicas"] or 0) for s in b) > 1
+            else "KEDA did not scale billing."
+        )
         out.append(
-            f"- **KEDA scales the consumers on their lag.** Billing behind a database 200 ms "
+            f"- **{head}** Billing behind a database {pg or '?'} ms "
             f"slower per reply: lag up to {rng([s['peak_lag'] for s in b], lambda x: f'{x:,.0f}')} "
             f"records, scaled to {rng([s['max_replicas'] for s in b], str)} pods "
             f"{rng([s['scaled_up_after'] for s in b], secs)} after the slowdown began, lag below "
@@ -595,16 +633,22 @@ def drill_summary(d: dict) -> list[str]:
     failed = [c["check"] for c in d["checks"] if not c["ok"]]
     pfailed = [c["check"] for c in d["pipeline"]["checks"] if not c["ok"]]
     deletes = [c for c in d["chaos"] if c["action"].startswith("deleted pod billing")]
+    slow = sum(c["action"].startswith("postgres +") for c in d["chaos"])
+    head = (
+        "Deleting billing's pods mid-run leaves the ledger right."
+        if not failed and not pfailed
+        else "The billing drill on the cluster failed checks."
+    )
     verdict = (
         "**the ledger equals the simulator's truth charge by charge**"
         if not failed
         else f"**{len(failed)} ledger check(s) failed**: " + "; ".join(failed)
     )
     return [
-        f"- **Deleting billing's pods mid-run leaves the ledger right.** Billing drill on the "
+        f"- **{head}** Billing drill on the "
         f"cluster ({d['minutes']:.0f} min, {len(deletes)} billing pods deleted, Redpanda's pod "
         f"deleted {sum(c['action'] == 'deleted pod redpanda-0' for c in d['chaos'])} times, "
-        f"PostgreSQL {d['pg_latency_ms']} ms slower for billing twice): {verdict} "
+        f"PostgreSQL {d['pg_latency_ms']} ms slower for billing {slow} times): {verdict} "
         f"({d['charges']:,} charges, {d['charges_expected']:,} expected; "
         f"{len(d['checks']) - len(failed)}/{len(d['checks'])} ledger checks and "
         f"{len(d['pipeline']['checks']) - len(pfailed)}/{len(d['pipeline']['checks'])} "
@@ -728,9 +772,17 @@ def setup_section(meta: dict | None, runs: list[dict]) -> list[str]:
 def bundle_line(b: dict | None) -> str:
     if not b:
         return "- Bundle: not recorded."
-    parts = ["LightGBM ranking on every home request" if b.get("ranker") else "RRF order (no ranker)",
-             "the model's pCTR for ads" if b.get("pctr") else "a fixed pCTR"]  # fmt: skip
-    return f"- Bundle `{b['version']}` (the api's `current`): {', '.join(parts)}."
+    if not b.get("ranker") or b.get("rank") == "off":
+        rank = "no Rank call (RRF order)"
+    else:
+        order = (
+            f"the order of the rank experiments {', '.join(b['rank_experiments'])}"
+            if b.get("rank_experiments")
+            else f"`{b.get('default_ranker', 'rrf')}` order (no rank-layer experiment)"
+        )
+        rank = f"the model server's Rank (features, LightGBM scores) on every home request, {order}"
+    pctr = "the model's pCTR for ads" if b.get("pctr") else "a fixed pCTR"
+    return f"- Bundle `{b['version']}` (the api's `current`): {rank}; {pctr}."
 
 
 def preliminary(data: dict | None, drill: dict | None) -> list[str]:
@@ -769,16 +821,17 @@ def render(data: dict | None, drill: dict | None) -> str:
     ]
     out += preliminary(data, drill)
     out += ["## Summary", ""]
-    summary = rollout_summary(runs) + hpa_summary(runs) + keda_summary(runs)
+    meta = (data or {}).get("meta")
+    summary = rollout_summary(runs) + hpa_summary(runs, meta) + keda_summary(runs)
     if drill:
         summary += drill_summary(drill)
     out += summary or [
         "Nothing has run on the cluster yet (`make kind-up deploy`, then the `deploy-*` targets)."
     ]
     out.append("")
-    out += setup_section((data or {}).get("meta"), runs)
+    out += setup_section(meta, runs)
     out += rollout_section(runs)
-    out += hpa_section(runs)
+    out += hpa_section(runs, meta)
     out += keda_section(runs)
     out += drill_section(drill)
     out += [

@@ -341,6 +341,7 @@ def keda_run(variant, t0=1_800_002_000.0):
     samples = [{"t": t, "ready": {comp: (1 if cap or t < t_on + 20 or t > t_off + 150 else 3)}, "pods": {},
                 "desired": {}} for t in range(int(t0), int(t0) + 400)]  # fmt: skip
     return {"experiment": "keda", "variant": variant, "rep": 1, "rate": 300, "started": t0,
+            "pg_latency_ms": 200 if comp == "billing" else None,
             "ended": t0 + 400, "actions": actions, "k6": k6(t0, windows(t0, 60)),
             "watch": {"pods": [], "samples": samples, "lag": lag, "poll_errors": 0},
             "server": server(), "machine": [{"load1": 1.0, "other_containers": []}]}  # fmt: skip
@@ -386,12 +387,52 @@ def test_deploy_report_renders_deterministically():
     assert "the api reached 3 pods" in text
     assert "80.0 ms on one pod, 6.0 ms once scaled out" in text
     # keda
+    assert "Billing behind a database 200 ms slower per reply: lag up to 40,000 records" in text
     assert "lag up to 40,000 records, scaled to 3 pods 20 s after the slowdown began" in text
     assert "drained in 45 s with KEDA (3 pods), 45 s capped at one pod" in text
     # drill
     assert "**the ledger equals the simulator's truth charge by charge**" in text
     assert "| 60.0 | deleted pod billing-0 (graceful, SIGTERM) |" in text
     assert "| api | api | 500m | 256Mi | 500m | 512Mi |" in text
+    # The api's CPU comes from the recorded pod spec, not from the report.
+    assert "(CPU, target 60 % of the 0.5-core request)" in text
+    assert "The api pod has exactly 0.5 core (request = limit = 500m" in text
+
+
+def test_deploy_report_headlines_follow_the_data():
+    doc = results_doc()
+    doc["meta"]["environment"]["bundle"] = {
+        "version": "2026-11-08-sasrec64-x", "ranker": True, "pctr": True, "rank": "on",
+        "default_ranker": "rrf", "rank_experiments": [],
+    }  # fmt: skip
+    text = report.render(doc, kube_drill_doc())
+    assert "**The model server's rolling update does not interrupt the service.**" in text
+    assert "**The api scales out under load.**" in text
+    assert "**KEDA scales the consumers on their lag.**" in text
+    assert "**Deleting billing's pods mid-run leaves the ledger right.**" in text
+    assert (
+        "the model server's Rank (features, LightGBM scores) on every home request, `rrf` order "
+        "(no rank-layer experiment); the model's pCTR for ads." in text
+    )
+    # Failed requests in a rollout, an api that stayed at one pod, billing that never scaled,
+    # a failed ledger check: the headlines say so.
+    gated = doc["runs"][0]
+    gated["k6"]["windows"][3]["errors"] = 5
+    gated["k6"]["errors"] = 5
+    hpa = next(r for r in doc["runs"] if r["experiment"] == "hpa")
+    for x in hpa["watch"]["samples"]:
+        x["ready"]["api"] = 1
+    hpa["watch"]["pods"] = hpa["watch"]["pods"][:1]
+    billing = next(r for r in doc["runs"] if r["variant"] == "billing")
+    for x in billing["watch"]["samples"]:
+        x["ready"]["billing"] = 1
+    drill = kube_drill_doc()
+    drill["checks"][0]["ok"] = False
+    text = report.render(doc, drill)
+    assert "**The model server's rolling update failed 5 requests.**" in text
+    assert "**The api did not scale out.**" in text
+    assert "**KEDA did not scale billing.**" in text
+    assert "**The billing drill on the cluster failed checks.**" in text
 
 
 def test_deploy_report_without_runs_is_preliminary():
