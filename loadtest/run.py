@@ -19,8 +19,14 @@ Every run starts from the same state: the consumers have caught up, Redis is res
 run's rate, the fault is switched on, and k6 measures. Each configuration runs `repeats` times
 (the report takes the median); repetitions are interleaved so drift spreads over all of them.
 
+The runner refuses to start while campaigns are active (--allow-active-campaigns overrides):
+their sponsored slots would add the ads stage to the home requests, and the sessions' clicks on
+them (recs.js sends the slots' ad_tokens) would be billed for real. The ids it saw go into
+results.json (meta.active_campaigns, and each restart's).
+
 Usage: python -m loadtest.run [--plan full|smoke] [--only ladder,cache,faults,onset]
                               [--resume REASON [--redo KEY#REP ...]] [--note TEXT ...]
+                              [--allow-active-campaigns]
        (--resume keeps the finished runs of --out and runs the rest; --redo runs one again)
        python -m loadtest.report      (renders docs/results/latency.md from results.json)
 """
@@ -187,6 +193,13 @@ def http(method: str, url: str, body: dict | None = None, timeout: float = 5.0):
     with urllib.request.urlopen(req, timeout=timeout) as r:
         raw = r.read()
     return json.loads(raw) if raw else None
+
+
+def active_campaigns() -> list[int]:
+    """Ids of the active campaigns (the bench api's advertiser api)."""
+    return sorted(
+        c["campaign_id"] for c in http("GET", API + "/v1/campaigns") if c["status"] == "active"
+    )
 
 
 def wait_ready(timeout: float = 60) -> None:
@@ -668,6 +681,12 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="only add the --note sentences to --out and exit (no runs)",
     )
+    p.add_argument(
+        "--allow-active-campaigns",
+        action="store_true",
+        help="run although campaigns are active: their sponsored slots (the ads stage) and real "
+        "charges for the sessions' clicks are then part of the runs",
+    )
     args = p.parse_args(argv)
     args.out = args.out.resolve()
     if args.annotate:
@@ -687,6 +706,14 @@ def main(argv: list[str] | None = None) -> None:
         if not path.exists():
             raise SystemExit(f"{path} is missing: run `{what}`")
     wait_ready()
+    campaigns = active_campaigns()
+    if campaigns and not args.allow_active_campaigns:
+        raise SystemExit(
+            f"{len(campaigns)} active campaign(s) ({', '.join(map(str, campaigns))}): their sponsored "
+            "slots would add the ads stage to every home request and the sessions' clicks would be "
+            "billed. End or pause them (advertiser console, DELETE /v1/campaigns/{id}), or pass "
+            "--allow-active-campaigns"
+        )
     waited = wait_idle()
     load_now = [round(x, 2) for x in os.getloadavg()]
     print(f"latency  waited {waited}s for a quiet machine: load {load_now}", flush=True)
@@ -700,12 +727,14 @@ def main(argv: list[str] | None = None) -> None:
         "environment": env,
         "started": round(time.time()),
         "idle_wait_s": waited,
+        "active_campaigns": campaigns,
     }
     results, done = [], set()
     if args.redo and not args.resume:
         raise SystemExit("--redo needs --resume")
     if args.resume:
         meta, results, done = resume(args.out, meta, runs, args.resume, waited, args.redo)
+        meta["resumed"][-1]["active_campaigns"] = campaigns
     meta["notes"] = meta.get("notes", []) + args.note
     print(
         f"latency  {len(runs) - len(done)} of {len(runs)} runs to go ({args.plan}: "

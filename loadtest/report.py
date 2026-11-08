@@ -179,6 +179,7 @@ def starts(meta: dict) -> list[dict]:
         "load_avg_start": env["load_avg_start"],
         "vm_cpus": env["docker"]["vm_cpus"],
         "other_containers_running": env["docker"]["other_containers_running"],
+        "active_campaigns": meta.get("active_campaigns", []),
     }
     return [first, *meta.get("resumed", [])]
 
@@ -196,6 +197,11 @@ def banner(meta: dict) -> list[str]:
         if s["other_containers_running"]:
             issues.append(
                 f"{s['other_containers_running']} containers of other projects were running in the same VM"
+            )
+        if s.get("active_campaigns"):  # recorded since 2026-11-08
+            issues.append(
+                f"{len(s['active_campaigns'])} campaigns were active (sponsored slots and the ads "
+                "stage in the home requests, the sessions' clicks billed)"
             )
     issues = list(dict.fromkeys(issues))
     if meta["plan"] != "full":
