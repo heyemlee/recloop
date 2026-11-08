@@ -141,15 +141,22 @@ exists() { "$KIND" get clusters 2>/dev/null | grep -qx "$CLUSTER"; }
 PRELOAD=(redis:8.10.3-alpine redpandadata/redpanda:v26.2.6 redpandadata/connect:4.115.1
   ghcr.io/shopify/toxiproxy:2.13.0 grafana/grafana:13.2.4 oliver006/redis_exporter:v1.94.0)
 
+# A pulled image is an index of several platforms of which Docker has one: `kind load
+# docker-image` imports with --all-platforms and fails ("content digest ... not found"). Saving
+# the node's platform only and loading that archive works.
 cmd_preload() {
-  local img
+  local img tar plat
+  plat=linux/$(platform | cut -d- -f2)
+  tar=$(mktemp "${TMPDIR:-/tmp}/kind-preload.XXXXXX")
   for img in "${PRELOAD[@]}"; do
     if docker image inspect "$img" >/dev/null 2>&1; then
-      log "kind load $img"
-      "$KIND" load docker-image --name "$CLUSTER" "$img" >/dev/null 2>&1 ||
+      log "kind load $img ($plat)"
+      { docker save --platform "$plat" -o "$tar" "$img" &&
+        "$KIND" load image-archive --name "$CLUSTER" "$tar"; } >/dev/null 2>&1 ||
         echo "  (not loaded; the node pulls it)" >&2
     fi
   done
+  rm -f "$tar"
 }
 
 cmd_up() {

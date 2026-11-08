@@ -36,6 +36,7 @@ spec:
       annotations:
         checksum/config: {{ $c.config | sha256sum }}
     spec:
+      enableServiceLinks: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001

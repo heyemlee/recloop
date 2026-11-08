@@ -32,6 +32,7 @@ spec:
         app.kubernetes.io/name: redis
         app.kubernetes.io/instance: {{ $r.name }}
     spec:
+      enableServiceLinks: false
       # UID 999 / GID 1000: the image's redis user.
       securityContext:
         runAsNonRoot: true

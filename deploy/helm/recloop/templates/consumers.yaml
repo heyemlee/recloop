@@ -37,6 +37,7 @@ spec:
       labels:
         {{- include "recloop.selector" $ctx | nindent 8 }}
     spec:
+      enableServiceLinks: false
       terminationGracePeriodSeconds: 30
       securityContext:
         {{- include "recloop.goPodSecurity" $ | nindent 8 }}
@@ -58,6 +59,12 @@ spec:
           ports:
             - name: metrics
               containerPort: {{ $k.port }}
+          # /healthz is served once PostgreSQL answered (billing retries it for 30 s at start; its
+          # connection goes through pg-proxy): liveness waits for it.
+          startupProbe:
+            httpGet: {path: /healthz, port: metrics}
+            periodSeconds: 2
+            failureThreshold: 60
           readinessProbe:
             httpGet: {path: /healthz, port: metrics}
             periodSeconds: 5

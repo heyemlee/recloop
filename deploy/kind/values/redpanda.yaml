@@ -26,12 +26,13 @@ statefulset:
     spec:
       terminationGracePeriodSeconds: 30
       # Merged by name into the chart's containers (README, "Merging Semantics"): the sidecar
-      # only runs the broker readiness probe now, the configurator is a short init step.
+      # only runs the broker readiness probe now, the configurator is a short init step. The
+      # sidecar (the operator binary) was OOM-killed at 128 Mi while starting.
       containers:
         - name: sidecar
           resources:
-            requests: {cpu: 50m, memory: 64Mi}
-            limits: {cpu: 200m, memory: 128Mi}
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: 200m, memory: 384Mi}
       initContainers:
         - name: redpanda-configurator
           resources:

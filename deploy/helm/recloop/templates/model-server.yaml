@@ -29,6 +29,9 @@ spec:
       labels:
         {{- include "recloop.selector" $ctx | nindent 8 }}
     spec:
+      # No Kubernetes service-link variables (<SERVICE>_PORT=tcp://...): the server would read
+      # MODEL_SERVER_PORT=tcp://<ip>:18081 as its port. Off in every pod of both charts.
+      enableServiceLinks: false
       terminationGracePeriodSeconds: {{ $c.terminationGracePeriodSeconds }}
       securityContext:
         runAsNonRoot: true

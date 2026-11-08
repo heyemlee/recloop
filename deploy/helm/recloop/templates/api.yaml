@@ -25,6 +25,7 @@ spec:
       labels:
         {{- include "recloop.selector" $ctx | nindent 8 }}
     spec:
+      enableServiceLinks: false
       terminationGracePeriodSeconds: 30
       securityContext:
         {{- include "recloop.goPodSecurity" . | nindent 8 }}
@@ -47,6 +48,12 @@ spec:
           ports:
             - name: http
               containerPort: 18080
+          # The listener starts after the bundle, catalog and experiments loaded (and PostgreSQL
+          # answered): up to 2 minutes before liveness applies.
+          startupProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 2
+            failureThreshold: 60
           readinessProbe:
             httpGet: {path: /healthz, port: http}
             periodSeconds: 2
