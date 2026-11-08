@@ -171,7 +171,7 @@ make sim           # simulated sessions against the dev api (SIM_FLAGS, --faults
 make srm           # simulated traffic, then the SRM check on events_raw (analysis/srm.py)
 make drill         # duplicates + kill -9 of the consumers + broker restart, then verify (~2 min)
 make bench-up      # bench profile: api :18180 + model server (admin :18182) behind Toxiproxy
-make load          # latency experiments -> docs/results/latency.md (~90 min; idle machine; the
+make load          # latency experiments -> docs/results/latency.md (~2 h; idle machine; the
                    # report marks itself preliminary if the VM is not 8 CPUs or the machine is busy;
                    # LOAD_FLAGS='--resume "<reason>"' continues results.json, the report says so)
 make load-smoke    # 1 repeat, 15 s runs -> artifacts/latency/smoke.md (development)
@@ -299,8 +299,10 @@ interpreter at exit: `ORT_DISABLE_TELEMETRY=1` (Makefile, model-server image, `m
 - Breakers (gobreaker) only in front of the model server and PostgreSQL text recall:
   `BREAKER_WINDOW=time:10s:20:10` (default, §5.1 since 2026-11-06: >= 50 % of the last 10 s with
   >= 20 calls, or 10 failures in a row; open 10 s, 5 half-open probes) or `calls:20` (the first
-  rule, kept as a comparison row in `make load`). Redis has none: its calls are capped by their
-  budgets and fail fast.
+  rule, kept as a comparison row in `make load`). A fifth field sets the half-open probes:
+  `time:10s:20:25:2` (25 in a row, 2 probes) is `make load`'s candidate rule (`CANDIDATE_BREAKER`
+  in `loadtest/run.py`: at the ladder's top rate and in the 30 %-slow fault), a comparison only.
+  Redis has none: its calls are capped by their budgets and fail fast.
 - Candidate cache: `cand:{uid}:home:{recall}.{rank variant}:{model_ver}:{hv}` and
   `cand:item:{seed}:...` (shared by users), 300 candidates, binary + S2, 5 min (`CANDIDATE_CACHE`).
 - Naive mode for the fault experiments: `RECLOOP_RESILIENCE=naive` (no deadline, budgets,
@@ -316,7 +318,11 @@ interpreter at exit: `ORT_DISABLE_TELEMETRY=1` (Makefile, model-server image, `m
 - Load tests run on the bench profile: api and model server containers (2 CPU each); the fault
   experiment reaches the model server and Redis through Toxiproxy, the rest directly (the proxy
   adds its own tail); k6 runs on the host; before every run the consumers catch up and Redis is
-  reseeded (both instances). Until 2026-11-08 one Redis had `maxmemory 384mb` + `volatile-ttl`
+  reseeded (both instances). Each repeat opens with the cache comparison (its three runs in a
+  seeded shuffled order, `SHUFFLE_SEED`), then the ladder, the breaker comparison at the top rate
+  (shuffled), the faults (the 30 %-slow row's design variants shuffled) and the onsets;
+  `results.json` records what was served (bundle, ranker, pCTR model, rank-layer experiments,
+  both Redis policies). Until 2026-11-08 one Redis had `maxmemory 384mb` + `volatile-ttl`
   (`latency.md` was measured so); now pages and candidates have the cache instance to
   themselves (see Redis below). Measurements need an idle machine and the coordinator's go-ahead.
 - Simulator: `sim/world.py` (2,024 test-period users, targets = their test items, click model

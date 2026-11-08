@@ -190,9 +190,10 @@ def test_resume_keeps_the_planned_runs_and_discards_the_rest(tmp_path, capsys):
     plan = run.PLANS["smoke"]
     runs = plan.runs()
     data = results()
-    good = fake_run("ladder", runs[0].rate)  # the smoke plan's first run, as the runner keys it
-    assert (good["key"], good["rep"]) == (runs[0].key, runs[0].rep)
-    stray = fake_run("ladder", runs[0].rate, cache="off", proxied=True, rep=2)
+    first = next(r for r in runs if r.experiment == "ladder")  # the smoke plan's first ladder run
+    good = fake_run("ladder", first.rate)  # as the runner keys it
+    assert (good["key"], good["rep"]) == (first.key, first.rep)
+    stray = fake_run("ladder", first.rate, cache="off", proxied=True, rep=2)
     data["runs"] = [good, stray]
     out = tmp_path / "results.json"
     out.write_text(json.dumps(data))
@@ -290,3 +291,71 @@ def test_a_fault_summary_names_the_run_where_the_breaker_opened():
     slow["server"]["breaker_transitions"] = {"open": 3.0}
     line = next(x for x in report.render(data).splitlines() if x.startswith("- Model server: 30 %"))
     assert line.endswith("30.0 % degraded (70.0 % in the run where the breaker opened).")
+
+
+def test_plan_shuffles_the_cache_and_breaker_blocks():
+    plan = run.PLANS["full"]
+    runs = plan.runs()
+    assert [(r.key, r.rep) for r in runs] == [(r.key, r.rep) for r in plan.runs()]  # deterministic
+    default, cand = "time:10s:20:10", run.CANDIDATE_BREAKER
+    for rep in (1, 2, 3):
+        mine = [r for r in runs if r.rep == rep]
+        assert [r.experiment for r in mine[:3]] == ["cache"] * 3  # the cache block opens the repeat
+        last = max(i for i, r in enumerate(mine) if r.experiment == "ladder")
+        brk = mine[last + 1 : last + 3]
+        assert [r.experiment for r in brk] == ["breaker"] * 2
+        assert {r.config.breaker for r in brk} == {default, cand}
+        assert all(r.rate == plan.ladder[-1] and r.fault == "none" for r in brk)
+        slow = [
+            r.config.breaker for r in mine if r.fault == "ms_slow" and r.config.mode == "design"
+        ]
+        assert sorted(slow) == sorted([default, "calls:20", cand])
+    orders = {
+        tuple(r.key for r in runs if r.experiment == "cache" and r.rep == rep) for rep in (1, 2, 3)
+    }
+    assert len(orders) > 1  # the repeats do not all run the cache block in one order
+
+
+def test_report_compares_the_breaker_rules_and_names_the_setup():
+    data = results()
+    cand = run.CANDIDATE_BREAKER
+    for rep in (1, 2, 3):
+        data["runs"] += [
+            fake_run("breaker", 400, rep=rep, p99=30, degraded=0.15 if rep == 1 else 0.005),
+            fake_run("breaker", 400, rep=rep, p99=28, degraded=0.004, breaker=cand),
+            fake_run("faults", 100, cache="off", fault="ms_slow", rep=rep, p99=40, degraded=0.25,
+                     breaker=cand, proxied=True),
+        ]  # fmt: skip
+    data["meta"] |= {
+        "candidate_breaker": cand,
+        "active_campaigns": [],
+        "serving": {
+            "bundle": "2026-11-08-sasrec64-ce60bf5d", "ranker": "lightgbm", "pctr": "logreg",
+            "rank_experiments": [],
+            "redis": {"state": {"policy": "noeviction", "maxmemory_mb": 1024},
+                      "cache": {"policy": "allkeys-lru", "maxmemory_mb": 384}},
+        },
+    }  # fmt: skip
+    text = report.render(data)
+    assert text == report.render(data)
+    assert "## 5. Breaker rule: in force vs 25 in a row, 2 probes" in text
+    assert "| 400/s, no fault | 10 in a row, 5 probes |" in text
+    assert "| 400/s, no fault | 25 in a row, 2 probes |" in text
+    assert "| 100/s, 30 % of the calls +200 ms | 25 in a row, 2 probes |" in text
+    assert "| this design, 25 in a row, 2 probes |" in text  # the fault table's comparison row
+    assert "- Breaker rule, 10 in a row, 5 probes (in force) vs 25 in a row, 2 probes:" in text
+    assert ("bundle `2026-11-08-sasrec64-ce60bf5d` with a LightGBM ranker and a logistic-regression "
+            "pCTR model: a home request that misses the candidate cache calls the model server "
+            "twice") in text  # fmt: skip
+    assert (
+        "The list keeps RRF's order (the api's default ranker; no rank-layer experiment ran)"
+        in text
+    )
+    assert "state (`noeviction`, 1024 MB" in text and "no campaign was active" in text
+    data["meta"]["serving"]["rank_experiments"] = [
+        {"exp_id": "rank-ab", "buckets": [0, 1000], "rankers": {"rrf": None, "lgbm": "lightgbm"}}
+    ]
+    assert "(`rank-ab`, buckets [0, 1000): rrf RRF, lgbm LightGBM)" in report.render(data)
+    # Without the new records (results before 2026-11-08) none of it appears.
+    old = report.render(results())
+    assert "## 5. Breaker rule" not in old and "- Served:" not in old

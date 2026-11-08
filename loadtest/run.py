@@ -6,7 +6,12 @@ fault experiment the api reaches the model server and Redis through Toxiproxy (e
 no-fault one included); elsewhere it connects directly. Three experiments:
 
     ladder   offered load (open loop) vs latency: the largest rate that meets the SLO
-    cache    the candidate cache on and off at one rate (and on, through Toxiproxy: the proxy's cost)
+    cache    the candidate cache on and off at one rate (and on, through Toxiproxy: the proxy's cost),
+             first in every repeat and in a shuffled order (a fixed order carried the effect of the
+             run before it into the comparison)
+    breaker  the breaker rule in force against a candidate (CANDIDATE_BREAKER: more failures in a
+             row to open, fewer half-open probes) at the ladder's top rate, no fault, shuffled;
+             the candidate also runs in the faults experiment's 30 %-slow row
     onset    the model server is cut (or slowed by 50 ms) in the middle of steady traffic: how
              fast the breaker opens, how many calls failed first, how fast it closes afterwards
     faults   model server 30 % of calls +200 ms (its fault switch), every call +50 ms
@@ -24,7 +29,7 @@ their sponsored slots would add the ads stage to the home requests, and the sess
 them (recs.js sends the slots' ad_tokens) would be billed for real. The ids it saw go into
 results.json (meta.active_campaigns, and each restart's).
 
-Usage: python -m loadtest.run [--plan full|smoke] [--only ladder,cache,faults,onset]
+Usage: python -m loadtest.run [--plan full|smoke] [--only ladder,cache,breaker,faults,onset]
                               [--resume REASON [--redo KEY#REP ...]] [--note TEXT ...]
                               [--allow-active-campaigns]
        (--resume keeps the finished runs of --out and runs the rest; --redo runs one again)
@@ -37,6 +42,7 @@ import argparse
 import json
 import os
 import platform
+import random
 import subprocess
 import threading
 import time
@@ -46,6 +52,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 from sim import compose as compose_mod
+from sim import redis_stats
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "artifacts" / "latency"
@@ -126,6 +133,20 @@ class Run:
         return f"{self.experiment}/{self.rate}/{c.mode}/cache-{c.cache}/{c.breaker}/{path}/{self.fault}"
 
 
+# The breaker rule proposed after M2's load tests: 25 failures in a row instead of 10 to open, 2
+# half-open probes instead of 5. A comparison row only: the api's default stays
+# resilience.DefaultBreaker (time:10s:20:10, 5 probes).
+CANDIDATE_BREAKER = "time:10s:20:25:2"
+# Seeds the shuffled orders: the same plan gives the same order (--resume relies on the runs).
+SHUFFLE_SEED = 20261108
+
+
+def shuffled(items: list, block: str, rep: int) -> list:
+    out = list(items)
+    random.Random(f"{SHUFFLE_SEED}:{block}:{rep}").shuffle(out)
+    return out
+
+
 @dataclass
 class Plan:
     ladder: list[int]
@@ -135,30 +156,45 @@ class Plan:
     duration: int
     warmup: int
     extra_breaker: str | None = "calls:20"  # also run ms_slow with §5.1's first window
+    # also run ms_slow and the breaker experiment with this rule (None: no candidate)
+    candidate_breaker: str | None = CANDIDATE_BREAKER
     # onset: seconds of healthy traffic, of fault, and after recovery (>= the 10 s open time)
     onset: tuple[float, float, float] = (5.0, 15.0, 15.0)
-    experiments: list[str] = field(default_factory=lambda: ["ladder", "cache", "faults", "onset"])
+    experiments: list[str] = field(
+        default_factory=lambda: ["ladder", "cache", "breaker", "faults", "onset"]
+    )
 
     def runs(self) -> list[Run]:
+        """Per repeat: the cache block (shuffled; after the previous repeat's light onset runs,
+        or first of all), the ladder, the breaker block at the ladder's top rate (shuffled), the
+        faults (the 30 %-slow row's design variants shuffled), the breaker onsets."""
         out = []
         for rep in range(1, self.repeats + 1):
-            if "ladder" in self.experiments:
-                out += [Run("ladder", r, ApiConfig(), rep=rep) for r in self.ladder]
             if "cache" in self.experiments:
-                for cfg in (
+                cfgs = [
                     ApiConfig(cache="on"),
                     ApiConfig(cache="off"),
                     ApiConfig(cache="on", proxied=True),
-                ):
+                ]
+                for cfg in shuffled(cfgs, "cache", rep):
                     out.append(Run("cache", self.cache_rate, cfg, rep=rep))
+            if "ladder" in self.experiments:
+                out += [Run("ladder", r, ApiConfig(), rep=rep) for r in self.ladder]
+            if "breaker" in self.experiments and self.candidate_breaker:
+                cfgs = [ApiConfig(), ApiConfig(breaker=self.candidate_breaker)]
+                for cfg in shuffled(cfgs, "breaker", rep):
+                    out.append(Run("breaker", self.ladder[-1], cfg, rep=rep))
             if "faults" in self.experiments:
                 naive = ApiConfig(resilience="naive", cache="off", proxied=True)
                 design = ApiConfig(cache="off", proxied=True)
                 for fault in FAULTS:
-                    for cfg in (naive, design):
-                        out.append(Run("faults", self.fault_rate, cfg, fault=fault, rep=rep))
-                    if fault == "ms_slow" and self.extra_breaker:
-                        cfg = ApiConfig(cache="off", breaker=self.extra_breaker, proxied=True)
+                    variants = [design]
+                    if fault == "ms_slow":
+                        for rule in (self.extra_breaker, self.candidate_breaker):
+                            if rule:
+                                variants.append(ApiConfig(cache="off", breaker=rule, proxied=True))
+                        variants = shuffled(variants, "ms_slow", rep)
+                    for cfg in (naive, *variants):
                         out.append(Run("faults", self.fault_rate, cfg, fault=fault, rep=rep))
             if "onset" in self.experiments:
                 for fault in ("ms_down", "ms_latency"):
@@ -193,6 +229,36 @@ def http(method: str, url: str, body: dict | None = None, timeout: float = 5.0):
     with urllib.request.urlopen(req, timeout=timeout) as r:
         raw = r.read()
     return json.loads(raw) if raw else None
+
+
+def serving_setup() -> dict:
+    """What the bench api serves: the bundle (its manifest says whether Rank runs: a ranker, a
+    pCTR model), the running rank-layer experiments (they decide whose list the ranker orders)
+    and the two Redis instances' policies."""
+    version = http("GET", API + "/readyz")["bundle"]
+    path = ROOT / "artifacts" / "bundles" / version / "manifest.json"
+    manifest = json.loads(path.read_text()) if path.exists() else {}
+    ranker = ((manifest.get("ranking") or {}).get("ranker") or {}).get("model")
+    rank_experiments = [
+        {
+            "exp_id": e["exp_id"],
+            "buckets": [e["bucket_from"], e["bucket_to"]],
+            "rankers": {v["name"]: (v.get("params") or {}).get("ranker") for v in e["variants"]},
+        }
+        for e in http("GET", API + "/internal/admin/experiments")["experiments"]
+        if e["layer"] == "rank" and e["status"] == "running"
+    ]
+    redis = {
+        name: {k: v[k] for k in ("policy", "maxmemory_mb")}
+        for name, v in redis_stats.counters().items()
+    }
+    return {
+        "bundle": version,
+        "ranker": ranker,
+        "pctr": (manifest.get("pctr") or {}).get("model"),
+        "rank_experiments": rank_experiments,
+        "redis": redis,
+    }
 
 
 def active_campaigns() -> list[int]:
@@ -653,7 +719,7 @@ def resume(
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--plan", choices=sorted(PLANS), default="full")
-    p.add_argument("--only", default="", help="comma-separated: ladder,cache,faults,onset")
+    p.add_argument("--only", default="", help="comma-separated: ladder,cache,breaker,faults,onset")
     p.add_argument("--out", type=Path, default=OUT / "results.json")
     p.add_argument(
         "--resume",
@@ -728,6 +794,7 @@ def main(argv: list[str] | None = None) -> None:
         "started": round(time.time()),
         "idle_wait_s": waited,
         "active_campaigns": campaigns,
+        "serving": serving_setup(),
     }
     results, done = [], set()
     if args.redo and not args.resume:

@@ -157,6 +157,85 @@ def meets_slo(s: dict) -> bool:
     return s["ok_runs"] == s["n"]
 
 
+MODEL_NAMES = {"lightgbm": "LightGBM", "logreg": "logistic-regression", "rrf": "RRF"}
+
+
+def model_name(m: str) -> str:
+    return MODEL_NAMES.get(m, m)
+
+
+def serving_lines(meta: dict) -> list[str]:
+    """The served system (recorded since 2026-11-08): bundle, Rank, the two Redis, campaigns."""
+    sv = meta.get("serving")
+    if not sv:
+        return []
+    if sv.get("ranker"):
+        exps = sv.get("rank_experiments") or []
+        if exps:
+            order = "the order its rank-layer experiment gives each user (" + "; ".join(
+                f"`{e['exp_id']}`, buckets [{e['buckets'][0]}, {e['buckets'][1]}): "
+                + ", ".join(f"{v} {model_name(r or 'rrf')}" for v, r in e["rankers"].items())
+                for e in exps
+            ) + ")"  # fmt: skip
+        else:
+            order = "RRF's order (the api's default ranker; no rank-layer experiment ran)"
+        rank = (f"with a {model_name(sv['ranker'])} ranker"
+                + (f" and a {model_name(sv['pctr'])} pCTR model" if sv.get("pctr") else "")
+                + ": a home request that misses the candidate cache calls the model server twice, "
+                "Retrieve (SASRec recall) and Rank (every candidate's features and the ranker's score), "
+                "each behind a breaker of its own; a hit reuses the ranked list. The list keeps "
+                + order)  # fmt: skip
+    else:
+        rank = "without a ranker: no Rank call (RRF's order, the fixed pCTR)"
+    st, ca = sv["redis"]["state"], sv["redis"]["cache"]
+    campaigns = meta.get("active_campaigns")
+    return [
+        f"- Served: bundle `{sv['bundle']}` {rank}. Redis: two instances, state (`{st['policy']}`, "
+        f"{st['maxmemory_mb']} MB: user context, frequency caps, spend) and cache (`{ca['policy']}`, "
+        f"{ca['maxmemory_mb']} MB: candidate cache, result pages)"
+        + (
+            "; no campaign was active, so the ads stage had nothing to serve."
+            if campaigns == []
+            else "."
+        ),
+    ]
+
+
+def breaker_label(spec: str) -> str:
+    """'time:10s:20:25:2' -> '25 in a row, 2 probes' (the default rule: '10 in a row, 5 probes')."""
+    parts = spec.split(":")
+    if parts[0] != "time":
+        return {"calls": "count window"}.get(parts[0], spec)
+    consecutive = parts[3] if len(parts) > 3 else "10"
+    probes = parts[4] if len(parts) > 4 else "5"
+    return f"{consecutive} in a row, {probes} probes"
+
+
+def cache_label(c: dict) -> str:
+    return c["cache"] + (" through Toxiproxy" if c.get("proxied") else "")
+
+
+def block_orders(runs: list[dict], experiment: str, label) -> tuple[dict, dict]:
+    """Per repeat, the block's runs in the order they ran, and the run right before the block."""
+    timeline = sorted(runs, key=lambda r: r["started"])
+    orders, before = {}, {}
+    for i, r in enumerate(timeline):
+        if r["experiment"] != experiment:
+            continue
+        if r["rep"] not in orders:
+            orders[r["rep"]] = []
+            before[r["rep"]] = timeline[i - 1] if i else None
+        orders[r["rep"]].append(label(r["config"]))
+    return orders, before
+
+
+def fixed_after_ladder(orders: dict, before: dict) -> bool:
+    """The order of the runs before 2026-11-08: the same in every repeat, right after the ladder."""
+    return len({tuple(o) for o in orders.values()}) == 1 and all(
+        b is not None and b["experiment"] == "ladder" for b in before.values()
+    )
+
+
 def top_reasons(s: dict, n: int = 3) -> str:
     rs = sorted(
         ((r, v) for r, v in s["reasons"].items() if v >= 0.5), key=lambda kv: (-kv[1], kv[0])
@@ -263,9 +342,11 @@ def render(data: dict) -> str:
                      f"had P99 {ms(worst['p99'])} ms and {pct(worst['degraded'])} degraded")  # fmt: skip
             top = max(worst["reasons"].items(), key=lambda kv: kv[1], default=("", 0))[0]
             if worst["opened"] and top.endswith("_circuit_open"):
-                dep = {"sasrec": "the model server", "text": "PostgreSQL text recall"}.get(
-                    top.removesuffix("_circuit_open"), top.removesuffix("_circuit_open")
-                )
+                dep = {
+                    "sasrec": "the model server",
+                    "text": "PostgreSQL text recall",
+                    "rank": "the model server's Rank",
+                }.get(top.removesuffix("_circuit_open"), top.removesuffix("_circuit_open"))
                 line += (": no fault was injected; a burst of timeouts reached the 10-failures-in-a-row "
                          f"rule of the breaker in front of {dep}, which then stayed open for at least "
                          "its 10 s")  # fmt: skip
@@ -295,11 +376,16 @@ def render(data: dict) -> str:
                 for rep in slower
             )
         line += "."
-        if ladder:
+        orders, before = block_orders(runs, "cache", cache_label)
+        if ladder and fixed_after_ladder(orders, before):
             line += (f" The cache-on run always runs right after the ladder's {ladder[-1][0]['rate']}/s run, "
                      "before the cache-off run, so the P99 comparison carries that order"
                      + (", the likely reason for the slower repeat" + "s" * (len(slower) > 1) if slower else "")
                      + ".")  # fmt: skip
+        elif orders:
+            line += (" The three runs opened every repeat in a shuffled order ("
+                     + "; ".join(f"repeat {rep}: {', '.join(o)}" for rep, o in sorted(orders.items()))
+                     + "), never right after the ladder's highest rate.")  # fmt: skip
         out.append(line)
     faults = defaultdict(dict)
     for r, s in by_exp["faults"]:
@@ -320,6 +406,22 @@ def render(data: dict) -> str:
                 line += (f" ({pct(d['degraded_max'])} in the run where the breaker opened)" if k == 1 else
                          f" (up to {pct(d['degraded_max'])} in the {k} runs where the breaker opened)")  # fmt: skip
             out.append(line + ".")
+    cand = meta.get("candidate_breaker")
+    brk = {r["config"]["breaker"]: s for r, s in by_exp["breaker"]}
+    slow_rows = faults.get("ms_slow", {})  # §3's variants of the 30 %-slow fault
+    if cand and cand in brk and DEFAULT_BREAKER in brk:
+        cur, new = brk[DEFAULT_BREAKER], brk[cand]
+        line = (f"- Breaker rule, {breaker_label(DEFAULT_BREAKER)} (in force) vs {breaker_label(cand)}: "
+                f"without a fault at {by_exp['breaker'][0][0]['rate']}/s it opened in {cur['breaker_runs']} "
+                f"vs {new['breaker_runs']} of {cur['n']} runs, {pct(cur['degraded'])} vs {pct(new['degraded'])} "
+                f"degraded (worst run {pct(cur['degraded_max'])} vs {pct(new['degraded_max'])}), P99 "
+                f"{ms(cur['p99'])} vs {ms(new['p99'])} ms")  # fmt: skip
+        if "design" in slow_rows and f"design ({cand})" in slow_rows:
+            a, b = slow_rows["design"], slow_rows[f"design ({cand})"]
+            line += (f"; with 30 % of the calls slow {pct(a['degraded'])} vs {pct(b['degraded'])} degraded "
+                     f"(opened in {a['breaker_runs']} vs {b['breaker_runs']} of {a['n']}), P99 {ms(a['p99'])} "
+                     f"vs {ms(b['p99'])} ms")  # fmt: skip
+        out.append(line + " (§5).")
     out.append("")
 
     # ---- setup
@@ -335,6 +437,7 @@ def render(data: dict) -> str:
         f"- Machine: {env['host']['cpu']}, {env['host']['cores']} cores, {env['host']['memory_gb']} GB, "
         f"{env['host']['os']}, on mains power. Docker {env['docker']['server']}, VM with "
         f"{env['docker']['vm_cpus']} CPUs and {env['docker']['vm_memory_gb']} GB.",
+        *serving_lines(meta),
         "- Containers (compose `deploy/docker-compose.yml`, bench profile): "
         + ", ".join(
             limit(c)
@@ -479,10 +582,18 @@ def render(data: dict) -> str:
                 "A click, add-to-cart or purchase bumps hv, so the next request recomputes. The last row "
                 "is the same configuration with Toxiproxy between the api and the model server / Redis, "
                 "as in every row of the fault table below: the proxy's own cost.", ""]  # fmt: skip
-        if ladder:
+        orders, before = block_orders(runs, "cache", cache_label)
+        if ladder and fixed_after_ladder(orders, before):
             out += [f"Within a repeat the order is fixed: the ladder up to {ladder[-1][0]['rate']}/s, then "
                     "the cache rows top to bottom, so the \"on\" run always starts right after the "
                     "ladder's highest rate.", ""]  # fmt: skip
+        elif orders:
+            prev = {rep: ("the start of the measurement" if b is None else
+                          f"the {b['experiment']} run at {b['rate']}/s") for rep, b in before.items()}  # fmt: skip
+            out += ["Order: the cache block opens every repeat, its three runs shuffled with a fixed seed "
+                    "(`loadtest/run.py`, `SHUFFLE_SEED`), so no configuration always follows the same "
+                    "run: " + "; ".join(f"repeat {rep}: {', '.join(o)} (after {prev[rep]})"
+                                        for rep, o in sorted(orders.items())) + ".", ""]  # fmt: skip
 
     # ---- 3. faults
     if faults:
@@ -499,11 +610,9 @@ def render(data: dict) -> str:
                 s = faults.get(f, {}).get(name)
                 if s is None:
                     continue
-                label = {
-                    "naive": "naive",
-                    "design": "this design",
-                    "design (calls:20)": "this design, count window",
-                }.get(name, name.replace("design", "this design"))
+                label = {"naive": "naive", "design": "this design"}.get(name) or (
+                    "this design, " + breaker_label(name.removeprefix("design (").removesuffix(")"))
+                )
                 out.append(
                     f"| {FAULT_LABEL[f]} | {label} | {ms(s['p50'])} | {ms(s['p99'])} [{ms(s['p99_min'])}–{ms(s['p99_max'])}] | "
                     f"{pct(s['errors'], 2)} | {pct_range(s['degraded'], s['degraded_min'], s['degraded_max'])} | "
@@ -531,6 +640,10 @@ def render(data: dict) -> str:
                 "piece is written into `degraded` and the request goes on without it, down to the "
                 "in-process popular list.",
                 *slow_note,
+                *([f"- \"{breaker_label(meta['candidate_breaker'])}\": the same design with the candidate "
+                   f"breaker rule `{meta['candidate_breaker']}` of §5 (a comparison, not the rule in force)."]
+                  if meta.get("candidate_breaker") and f"design ({meta['candidate_breaker']})" in faults.get("ms_slow", {})
+                  else []),
                 "- \"count window\": the same design with §5.1's first breaker rule, at least half of "
                 "the last 20 calls. At hundreds of calls per second those 20 calls span a few tens of "
                 "milliseconds; with 30 % of the calls slow, some of these short windows reach 10 "
@@ -562,6 +675,55 @@ def render(data: dict) -> str:
                 f"{ms(med([r['closed_after_recovery_s'] for r in rs]), 1)} |"
             )
         out.append("")
+
+    # ---- 5. breaker rule: in force vs the candidate
+    if cand and cand in brk and DEFAULT_BREAKER in brk:
+        rate = by_exp["breaker"][0][0]["rate"]
+        rows = [(f"{rate}/s, no fault", brk[DEFAULT_BREAKER], brk[cand])]
+        if "design" in slow_rows and f"design ({cand})" in slow_rows:
+            frate = by_exp["faults"][0][0]["rate"]
+            rows.append(
+                (
+                    f"{frate}/s, 30 % of the calls +200 ms",
+                    slow_rows["design"],
+                    slow_rows[f"design ({cand})"],
+                )
+            )
+        orders, _ = block_orders(
+            runs,
+            "breaker",
+            lambda c: "in force" if c["breaker"] == DEFAULT_BREAKER else "candidate",
+        )
+        out += [f"## 5. Breaker rule: in force vs {breaker_label(cand)}", "",
+                f"The rule in force (`BREAKER_WINDOW={DEFAULT_BREAKER}`: open after 10 failures in a row or "
+                "when at least half of the last 10 s's calls failed, at least 20 of them; open 10 s; 5 "
+                "half-open probes must succeed in a row) against the candidate "
+                f"`BREAKER_WINDOW={cand}` ({breaker_label(cand)}). Same api, the same rule for every "
+                "breaker (model server Retrieve, Rank, PostgreSQL text recall). A comparison only: the "
+                "api keeps the rule in force.", "",
+                "| scenario | rule | P99 ms | degraded | errors | breaker opened: times per run (runs) | top degradation reasons (count per run) |",
+                "|---|---|---:|---:|---:|---:|---|"]  # fmt: skip
+        for scen, a, b in rows:
+            for rule, x in ((DEFAULT_BREAKER, a), (cand, b)):
+                out.append(
+                    f"| {scen} | {breaker_label(rule)} | {ms(x['p99'])} [{ms(x['p99_min'])}–{ms(x['p99_max'])}] | "
+                    f"{pct_range(x['degraded'], x['degraded_min'], x['degraded_max'])} | {pct(x['errors'], 2)} | "
+                    f"{x['breaker_opened']:.0f} ({x['breaker_runs']}/{x['n']}) | {top_reasons(x)} |"
+                )
+        out += ["",
+                "- No fault: both rules at the ladder's top rate, candidate cache on, direct; their own "
+                "block right after the ladder, in a shuffled order per repeat ("
+                + "; ".join(f"repeat {rep}: {' first, then '.join(o)}" for rep, o in sorted(orders.items()))
+                + "). 30 % of the calls +200 ms: the fault table's rows (§3), whose design variants "
+                "also run in a shuffled order.",
+                "- What the two fields change: a breaker that opens without a fault meets a burst of "
+                "timeouts, and 25 failures in a row need a burst 2.5 times as long as 10 (independent "
+                "failures at 30 % start a run of 10 at a given call with probability 0.3^10 ≈ 6·10⁻⁶, "
+                "a run of 25 with 0.3^25 ≈ 10⁻¹³; at a steady 30 % the 50 % rule does not trip). "
+                "Half-open, a breaker closes once all its probes succeed in a row, at 70 % success "
+                "0.7² = 49 % of the attempts with 2 probes against 0.7⁵ = 17 % with 5; a failed probe "
+                "opens it for another 10 s.",
+                "- §4's onset runs use the rule in force only.", ""]  # fmt: skip
 
     # ---- appendix: every run, in the order it ran
     unstamped = any(r.get("load_avg_before") is None for r in runs)
