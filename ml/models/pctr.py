@@ -220,8 +220,17 @@ def main() -> None:
     final, final_std = fit(x, y, w, best)
     coef = dict(zip(COLUMNS, final.coef_[0] / final_std.scale, strict=True))  # per raw unit
     position_effect = {name: float(coef[name] - coef["pos_1"]) for name in POSITION_BUCKETS}
+    meta_dir = SAMPLES.parent / "meta"
+    days = sorted(df.day.unique().tolist())
     info = {
-        "days": sorted(df.day.unique().tolist()),
+        "days": days,
+        # The sample job's counts for those days, as they were when this model was trained
+        # (a later `make samples` of the same day replaces the files).
+        "samples_meta": {
+            d: json.loads((meta_dir / f"{d}.json").read_text())
+            for d in days
+            if (meta_dir / f"{d}.json").exists()
+        },
         "rows": int(n),
         "positives": int(y.sum()),
         "weighted_impressions": float(w.sum()),

@@ -22,9 +22,13 @@ write-ups in `docs/results/`.
   `ann.md`, `make load` writes `latency.md`; `make latency-report` re-renders it from
   `artifacts/latency/results.json`; `make billing` writes `billing.md`, `make billing-report`
   re-renders it from `artifacts/billing/`; `make agent-eval` writes `agent.md`, `make
-  agent-latency` adds its chat-path section); change the generator, not the file. The committed `offline.md` is `make setup`, then `make paper-sasrec`,
-  then `make eval`. `make eval` re-runs give the same bytes; `make train` runs on the CPU with fixed
-  seeds, and two runs with the same worker / thread counts gave identical weights. The committed
+  agent-latency` adds its chat-path section; `make release-drill` writes `release.md`, `make
+  release-report` re-renders it from `artifacts/release/drill.json`; `make ab-report` writes
+  `ab.md` from `artifacts/ab/` and the sample job's impressions); change the generator, not the
+  file. The committed `offline.md` is `make setup`, then `make paper-sasrec`,
+  then `make eval` (`make setup` includes `make train-ranker`). `make eval` re-runs give the same
+  bytes; `make train` runs on the CPU with fixed seeds, and two runs with the same worker / thread
+  counts gave identical weights; `make train-ranker` (one thread) gives the same model. The committed
   `agent.md` is a fresh database (`make setup`: no orders, stock as ingested), then `make
   agent-eval`, then `make agent-latency` with the services up; re-runs differ only in their
   latency sections, and the report says when the database had orders (each one took a unit of
@@ -41,12 +45,14 @@ deploy/docker-compose.yml   PostgreSQL 18 + pgvector, Redis, Redpanda (+ topic i
                             billing and PostgreSQL), Prometheus, Grafana, OTel collector, Jaeger;
                             profile `bench`: Toxiproxy, api and model-server containers
 deploy/connect/ prometheus/ grafana/ otel/ jaeger/ toxiproxy/   their configuration;
-                            model-server.Dockerfile (bench image)
+                            model-server.Dockerfile (bench image); spark.Dockerfile + spark/ (the
+                            sample job's image: PySpark 4.2.1, Temurin 21 JRE, its own uv lock)
 proto/                      buf workspace; recloop/modelserver/v1/model_server.proto (design §13.2)
 serving/                    Go module github.com/heyemlee/recloop/serving
   cmd/api/                  HTTP api (:18080): /v1/recommendations, /v1/events, /v1/items/{id},
                             /v1/advertisers, /v1/campaigns[/{id}[/report]], ...,
-                            POST /internal/ads/select
+                            POST /internal/ads/select, /internal/admin/* (M4: releases,
+                            experiments, the model server's fault switch)
   cmd/aggregator/           events -> Redis (incl. frequency caps); rebuild-from-db, reset-offsets,
                             wait-lag
   cmd/billing/              sponsored clicks -> charge ledger + Redis spend; reconcile every minute;
@@ -58,20 +64,31 @@ serving/                    Go module github.com/heyemlee/recloop/serving
                             aggregator, metrics (Prometheus), tracing (OTel), catalog, bundle,
                             store, ads (GSP auction, pCTR interface, campaign settings, serving:
                             campaign index, gates, pacing), adtoken (signed ad_token), billing
-                            (charge transaction, Redis spend.lua, consumer, reconcile + raise.lua)
+                            (charge transaction, Redis spend.lua, consumer, reconcile + raise.lua),
+                            ranking (M4: the model server's Rank: features, LightGBM, pCTR),
+                            release (M4: model versions built -> ... -> retired, reconcile),
+                            bundle (+ registry: several versions at once)
   internal/store/db/        sqlc output; queries in internal/store/queries, schema = migrations/
   internal/testutil/        test DB per package (recloop_test_<package>) and Redis DB 15
   migrations/               goose (00001 catalog, 00002 events/orders/experiments/models,
                             00003 default experiment, 00004 text_emb stored inline,
                             00005 purchase -> order trigger on events_raw, 00006 advertisers,
-                            campaigns, budget rows, ad_charges, ad_clicks)
+                            campaigns, budget rows, ad_charges, ad_clicks, 00007 release times +
+                            one active version + model_version_events)
   gen/                      protoc-gen-go output
-model_server/               Python 3.12 uv project (own .venv): gRPC Retrieve over a bundle (:18081),
-                            admin.py: fault switch + /metrics on :18082
+model_server/               Python 3.12 uv project (own .venv): gRPC Retrieve and Rank (:18081);
+                            registry.py: several bundle versions, pin_version; ranking.py: the
+                            features, the ONNX ranker, the pCTR; admin.py: fault switch, /metrics,
+                            /bundles on :18082
 ml/                         Python 3.12 uv project (own .venv); run modules from the repo root
   data/                     download, prefilter_meta, preprocess, catalog, verify, text_embed,
                             ingest, seed_redis
-  models/                   pop, itemcf, sasrec (+ train_sasrec)
+  models/                   pop, itemcf, sasrec (+ train_sasrec), rrf, ranker (+ train_ranker:
+                            LightGBM LambdaRank), pctr (logistic regression)
+  ranking/                  candidates (the api's recall + RRF replayed), features, onnx_trees
+                            (LightGBM -> ONNX TreeEnsembleRegressor)
+  samples/                  export (events_raw -> Parquet by day), job (PySpark: attribution,
+                            labels, downsampled training samples; runs in its container)
   eval/                     splits, metrics, bootstrap, calc_check, report, run, minionerec_sasrec,
                             minionerec (+ _report), sasrec_cost, footprint, machine
   bundle/                   build (+ faiss_index, run in a torch-free subprocess)
@@ -82,12 +99,15 @@ minionerec/                 Python 3.12 uv project (own .venv, Apple Silicon onl
                             evaluate.py + evaluate.py.patch on MPS (upstream, generate, cost)
 web/                        Next.js 16 + shadcn/ui (:13000); /api/v1/* is proxied to the Go api
                             (/internal is not), /api/v1/chat to the agent service; e2e/;
-                            /advertiser is the advertiser console, /chat the shopping assistant
+                            /advertiser is the advertiser console, /chat the shopping assistant,
+                            /admin the internal admin page (only with RECLOOP_ADMIN=1)
 sim/                        traffic simulator (world, click model, sessions + fault switches, verify,
-                            drill; ads, billing_drill, billing_verify, overdelivery); runs in the
-                            ml environment (`$(PY) -m sim.<module>`)
+                            drill; ads, billing_drill, billing_verify, overdelivery; M4: standing
+                            campaigns, traffic in the background, admin client, release_drill,
+                            ab); runs in the ml environment (`$(PY) -m sim.<module>`)
 loadtest/                   k6 scenario recs.js, experiment runner run.py, report.py (latency.md)
-analysis/                   served_attribution.sql, srm.py, billing_report.py (billing.md)
+analysis/                   served_attribution.sql, srm.py, billing_report.py (billing.md),
+                            ab_report.py (ab.md), release_report.py (release.md)
 tools/                      go.mod pinning buf, protoc-gen-go(-grpc), sqlc (built into .cache/bin);
                             tools/k6/go.mod pins k6 (own module)
 testdata/                   bucket_vectors.json, shared by the Go and Python bucketing tests
@@ -104,7 +124,9 @@ agent/                      Python 3.12 uv project (own .venv): the shopping ass
                             chat_latency (the chat path through the running services)
 data/        (ignored) raw/ downloads, hf/ model files, processed/ outputs of `make data`
 third_party/ (ignored) MiniOneRec and SASRec.pytorch clones
-artifacts/   (ignored) models/sasrec, bundles/<version> + bundles/current, eval/, e2e/, logs/,
+artifacts/   (ignored) models/sasrec, models/ranker, models/pctr, bundles/<version> +
+             bundles/current, eval/, e2e/, logs/, samples/ (raw/, impressions/, train/, meta/),
+             release/, ab/,
              sim/ (world.json, run ledgers), latency/ (results.json),
              minionerec/ (runs/<name>/, cost/, upstream/ = the staged, patched evaluate.py)
 ```
@@ -112,7 +134,8 @@ artifacts/   (ignored) models/sasrec, bundles/<version> + bundles/current, eval/
 ## Commands
 
 ```
-make setup         # up, data, ingest, train, eval, bundle, seed, web-install: clean checkout -> demo
+make setup         # up, data, ingest, train, train-ranker, eval, bundle, seed, web-install:
+                   # clean checkout -> demo
 make up            # images + compose up --wait (event pipeline and monitoring too) + migrations
 make images        # cross-compile api + aggregator into .cache/linux, build recloop/go:dev
 make data          # fetch + checksum inputs, re-run MiniOneRec preprocessing, export, verify,
@@ -120,15 +143,19 @@ make data          # fetch + checksum inputs, re-run MiniOneRec preprocessing, e
 make ingest        # migrations + items (text_emb, simulated stock) / users into PostgreSQL
 make train         # SASRec grid on train/valid (CPU, ~11 min) -> artifacts/models/sasrec
 make paper-sasrec  # re-run MiniOneRec's sasrec.py on the split (~18 min; make eval picks it up)
-make eval          # Pop / ItemCF / SASRec -> docs/results/offline.md (needs train; no database)
+make train-ranker  # LightGBM LambdaRank on the validation split (~7 min) -> artifacts/models/ranker
+make eval          # Pop / ItemCF / SASRec / RRF / LambdaRank -> docs/results/offline.md (needs
+                   # train and train-ranker; no database)
 make ann           # ANN benchmark + index updates -> docs/results/ann.md (~25 min; idle machine:
                    # it marks the report preliminary when the load average is above 2 at the start)
-make bundle        # artifacts/bundles/<version> (ONNX encoder, FAISS, ItemCF/Pop tables), current ->
+make bundle        # artifacts/bundles/<version> (ONNX encoder, FAISS, ItemCF/Pop tables, M4: feature
+                   # tables, ONNX ranker, pCTR if trained); current -> it only when there is none
+                   # (BUNDLE_FLAGS=--current forces it; --sasrec PATH, --no-ranker, --no-pctr)
 make seed          # FLUSHDB Redis, load dataset users' train-period history + demo users
 make rebuild-redis # seed + replay events_raw (FROM=db, default) or the event log (FROM=log)
 make serve-model   # model server on :18081 (bundle: artifacts/bundles/current)
 make serve-api     # Go api on :18080
-make serve-web     # Next.js dev server on :13000
+make serve-web     # Next.js dev server on :13000 (ADMIN=1: the /admin page works)
 make test          # ruff + pytest (ml, model_server, minionerec, agent) + go vet/test; DB/Redis tests
                    # skip when down
 make test-props    # long run of the ads / ad_token / billing property tests (CHECKS=2000, ~4 min)
@@ -152,6 +179,16 @@ make billing-drill # 30 min of traffic, kill -9 billing, Redpanda restarts, Post
                    # for billing; then the ledger against the simulator's truth, charge by charge
 make billing-report  # re-render billing.md from artifacts/billing/
 make k6            # build k6 v2.3.0 (tools/k6) into .cache/bin
+make spark-image   # the sample job's image (recloop/spark:dev)
+make samples       # DAY=YYYY-MM-DD (UTC, default today): export events_raw around it, then the
+                   # PySpark job -> artifacts/samples/{impressions,train,meta}
+make test-samples  # the sample job's tests, in its container
+make train-pctr    # logistic-regression pCTR on artifacts/samples/train -> artifacts/models/pctr
+make collect       # standing campaigns + COLLECT_SECONDS (900) of simulated traffic for samples
+make release-drill # NEW=<version> BAD=<version>: canary 5% -> full rollout, then BAD activated
+                   # and rolled back, under traffic (~35 min) -> docs/results/release.md
+make ab            # A/A, then RRF vs LightGBM, 2 x 20 min of traffic -> artifacts/ab/; then
+                   # `make samples` and `make ab-report` -> docs/results/ab.md
 make agent-cases   # regenerate agent/eval/cases.jsonl from the items table (read-only)
 make agent-eval    # shopping assistant: baseline + oracle agents -> docs/results/agent.md (~1 min)
 make serve-agent   # shopping assistant service on :18083 (POST /v1/chat; rules parser unless
@@ -349,6 +386,81 @@ interpreter at exit: `ORT_DISABLE_TELEMETRY=1` (Makefile, model-server image, `m
   step must match the database exactly; concurrent workers must give the order-independent
   truth (one charge per clicked impression, spend = min(budget, prices), each outcome counted
   once). `make test` runs 30 cases each, `make test-props` 2,000.
+
+## Ranking and releases (M4)
+
+- Offline ranker: `ml/ranking/candidates.py` replays the api's home feed on a split (SASRec,
+  ItemCF (score > 0) and Pop top 200 each, by score then item id; weighted RRF, k = 60, summed in
+  the sources' order, ties by best rank then item id; 300 candidates). `ml/ranking/features.py`:
+  10 features (each source's score and rank if it returned the item, popularity, how many
+  sources, price bucket, level-2 / leaf category overlap with the history; NaN = missing).
+  `make train-ranker`: LightGBM LambdaRank on the validation split (recall models fitted on train
+  rows; queries without the target among the candidates left out), grid by 4-fold CV over users,
+  refit with the mean best rounds. LightGBM is built from source without OpenMP (ml/pyproject.toml
+  `[tool.uv]`): one thread, deterministic, and it can share a process with torch. The item log's
+  CTR features of design §4.3 are not used: the dataset has no impressions and simulated clicks
+  follow the test targets (leakage); the user's decision is pending.
+- Bundle (M4 files): `features.json` (item tables), `ranker.onnx` (ml/ranking/onnx_trees.py:
+  thresholds rounded down to float32, LightGBM's missing-value rules, |x| <= 1e-35 read as 0;
+  checked against LightGBM on every validation candidate), `ranker.txt`, `rank_golden.json`,
+  `pctr.json` (when `make train-pctr` ran). A bundle without them still serves (RRF, fixed pCTR).
+- Model server: `Rank(history, candidates + each source's (rank, score), ads + optional
+  relevance, pin_version)` -> feature rows, LightGBM scores, pCTR of the ads (logistic regression
+  in numpy at the reference position 3). Retrieve scores `ad_item_ids` with the same user vector.
+  Several versions at once (`registry.py`): a request names its version (`pin_version`), else
+  the default; versions are found by name under the startup bundle's parent directory; loading
+  replays the golden data (encoder, ranker, pCTR). Admin: `GET/POST /bundles`, `PUT
+  /bundles/default`, `DELETE /bundles/<version>`.
+- api: a request reads its bundle once: the rank variant's `pin_version` if loaded, else the
+  active one; recall and Rank pin the model server to it. On the home feed with an M4 bundle,
+  Rank runs for every user (both rank variants: features for the served log, the LightGBM score)
+  under the ranking budget (25 ms; skipped below 5 ms; breaker `rank` of its own); the rank
+  variant's `{"ranker": "lightgbm"}` orders the list by it (ties: RRF's order), `rrf` (default,
+  `RANKER`) keeps RRF's. A failed call: RRF's order, `rank_<status>` in `degraded`, no ads
+  (§5.1); a degraded list is not cached. Served items log `f` (features, null = missing) and
+  `lgbm`; the payload `features` (names), `ranker`, `pctr_model`. Candidate-cache hits carry no
+  organic features. Ads: the in-flight campaigns' in-stock, unbought items go into Retrieve;
+  pCTR comes from Rank (`ranking.Client` implements `ads.PCTRModel`), FixedPCTR when the bundle
+  has no pCTR model (features are logged either way). `RANK=off`: RRF and FixedPCTR only.
+- Releases (`internal/release`, design §6): `model_versions` built -> validated -> canary ->
+  active -> retired, every step a row of `model_version_events` (migration 00007; at most one
+  active version). validate = the api (checksums, catalog size, ItemCF golden queries) and the
+  model server (its golden data) load the version while the active one serves; canary = the
+  rank-layer experiment `release-canary` over buckets [0, 10 x percent) with `pin_version`;
+  activate = one transaction retires the previous version, the api switches at once, the model
+  server's default follows, the canary ends; rollback = back to the version the active one
+  replaced, within 30 minutes (both sides keep it loaded that long); an aborted canary is
+  retired without having been active. Every api instance reconciles every 2 s (loads the
+  active, canary and recently retired versions, unloads the rest); at startup the api takes
+  model_versions' active version (the startup bundle only when there is none). Admin api:
+  `/internal/admin/models` (GET, POST {version}), `.../models/{version}/validate|canary|activate`,
+  `/internal/admin/canary/abort`, `/internal/admin/rollback`, `/internal/admin/experiments[/{id}
+  [/stop]]` (GET / PUT / POST), `/internal/admin/fault` (GET / PUT).
+- Admin page: `web/src/app/admin` (experiments and their split, versions with validate / canary /
+  full rollout / abort / roll back, the release record, the fault switch); its server-side route
+  `/admin/api/*` forwards an allowlist to the api's `/internal/admin/*` only when the web app runs
+  with `RECLOOP_ADMIN=1`; otherwise 404.
+- Samples (`ml/samples`, design §7.5): `export.py` writes events_raw by day and type to
+  `artifacts/samples/raw/` on the host; `job.py` (PySpark, local mode) reads served of D-1..D,
+  impressions of D-1..D, clicks / carts / purchases of D..D+1; one row per event_id, one
+  impression per impression_id (a click without one stands for it), joined to its served record
+  on (request_id, position) (no record or another item: dropped, counted); label = a click within
+  30 minutes (event times = UUIDv7 times); carted / purchased within 30 minutes after the click;
+  `final = false` until the window has passed (`--complete-through`, default the newest event);
+  training samples = final home-feed impressions with served features, negatives kept by a hash
+  of the impression id below the rate (0.1) with weight 1 / rate. The job runs in a container
+  (`deploy/spark.Dockerfile`, `--network none --hostname localhost`, as the host user with a
+  one-line passwd mounted): HotSpot JVMs started from the Claude app's processes on this Mac
+  crash at startup (SIGBUS in CodeHeap::allocate, Temurin 17 and 21).
+- pCTR (`ml/models/pctr.py`): logistic regression (scikit-learn) on the samples' features plus
+  the slot and the position (one-hot 1..10, 11-20, 21+), weighted; C chosen on a time-ordered
+  split, judged on the last 20 % (AUC, log loss, calibration by position); the model server sets
+  the position to 3 and sponsored to 1.
+- Runs (stack, model server and api up; one at a time on an idle machine): `make collect`, then
+  `make samples` and `make train-pctr`, `make bundle` (the release), `make bundle
+  BUNDLE_FLAGS="--sasrec artifacts/models/sasrec/trials/8.pt"` (a bad release: the BCE trial),
+  `make release-drill NEW=... BAD=...`, `make ab`, `make samples`, `make ab-report`. The runs
+  reseed Redis between phases (`make ab` does it itself).
 
 ## Shopping assistant (M6)
 
