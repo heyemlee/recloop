@@ -216,3 +216,61 @@ def test_report_renders_both_runs_deterministically():
     failed["checks"][0] = {**failed["checks"][0], "actual": 2, "ok": False}
     assert "**1 ledger check(s) failed**" in billing_report.render(failed, None)
     assert "Not run yet: `make overdelivery`." in billing_report.render(failed, None)
+
+
+def split_redis(state_evicted=0, oom=0, cache_evicted=12):
+    return {
+        "state": {"maxmemory_mb": 1024, "policy": "noeviction", "evicted_keys": state_evicted,
+                  "oom_errors": oom, "used_memory_mb": 117.5},
+        "cache": {"maxmemory_mb": 384, "policy": "allkeys-lru", "evicted_keys": cache_evicted,
+                  "oom_errors": 0, "used_memory_mb": 300.0},
+    }  # fmt: skip
+
+
+def test_report_names_each_runs_redis_setup():
+    # Runs before the split recorded no setup: the single instance of then is named.
+    text = billing_report.render(drill_doc(), over_doc())
+    assert "on one Redis instance (384 MB, `volatile-ttl`" in text
+    # A drill on the two instances: their setup, and what it did to each.
+    d = drill_doc()
+    d["redis"], d["candidate_cache"] = split_redis(), True
+    text = billing_report.render(d, over_doc())
+    assert (
+        "on two Redis instances (design §19, 2026-11-08): state (`noeviction`, 1024 MB) and cache "
+        "(`allkeys-lru`, 384 MB), with the api's candidate cache on."
+    ) in text
+    assert "It evicted 0 keys and refused 0 writes during the run and held 117.5 MB" in text
+    assert (
+        "the state Redis evicted 0 keys and refused 0 writes during it, the cache Redis evicted 12."
+        in text
+    )
+
+
+def test_state_redis_must_not_evict_or_refuse():
+    from sim import redis_stats
+
+    before = split_redis(cache_evicted=0)
+    after = split_redis(cache_evicted=40)
+    d = redis_stats.delta(before, after)
+    assert d["cache"]["evicted_keys"] == 40 and redis_stats.state_ok(d)
+    assert not redis_stats.state_ok(redis_stats.delta(before, split_redis(state_evicted=1)))
+    assert not redis_stats.state_ok(redis_stats.delta(before, split_redis(oom=3)))
+    assert "state Redis (noeviction, 1024 MB): evicted 0, refused 0" in redis_stats.describe(d)
+
+
+def test_compose_project_of_this_checkout(tmp_path, monkeypatch):
+    from sim import compose
+
+    env = tmp_path / ".env"
+    monkeypatch.setattr(compose, "ENV_FILE", env)
+    monkeypatch.delenv("COMPOSE_PROJECT_NAME", raising=False)
+    assert compose.project() == "recloop"  # no .env: the shared stack
+    env.write_text("# private stack\nRECLOOP_REDIS_PORT=26392\nCOMPOSE_PROJECT_NAME=recloop-x\n")
+    assert compose.project() == "recloop-x"
+    cmd = compose.command("bench")
+    assert cmd[:4] == ["docker", "compose", "-p", "recloop-x"]
+    assert ["--env-file", str(env)] == cmd[6:8] and cmd[-2:] == ["--profile", "bench"]
+    assert compose.container("redis-cache") == "recloop-x-redis-cache-1"
+    assert compose.service_of("recloop-x-redis-cache-1") == "redis-cache"
+    monkeypatch.setenv("COMPOSE_PROJECT_NAME", "recloop-y")  # the environment wins
+    assert compose.project() == "recloop-y"

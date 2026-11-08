@@ -6,8 +6,12 @@ SHELL := /bin/bash
 -include .env
 RECLOOP_PG_PORT ?= 15432
 RECLOOP_REDIS_PORT ?= 16390
+RECLOOP_CACHE_REDIS_PORT ?= 16391
 DATABASE_URL ?= postgres://recloop:recloop@localhost:$(RECLOOP_PG_PORT)/recloop?sslmode=disable
+# Two Redis instances (design §19, 2026-11-08): state (user state, dedup markers, frequency caps,
+# spend; never evicts) and cache (result pages, candidate cache; evicts the least recently used).
 REDIS_URL ?= redis://localhost:$(RECLOOP_REDIS_PORT)/0
+CACHE_REDIS_URL ?= redis://localhost:$(RECLOOP_CACHE_REDIS_PORT)/0
 API_PORT ?= 18080
 MODEL_SERVER_PORT ?= 18081
 MODEL_SERVER_ADMIN_PORT ?= 18082
@@ -22,6 +26,10 @@ KAFKA_BROKERS ?= localhost:$(RECLOOP_KAFKA_PORT)
 RECLOOP_PROMETHEUS_PORT ?= 19090
 PROMETHEUS_URL ?= http://localhost:$(RECLOOP_PROMETHEUS_PORT)
 RECLOOP_BENCH_API_PORT ?= 18180
+RECLOOP_BENCH_MS_ADMIN_PORT ?= 18182
+BENCH_MS_ADMIN_URL ?= http://127.0.0.1:$(RECLOOP_BENCH_MS_ADMIN_PORT)
+RECLOOP_TOXIPROXY_PORT ?= 18474
+TOXIPROXY_URL ?= http://127.0.0.1:$(RECLOOP_TOXIPROXY_PORT)
 # Traces of `make serve-api` / `serve-model` go to the compose OTel collector. Not exported to
 # every recipe: docker compose and other OTel-aware tools would send their own traces there.
 OTEL_EXPORTER_OTLP_ENDPOINT ?= http://localhost:14317
@@ -30,9 +38,15 @@ AD_TOKEN_KEYS ?= dev1:recloop-dev-only-ad-token-key-not-a-secret-0001
 # M3: the Toxiproxy API in front of billing's PostgreSQL connection (the billing drill).
 RECLOOP_PG_PROXY_PORT ?= 18475
 PG_PROXY_URL ?= http://localhost:$(RECLOOP_PG_PROXY_PORT)
-export RECLOOP_PG_PORT RECLOOP_REDIS_PORT DATABASE_URL REDIS_URL API_ADDR MODEL_SERVER_PORT \
-	MODEL_SERVER_ADMIN_PORT MODEL_SERVER_ADDR RECLOOP_API_URL RECLOOP_BUNDLE RECLOOP_KAFKA_PORT \
-	KAFKA_BROKERS PROMETHEUS_URL RECLOOP_BENCH_API_PORT AD_TOKEN_KEYS PG_PROXY_URL
+# The compose project: `recloop` is the shared stack (the compose file's name). A checkout with a
+# private stack sets COMPOSE_PROJECT_NAME and its ports in .env; docker compose reads neither the
+# repo's .env nor that name by itself here (the file is in deploy/), so $(COMPOSE) passes both
+# and the Python tools get them from sim/compose.py.
+COMPOSE_PROJECT_NAME ?= recloop
+export RECLOOP_PG_PORT RECLOOP_REDIS_PORT DATABASE_URL REDIS_URL CACHE_REDIS_URL API_ADDR \
+	MODEL_SERVER_PORT MODEL_SERVER_ADMIN_PORT MODEL_SERVER_ADDR RECLOOP_API_URL RECLOOP_BUNDLE \
+	RECLOOP_KAFKA_PORT KAFKA_BROKERS PROMETHEUS_URL RECLOOP_BENCH_API_PORT BENCH_MS_ADMIN_URL \
+	TOXIPROXY_URL AD_TOKEN_KEYS PG_PROXY_URL COMPOSE_PROJECT_NAME
 # onnxruntime's telemetry uploader (macOS) can crash the interpreter at exit: off everywhere.
 export ORT_DISABLE_TELEMETRY := 1
 
@@ -46,7 +60,8 @@ BUF_CACHE_DIR ?= $(CURDIR)/.cache/buf
 npm_config_cache ?= $(CURDIR)/.cache/npm
 export UV_CACHE_DIR GOMODCACHE GOCACHE GOTOOLCHAIN BUF_CACHE_DIR npm_config_cache
 
-COMPOSE := docker compose -f deploy/docker-compose.yml
+COMPOSE := docker compose -p $(COMPOSE_PROJECT_NAME) $(if $(wildcard .env),--env-file .env) \
+	-f deploy/docker-compose.yml
 BENCH := $(COMPOSE) --profile bench
 UV := uv run --project ml --frozen
 PY := $(UV) python

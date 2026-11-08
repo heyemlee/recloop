@@ -15,7 +15,9 @@ import (
 
 	"github.com/heyemlee/recloop/serving/internal/adtoken"
 	"github.com/heyemlee/recloop/serving/internal/events"
+	"github.com/heyemlee/recloop/serving/internal/metrics"
 	"github.com/heyemlee/recloop/serving/internal/userstate"
+	promtest "github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 func record(t *testing.T, ev events.Event) *kgo.Record {
@@ -152,5 +154,24 @@ func TestSponsoredImpressionsCountTowardsTheCap(t *testing.T) {
 	uc, _ := state.Read(context.Background(), 5, time.Now())
 	if !uc.Seen[40] || !uc.Seen[41] || !uc.Seen[42] || !uc.Seen[43] {
 		t.Fatalf("seen %v", uc.Seen)
+	}
+}
+
+type fullApplier struct{}
+
+func (fullApplier) ApplyBatch(context.Context, []userstate.Change, time.Time) ([]bool, error) {
+	return nil, errors.New("OOM command not allowed when used memory > 'maxmemory'. script: 1726d2d4, on @user_script:6.")
+}
+
+// A full state Redis fails the batch (retried, not committed) and counts the refused write.
+func TestFullStateRedisIsCounted(t *testing.T) {
+	a := &Aggregator{State: fullApplier{}, Now: time.Now, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	refused := metrics.RedisErrors.WithLabelValues("aggregator", "apply", "oom")
+	before := promtest.ToFloat64(refused)
+	if err := a.Handle(context.Background(), []*kgo.Record{record(t, clientEvent(events.TypeClick, 1, 2))}); err == nil {
+		t.Fatal("a refused write must fail the batch")
+	}
+	if got := promtest.ToFloat64(refused) - before; got != 1 {
+		t.Fatalf("%v refused writes counted", got)
 	}
 }

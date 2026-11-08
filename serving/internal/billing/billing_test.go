@@ -18,8 +18,10 @@ import (
 
 	"github.com/heyemlee/recloop/serving/internal/adtoken"
 	"github.com/heyemlee/recloop/serving/internal/billing"
+	"github.com/heyemlee/recloop/serving/internal/metrics"
 	"github.com/heyemlee/recloop/serving/internal/store"
 	"github.com/heyemlee/recloop/serving/internal/testutil"
+	promtest "github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 // The properties run against the real database, so the default number of rapid checks is
@@ -295,5 +297,32 @@ func TestCrashAndRetry(t *testing.T) {
 	redisSpent, _ := e.spend.Spent(context.Background(), cid, day0)
 	if spent != 50 || redisSpent != 40 {
 		t.Fatalf("spent %d, redis %d: want 50 and 40", spent, redisSpent)
+	}
+}
+
+// oomSpend is a spend counter on a full state Redis: it refuses every write.
+type oomSpend struct{}
+
+func (oomSpend) Add(context.Context, uuid.UUID, int64, time.Time, int32) error {
+	return errors.New("OOM command not allowed when used memory > 'maxmemory'. script: 8b42fd55, on @user_script:5.")
+}
+
+// A full state Redis does not stop billing: the charge is in the ledger, the counter is left to
+// reconciliation, and the refused write is counted (recloop_redis_errors_total, kind oom).
+func TestChargeWhenTheSpendCounterIsRefused(t *testing.T) {
+	e := newEnv(t)
+	e.svc.Spend = oomSpend{}
+	cid := e.campaign(t, 100)
+	refused := metrics.RedisErrors.WithLabelValues("billing", "spend", "oom")
+	before := promtest.ToFloat64(refused)
+	r, err := e.svc.Handle(context.Background(), e.serve(t, cid, 40, day0).click(time.Minute))
+	if err != nil || r.Outcome != billing.Charged || r.BilledCents != 40 {
+		t.Fatalf("got %+v, %v", r, err)
+	}
+	if _, spent := e.row(t, cid, day0); spent != 40 {
+		t.Fatalf("budget row spent %d", spent)
+	}
+	if got := promtest.ToFloat64(refused) - before; got != 1 {
+		t.Fatalf("%v refused writes counted", got)
 	}
 }

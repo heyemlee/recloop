@@ -183,8 +183,12 @@ func (r *Reconciler) repair(ctx context.Context, campaignID int64, day pgtype.Da
 		return 0, 0, err
 	}
 	key := SpendKey(campaignID, day.Time)
+	failed := func(err error) error { // a Redis write of the repair
+		userstate.CountError("reconcile", "repair", err)
+		return err
+	}
 	if err := spendScript.Load(ctx, r.Redis).Err(); err != nil {
-		return 0, 0, err
+		return 0, 0, failed(err)
 	}
 	var added int64
 	const chunk = 500
@@ -198,7 +202,7 @@ func (r *Reconciler) repair(ctx context.Context, campaignID int64, day pgtype.Da
 			}, c.BilledCents, userstate.DedupTTL.Milliseconds(), SpendTTL.Milliseconds())
 		}
 		if _, err := pipe.Exec(ctx); err != nil {
-			return added, 0, err
+			return added, 0, failed(err)
 		}
 		for i, cmd := range cmds {
 			if n, _ := cmd.Int(); n == 1 {
@@ -208,7 +212,7 @@ func (r *Reconciler) repair(ctx context.Context, campaignID int64, day pgtype.Da
 	}
 	raised, err := raiseScript.Run(ctx, r.Redis, []string{key}, sum, SpendTTL.Milliseconds()).Int64()
 	if err != nil {
-		return added, 0, err
+		return added, 0, failed(err)
 	}
 	after, err := RedisSpend{R: r.Redis}.Spent(ctx, campaignID, day.Time)
 	if err != nil {

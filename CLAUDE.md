@@ -31,12 +31,13 @@ write-ups in `docs/results/`.
 ## Layout
 
 ```
-deploy/docker-compose.yml   PostgreSQL 18 + pgvector, Redis, Redpanda (+ topic init), log-sink
-                            (Redpanda Connect), aggregator, billing (+ pg-proxy: Toxiproxy between
-                            billing and PostgreSQL), Prometheus, Grafana, OTel collector, Jaeger;
-                            profile `bench`: Toxiproxy, api and model-server containers
-deploy/connect/ prometheus/ grafana/ otel/ jaeger/ toxiproxy/   their configuration;
-                            model-server.Dockerfile (bench image)
+deploy/docker-compose.yml   PostgreSQL 18 + pgvector, Redis (state + cache, redis_exporter), Redpanda
+                            (+ topic init), log-sink (Redpanda Connect), aggregator, billing
+                            (+ pg-proxy: Toxiproxy between billing and PostgreSQL), Prometheus,
+                            Grafana, OTel collector, Jaeger; profile `bench`: Toxiproxy, api and
+                            model-server containers
+deploy/connect/ prometheus/ grafana/ otel/ jaeger/ toxiproxy/   their configuration (Grafana:
+                            dashboard + provisioning/alerting/redis.yml); model-server.Dockerfile
 proto/                      buf workspace; recloop/modelserver/v1/model_server.proto (design §13.2)
 serving/                    Go module github.com/heyemlee/recloop/serving
   cmd/api/                  HTTP api (:18080): /v1/recommendations, /v1/events, /v1/items/{id},
@@ -48,7 +49,8 @@ serving/                    Go module github.com/heyemlee/recloop/serving
                             `billing reconcile` = one pass
   internal/                 api, mixer (fan-out, RRF, filters), recall, experiment, events (record
                             format, Redpanda publisher, served writer, Direct = M1's sync path),
-                            userstate (Redis + apply.lua), cache (pages, candidate cache, codec),
+                            userstate (Redis + apply.lua, health: fullness, error kinds), cache
+                            (pages, candidate cache, codec),
                             resilience (budgets, breakers), consumer (consume loop, lag),
                             aggregator, metrics (Prometheus), tracing (OTel), catalog, bundle,
                             store, ads (GSP auction, pCTR interface, campaign settings, serving:
@@ -78,8 +80,9 @@ minionerec/                 Python 3.12 uv project (own .venv, Apple Silicon onl
 web/                        Next.js 16 + shadcn/ui (:13000); /api/v1/* is proxied to the Go api
                             (/internal is not); e2e/; /advertiser is the advertiser console
 sim/                        traffic simulator (world, click model, sessions + fault switches, verify,
-                            drill; ads, billing_drill, billing_verify, overdelivery); runs in the
-                            ml environment (`$(PY) -m sim.<module>`)
+                            drill; ads, billing_drill, billing_verify, overdelivery; compose: this
+                            checkout's compose project, redis_stats: both Redis instances); runs
+                            in the ml environment (`$(PY) -m sim.<module>`)
 loadtest/                   k6 scenario recs.js, experiment runner run.py, report.py (latency.md)
 analysis/                   served_attribution.sql, srm.py, billing_report.py (billing.md)
 tools/                      go.mod pinning buf, protoc-gen-go(-grpc), sqlc (built into .cache/bin);
@@ -108,7 +111,8 @@ make eval          # Pop / ItemCF / SASRec -> docs/results/offline.md (needs tra
 make ann           # ANN benchmark + index updates -> docs/results/ann.md (~25 min; idle machine:
                    # it marks the report preliminary when the load average is above 2 at the start)
 make bundle        # artifacts/bundles/<version> (ONNX encoder, FAISS, ItemCF/Pop tables), current ->
-make seed          # FLUSHDB Redis, load dataset users' train-period history + demo users
+make seed          # FLUSHDB both Redis instances (cache first), load dataset users' train-period
+                   # history + demo users into the state Redis
 make rebuild-redis # seed + replay events_raw (FROM=db, default) or the event log (FROM=log)
 make serve-model   # model server on :18081 (bundle: artifacts/bundles/current)
 make serve-api     # Go api on :18080
@@ -128,8 +132,8 @@ make load          # latency experiments -> docs/results/latency.md (~90 min; id
 make load-smoke    # 1 repeat, 15 s runs -> artifacts/latency/smoke.md (development)
 make latency-report  # re-render latency.md from artifacts/latency/results.json
 make billing       # overdelivery + billing-drill -> docs/results/billing.md (~75 min; stack, model
-                   # server and `CANDIDATE_CACHE=off make serve-api` up; reseeds Redis; refuses to
-                   # run while other campaigns are active)
+                   # server and api up; reseeds Redis; refuses to run while other campaigns are
+                   # active)
 make overdelivery  # safety margin 0 / 5 / 20 clicks x pacing, 6 x ~5 min -> artifacts/billing/
 make billing-drill # 30 min of traffic, kill -9 billing, Redpanda restarts, PostgreSQL +200 ms
                    # for billing; then the ledger against the simulator's truth, charge by charge
@@ -154,8 +158,11 @@ preview browser. Ports and URLs are in `.env.example`.
 
 Go integration tests use `DATABASE_URL` / `REDIS_URL`: each test package gets its own database
 on that server (`recloop_test_<package>`, created, migrated and emptied by `testutil.PG`) and
-Redis DB 15. Several checkouts testing at once should each point them at a stack of their own
-(e.g. `docker compose -p <name> -f deploy/docker-compose.yml up` with other `RECLOOP_*_PORT`s).
+Redis DB 15 (the api tests' cache instance: DB 13). Several checkouts testing at once should each
+point them at a stack of their own: `COMPOSE_PROJECT_NAME` and other `RECLOOP_*_PORT`s in the
+checkout's `.env` (the Makefile's `$(COMPOSE)` passes `-p` and `--env-file .env`; the drills and
+`loadtest/run.py` use `sim/compose.py`, never the shared `recloop` project by accident;
+`RECLOOP_GO_IMAGE` / `RECLOOP_MS_IMAGE` keep the images private).
 
 Caches (`UV_CACHE_DIR`, `GOMODCACHE`, `GOCACHE`, `BUF_CACHE_DIR`, npm) default to `.cache/` in
 the repo. Inside the Claude Code sandbox these must run outside it: docker, anything that
@@ -236,13 +243,15 @@ interpreter at exit: `ORT_DISABLE_TELEMETRY=1` (Makefile, model-server image, `m
 - Ports: Redpanda 19092 (admin 19644), log-sink 14195, aggregator metrics 18090, Prometheus
   19090, Grafana 13001 (dashboard "RecLoop"), Jaeger 16686, OTLP 14317 / 14318; bench api 18180,
   bench model-server admin 18182, Toxiproxy 18474; M3: billing metrics 18092, pg-proxy API 18475,
-  model server admin `MODEL_SERVER_ADMIN_PORT` (18082). `make serve-api` / `serve-model` send traces
-  to the collector (`OTEL_EXPORTER_OTLP_ENDPOINT`); the api serves `/metrics`.
+  model server admin `MODEL_SERVER_ADMIN_PORT` (18082); cache Redis 16391 (state Redis 16390).
+  `make serve-api` / `serve-model` send traces to the collector (`OTEL_EXPORTER_OTLP_ENDPOINT`);
+  the api serves `/metrics`.
 - Load tests run on the bench profile: api and model server containers (2 CPU each); the fault
   experiment reaches the model server and Redis through Toxiproxy, the rest directly (the proxy
   adds its own tail); k6 runs on the host; before every run the consumers catch up and Redis is
-  reseeded. Redis has `maxmemory 384mb` + `volatile-ttl` (pages and caches
-  go first). Measurements need an idle machine and the coordinator's go-ahead.
+  reseeded (both instances). Until 2026-11-08 one Redis had `maxmemory 384mb` + `volatile-ttl`
+  (`latency.md` was measured so); now pages and candidates have the cache instance to
+  themselves (see Redis below). Measurements need an idle machine and the coordinator's go-ahead.
 - Simulator: `sim/world.py` (2,024 test-period users, targets = their test items, click model
   = examination x relevance by text similarity), `sim/run.py` (sessions, fault switches, ledger),
   `sim/verify.py` (events_raw / orders / Redis vs the ledger), `sim/drill.py`.
@@ -277,7 +286,8 @@ interpreter at exit: `ORT_DISABLE_TELEMETRY=1` (Makefile, model-server image, `m
   frequency below the cap, pacing -> `FixedPCTR` (`ADS_FIXED_PCTR` 0.01, floor `ADS_MIN_PCTR`)
   -> `ads.Run` -> signed tokens. The page store keeps the slots (later pages show them); ads are
   never in the candidate cache. Failure: organic feed, `ads_<timeout|error|skipped>` /
-  `pctr_error` in `degraded`; the §5.1 chain (no user state, SASRec or ranker) rules ads out.
+  `pctr_error` in `degraded`; the §5.1 chain (no user state, SASRec or ranker) rules ads out, and
+  so does a full state Redis (`ads_state_full`: caps and spend stop counting).
   The brand cap is an organic rule: ads are not counted in it.
 - Serving policy: `ADS_SAFETY_MARGIN_CLICKS` (5), `ADS_PACING` (off): pacing serves a campaign
   with probability 1 while its spend is on or behind budget x elapsed share of today's flight
@@ -308,18 +318,45 @@ interpreter at exit: `ORT_DISABLE_TELEMETRY=1` (Makefile, model-server image, `m
 - Billing runs (`make billing`): `sim.overdelivery` and `sim.billing_drill` create their own
   campaigns through the api (and end them), refuse to start while other campaigns are active,
   reseed Redis before every configuration (`ml.data.seed_redis`, after the consumers caught
-  up), and write `artifacts/billing/`. Redis must not evict during them (`evicted_keys` is
-  recorded; the drill fails on any): run the api with `CANDIDATE_CACHE=off`, or 30 minutes of
-  simulated traffic fill the 384 MB. The truth (`sim.billing_verify`) comes from the simulator's
+  up), and write `artifacts/billing/`. The state Redis must neither evict nor refuse a write
+  during them (the drill fails otherwise); the cache Redis's evictions are recorded
+  (`sim.redis_stats`). The api runs with its defaults (candidate cache on). The over-delivery
+  study in `billing.md` is from 2026-11-08 01:20 UTC, before the split (one Redis, candidate cache
+  off); the report names each section's setup. The truth (`sim.billing_verify`) comes from the simulator's
   ledger only: the tokens it was served (claims read, not verified), its clicks, which ones it
-  forged (`forge` fault). `--dwell-ms` delays a page's events (time to click). The drill's
-  docker commands use `COMPOSE_PROJECT_NAME` and the repo's `.env`; `PG_PROXY_URL` reaches
-  pg-proxy.
+  forged (`forge` fault). `--dwell-ms` delays a page's events (time to click). The drills'
+  docker commands go through `sim/compose.py`; `PG_PROXY_URL` reaches pg-proxy.
 - Property tests (rapid; billing ones against PostgreSQL): a sequential model with technical
   and business duplicates, late / forged / mismatched clicks, budget changes and crashes at every
   step must match the database exactly; concurrent workers must give the order-independent
   truth (one charge per clicked impression, spend = min(budget, prices), each outcome counted
   once). `make test` runs 30 cases each, `make test-props` 2,000.
+
+## Redis: state and cache (M3, 2026-11-08)
+
+- Two instances (design §19, 2026-11-08), both without persistence (derived state, rebuilt from
+  the log). State `redis` (`REDIS_URL`, 16390): `u:{uid}:*`, `dedup:*`, `fc:*`, `spend:*`,
+  `demo:users`; `noeviction`, `RECLOOP_REDIS_MAXMEMORY` 1 GB (container 1.5 GB). Cache
+  `redis-cache` (`CACHE_REDIS_URL`, 16391): `page:*`, `cand:*`; `allkeys-lru`, 384 MB. The api
+  uses both (user context, ads MGET, demo users: state; candidate cache, pages: cache; the page +
+  candidate write is still one pipeline). `CACHE_REDIS_URL` defaults to the cache instance and
+  never falls back to `REDIS_URL`; the api warns at start when the state instance evicts, the
+  cache does not, or both URLs reach one instance (same run_id). Aggregator, billing and
+  reconciliation use the state instance only.
+- Sizing (measured on redis 8.10, replaying the 30-minute billing drill with apply.lua): 124 B per
+  event (7-day dedup marker) + 76 B per (user, item) seen in 24 h; the seed is 3 MB, the drill
+  ~117 MB, one `make load` run ~150 MB (reseeded before every run). 1 GB holds ~6.8 M events of a
+  week. When the state instance is full it refuses writes (a script at its first write: nothing
+  half applied): the aggregator retries its batch (offsets uncommitted, lag grows, no loss),
+  billing still charges in PostgreSQL but its spend update and reconciliation's repairs fail, the
+  api serves no ads (`userstate.Fullness`: INFO every 5 s, full at 98 % of maxmemory or on a new
+  `errorstat_OOM`). Remedy: `make seed` / `make rebuild-redis`, or a larger maxmemory.
+- Visible: redis_exporter v1.95.0 (`job="redis"`, label `redis="state"|"cache"`):
+  `redis_memory_*`, `redis_evicted_keys_total`, `redis_errors_total{err="OOM"}`; the services'
+  `recloop_redis_errors_total{component,op,kind}` and the api's `recloop_redis_state_full`.
+  Grafana: the dashboard's Redis row and the provisioned alert rules (state evicted, state full,
+  write errors, state above 80 %, reconciliation stale, aggregator lag, exporter missing); no
+  contact point locally (the Alerting page shows them).
 
 ## Evaluation protocol
 

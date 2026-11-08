@@ -46,6 +46,9 @@ type AdServer struct {
 	Policy ads.Policy
 	// Draw returns uniform numbers in [0, 1) for pacing (math/rand when nil).
 	Draw func() float64
+	// State reports whether the state Redis is full (userstate.Fullness); nil: never. While it
+	// is, the frequency caps and spend counters stop counting, so no ads (ads_state_full).
+	State interface{ Full() bool }
 }
 
 func (a *AdServer) draw() float64 {
@@ -90,6 +93,7 @@ const (
 	adsEmpty      = "empty"       // no eligible ad
 	adsNotAllowed = "not_allowed" // the degradation chain rules ads out (§5.1)
 	adsStale      = "stale"       // the campaign snapshot is too old (PostgreSQL unreachable)
+	adsStateFull  = "state_full"  // the state Redis refuses writes: caps and spend stop counting
 )
 
 // adResult is what the ads stage decided for one request.
@@ -117,6 +121,12 @@ func (s *Server) selectAds(q *request, requestID uuid.UUID, positions []int, a e
 	defer func() { metrics.AdRequests.WithLabelValues(q.surface, res.Outcome).Inc() }()
 	if !adsAllowed(q.degraded) {
 		res.Outcome = adsNotAllowed
+		return res, nil
+	}
+	if s.Ads.State != nil && s.Ads.State.Full() {
+		res.Outcome = adsStateFull
+		q.degrade("ads_state_full")
+		s.warn("ads_state_full", "the state Redis is full (frequency caps and spend stop counting): no ads")
 		return res, nil
 	}
 	snap := s.Ads.Index.Current()

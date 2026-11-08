@@ -4,7 +4,11 @@
 //
 //	API_ADDR               listen address (127.0.0.1:18080)
 //	DATABASE_URL           PostgreSQL (postgres://recloop:recloop@localhost:15432/recloop?sslmode=disable)
-//	REDIS_URL              Redis (redis://localhost:16390/0)
+//	REDIS_URL              state Redis: user state, spend and frequency counters; never evicts
+//	                       (redis://localhost:16390/0)
+//	CACHE_REDIS_URL        cache Redis: result pages and the candidate cache; evicts the least
+//	                       recently used (redis://localhost:16391/0). Never the state instance:
+//	                       pages would fill it, so there is no fallback to REDIS_URL.
 //	MODEL_SERVER_ADDR      gRPC model server (127.0.0.1:18081)
 //	RECLOOP_BUNDLE         bundle directory (artifacts/bundles/current)
 //	EVENTS_MODE            redpanda: events go to the event log (default); direct: written to
@@ -171,6 +175,63 @@ func adServer(ctx context.Context, bg context.Context, st *store.Store, log *slo
 	}, nil
 }
 
+// redisClient connects to the Redis of an environment variable (default def).
+func redisClient(ctx context.Context, name, def string, naive bool, log *slog.Logger) (*redis.Client, error) {
+	opts, err := redis.ParseURL(env(name, def))
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", name, err)
+	}
+	if !naive {
+		// Deadlines come from the request budget; a retry inside a 5 ms budget is pointless.
+		opts.ContextTimeoutEnabled = true
+		opts.MaxRetries = -1
+		opts.DialTimeout = 100 * time.Millisecond
+		opts.PoolTimeout = 50 * time.Millisecond
+		opts.MinIdleConns = 8
+	}
+	c := redis.NewClient(opts)
+	if err := c.Ping(ctx).Err(); err != nil {
+		log.Warn("redis unreachable; requests degrade until it is back", "env", name, "err", err)
+	}
+	return c, nil
+}
+
+// checkRedis warns about a setup that would lose state silently or fill it: the state instance
+// evicting keys, the cache instance not evicting, or both URLs on one instance (same run_id). A
+// Redis that is down, or refuses INFO / CONFIG, is not checked.
+func checkRedis(ctx context.Context, state, cache *redis.Client, log *slog.Logger) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	runID := func(c *redis.Client) string {
+		raw, err := c.Info(ctx, "server").Result()
+		if err != nil {
+			return ""
+		}
+		for _, line := range strings.Split(raw, "\n") {
+			if v, ok := strings.CutPrefix(strings.TrimSpace(line), "run_id:"); ok {
+				return v
+			}
+		}
+		return ""
+	}
+	policy := func(c *redis.Client) string {
+		v, err := c.ConfigGet(ctx, "maxmemory-policy").Result()
+		if err != nil {
+			return ""
+		}
+		return v["maxmemory-policy"]
+	}
+	if id := runID(state); id != "" && id == runID(cache) {
+		log.Warn("REDIS_URL and CACHE_REDIS_URL are the same Redis: result pages and candidates fill the state instance")
+	}
+	if p := policy(state); p != "" && p != "noeviction" {
+		log.Warn("the state Redis evicts keys: dedup markers, frequency caps and spend counters can disappear", "maxmemory-policy", p)
+	}
+	if p := policy(cache); p == "noeviction" {
+		log.Warn("the cache Redis does not evict: once it is full, pages and the candidate cache fail", "maxmemory-policy", p)
+	}
+}
+
 // spanName keeps span names to the route, not the concrete path.
 func spanName(_ string, r *http.Request) string {
 	p := r.URL.Path
@@ -220,23 +281,18 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
-	ropts, err := redis.ParseURL(env("REDIS_URL", "redis://localhost:16390/0"))
+	// Two Redis instances (design §19, 2026-11-08): state and cache.
+	rdb, err := redisClient(ctx, "REDIS_URL", "redis://localhost:16390/0", naive, log)
 	if err != nil {
 		return err
 	}
-	if !naive {
-		// Deadlines come from the request budget; a retry inside a 5 ms budget is pointless.
-		ropts.ContextTimeoutEnabled = true
-		ropts.MaxRetries = -1
-		ropts.DialTimeout = 100 * time.Millisecond
-		ropts.PoolTimeout = 50 * time.Millisecond
-		ropts.MinIdleConns = 8
-	}
-	rdb := redis.NewClient(ropts)
 	defer rdb.Close()
-	if err := rdb.Ping(ctx).Err(); err != nil {
-		log.Warn("redis unreachable; requests degrade until it is back", "err", err)
+	cacheRdb, err := redisClient(ctx, "CACHE_REDIS_URL", "redis://localhost:16391/0", naive, log)
+	if err != nil {
+		return err
 	}
+	defer cacheRdb.Close()
+	checkRedis(ctx, rdb, cacheRdb, log)
 
 	gopts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
 	if tracingOn {
@@ -323,18 +379,24 @@ func run(log *slog.Logger) error {
 	}
 	var cands *cache.CandidateCache
 	if env("CANDIDATE_CACHE", "on") != "off" {
-		cands = &cache.CandidateCache{R: rdb, TTL: cache.CandidateTTL}
+		cands = &cache.CandidateCache{R: cacheRdb, TTL: cache.CandidateTTL}
 	}
 	adSrv, err := adServer(ctx, bg, st, log)
 	if err != nil {
 		return err
+	}
+	if adSrv != nil {
+		// While the state Redis is full, frequency caps and spend stop counting: no ads.
+		full := &userstate.Fullness{R: rdb, Log: log}
+		go full.Run(bg, ads.RefreshEvery)
+		adSrv.State = full
 	}
 
 	srv := &api.Server{
 		Catalog: cat,
 		Bundle:  b,
 		Users:   users,
-		Pages:   cache.Pages{R: rdb},
+		Pages:   cache.Pages{R: cacheRdb},
 		Cands:   cands,
 		Exps:    exps,
 		Events:  publisher,
@@ -361,12 +423,15 @@ func run(log *slog.Logger) error {
 		Ready: func(ctx context.Context) map[string]string {
 			ctx, cancel := context.WithTimeout(ctx, time.Second)
 			defer cancel()
-			out := map[string]string{"postgres": "ok", "redis": "ok", "model_server": "ok"}
+			out := map[string]string{"postgres": "ok", "redis": "ok", "redis_cache": "ok", "model_server": "ok"}
 			if err := st.Pool.Ping(ctx); err != nil {
 				out["postgres"] = err.Error()
 			}
 			if err := rdb.Ping(ctx).Err(); err != nil {
 				out["redis"] = err.Error()
+			}
+			if err := cacheRdb.Ping(ctx).Err(); err != nil {
+				out["redis_cache"] = err.Error()
 			}
 			if r, err := health.Check(ctx, &healthpb.HealthCheckRequest{}); err != nil {
 				out["model_server"] = err.Error()

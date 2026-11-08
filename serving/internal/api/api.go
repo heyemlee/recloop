@@ -35,7 +35,9 @@ type Server struct {
 	Exps    *experiment.Loader
 	Events  events.Publisher
 	Served  *events.ServedWriter
-	Redis   redis.UniversalClient
+	// Redis is the state instance (user state, spend and frequency counters, demo users);
+	// Pages and Cands hold the cache instance (design §19, 2026-11-08: two Redis).
+	Redis redis.UniversalClient
 	// Campaigns is the advertiser api's store; nil leaves its routes out.
 	Campaigns CampaignStore
 	// Ads serves the sponsored slots of the home feed and /internal/ads/select; nil: no ads.
@@ -44,9 +46,9 @@ type Server struct {
 	// "rrf_weights" param overrides them).
 	Sources map[string][]mixer.Spec
 	Weights map[string]map[string]float64
-	// Plan is the request budget. RedisBreaker, if set, guards user state, pages and the
-	// candidate cache (cmd/api leaves it nil); the model server's and PostgreSQL's breakers
-	// sit in their Specs.
+	// Plan is the request budget. RedisBreaker, if set, guards the calls to both Redis
+	// instances: user state, pages and the candidate cache (cmd/api leaves it nil); the model
+	// server's and PostgreSQL's breakers sit in their Specs.
 	Plan         resilience.Plan
 	RedisBreaker *resilience.Breaker
 	// Naive turns off the request deadline, the stage budgets, the breakers and degradation:

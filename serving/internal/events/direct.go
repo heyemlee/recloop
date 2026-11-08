@@ -66,6 +66,7 @@ func (s *Direct) Publish(ctx context.Context, evs []Event) (Result, error) {
 	// before (or while) updating Redis, the retry completes it; the dedup marker prevents a
 	// second application.
 	if _, err := s.State.ApplyBatch(ctx, Changes(evs, s.FreqKey), s.Now()); err != nil {
+		userstate.CountError("api", "apply", err)
 		return out, err
 	}
 	return out, nil

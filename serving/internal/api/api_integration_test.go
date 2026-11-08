@@ -41,14 +41,17 @@ const nItems = 40
 var testPlan = resilience.Plan{Total: 2 * time.Second, UserContext: 500 * time.Millisecond, CacheGet: 200 * time.Millisecond,
 	Recall: 500 * time.Millisecond, Rank: 100 * time.Millisecond, Ads: 200 * time.Millisecond, Tail: 500 * time.Millisecond}
 
-// fixture: an api on the test database and Redis DB 15, with in-process sources only.
+// fixture: an api on the test database, the state Redis on DB 15 and the cache Redis on DB 13
+// of the dev Redis (two instances in production: design §19, 2026-11-08), with in-process
+// sources only.
 type fixture struct {
 	t      *testing.T
 	st     *store.Store
 	srv    *httptest.Server
 	served *events.ServedWriter
 	cat    *catalog.Catalog
-	rdb    *redis.Client
+	rdb    *redis.Client // state
+	cache  *redis.Client // pages and the candidate cache
 	exps   *experiment.Loader
 	ads    *api.AdServer // nil unless the fixture serves ads
 	cancel context.CancelFunc
@@ -76,6 +79,7 @@ func newFixtureWith(t *testing.T, o fixtureOpts) *fixture {
 	}
 	st := testutil.PG(t)
 	rdb := testutil.Redis(t)
+	cacheRdb := testutil.RedisDB(t, 13)
 	testutil.SeedItems(t, st, nItems, func(i int) int {
 		if i == nItems-1 {
 			return 0 // sold out
@@ -129,8 +133,8 @@ func newFixtureWith(t *testing.T, o fixtureOpts) *fixture {
 		direct.FreqKey = aggregator.FreqKeys(keys) // the aggregator's rule on the direct path
 	}
 	s := &api.Server{
-		Catalog: cat, Bundle: b, Users: users, Pages: cache.Pages{R: rdb}, Exps: exps,
-		Cands:  &cache.CandidateCache{R: rdb},
+		Catalog: cat, Bundle: b, Users: users, Pages: cache.Pages{R: cacheRdb}, Exps: exps,
+		Cands:  &cache.CandidateCache{R: cacheRdb},
 		Events: direct,
 		Served: served, Redis: rdb, Plan: plan, Campaigns: st, Ads: adSrv,
 		Sources: map[string][]mixer.Spec{
@@ -146,7 +150,7 @@ func newFixtureWith(t *testing.T, o fixtureOpts) *fixture {
 		},
 		Log: log, Now: time.Now,
 	}
-	f := &fixture{t: t, st: st, srv: httptest.NewServer(s.Handler()), served: served, cat: cat, rdb: rdb, exps: exps, ads: adSrv, cancel: cancel}
+	f := &fixture{t: t, st: st, srv: httptest.NewServer(s.Handler()), served: served, cat: cat, rdb: rdb, cache: cacheRdb, exps: exps, ads: adSrv, cancel: cancel}
 	t.Cleanup(func() {
 		f.srv.Close()
 		cancel()
@@ -305,6 +309,40 @@ func TestClickChangesTheNextRecommendations(t *testing.T) {
 	}
 	if viaClick == 0 || after.Items[0].ItemID != 21 {
 		t.Fatalf("neighbours of the clicked item are missing: %+v", after.Items)
+	}
+}
+
+// Result pages and candidate lists go to the cache Redis, user state stays in the state Redis:
+// the cache instance may evict, the state instance never does (design §19, 2026-11-08).
+func TestPagesAndCandidatesInTheCacheRedis(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	keys := func(c *redis.Client, pattern string) int {
+		k, err := c.Keys(ctx, pattern).Result()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(k)
+	}
+	var first recResp
+	f.get("/v1/recommendations?user_id=12&limit=10", &first)
+	f.post(event("click", 12, 20, first.Items[0].ImpressionID))
+	var page1 recResp
+	if code := f.get("/v1/recommendations?user_id=12&limit=10", &page1); code != 200 || page1.NextCursor == "" {
+		t.Fatalf("status %d, cursor %q", code, page1.NextCursor)
+	}
+	if n, c := keys(f.cache, "page:*"), keys(f.cache, "cand:*"); n != 2 || c == 0 {
+		t.Fatalf("cache Redis: %d pages, %d candidate lists", n, c)
+	}
+	if n := keys(f.rdb, "page:*") + keys(f.rdb, "cand:*"); n != 0 {
+		t.Fatalf("%d pages or candidate lists in the state Redis", n)
+	}
+	if keys(f.rdb, "u:12:*") == 0 || keys(f.cache, "u:*")+keys(f.cache, "dedup:*") != 0 {
+		t.Fatal("user state is not (only) in the state Redis")
+	}
+	var page2 recResp
+	if code := f.get("/v1/recommendations?user_id=12&limit=10&cursor="+page1.NextCursor, &page2); code != 200 || page2.RequestID != page1.RequestID {
+		t.Fatalf("next page from the cache Redis: status %d, %+v", code, page2)
 	}
 }
 

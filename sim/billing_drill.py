@@ -36,7 +36,8 @@ import urllib.request
 from pathlib import Path
 
 from sim import ads as ads_mod
-from sim import billing_verify
+from sim import billing_verify, redis_stats
+from sim import compose as compose_mod
 from sim import run as run_mod
 from sim import verify as verify_mod
 
@@ -53,17 +54,8 @@ ITEMS_PER_CAMPAIGN = 10
 FREQ_CAP = 20
 
 
-def compose_cmd() -> list[str]:
-    """docker compose on the repo's file; the project and ports come from the environment
-    (COMPOSE_PROJECT_NAME) and, if there is one, the repo's .env."""
-    cmd = ["docker", "compose", "-f", str(ROOT / "deploy" / "docker-compose.yml")]
-    if (ROOT / ".env").exists():
-        cmd += ["--env-file", str(ROOT / ".env")]
-    return cmd
-
-
 def compose(*args: str) -> None:
-    subprocess.run([*compose_cmd(), *args], check=True, capture_output=True)
+    compose_mod.run(*args)
 
 
 def toxiproxy(method: str, path: str, doc: dict | None = None) -> None:
@@ -160,7 +152,7 @@ def repairs_during(since: float) -> dict:
     passes that found a Redis counter behind the ledger."""
     p = subprocess.run(
         [
-            *compose_cmd(),
+            *compose_mod.command(),
             "logs",
             "--no-color",
             "--no-log-prefix",
@@ -187,9 +179,9 @@ def repairs_during(since: float) -> dict:
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--minutes", type=float, default=30)
-    # 8 sessions at a time, ~40 page views/s: 30 minutes of result pages (5 KB each, kept 10
-    # minutes) and dedup markers (one per event, 7 days) stay well under Redis's 384 MB, so
-    # nothing is evicted (at 12, ~64/s, the dev Redis filled up and evicted keys).
+    # 8 sessions at a time, ~40 page views/s, as in the runs of 2026-11-07 (comparable). With the
+    # single 384 MB Redis of then, 12 (~64/s) filled it with result pages and dedup markers;
+    # the state Redis (1 GB, noeviction) holds a 30-minute drill in ~120 MB.
     p.add_argument("--concurrency", type=int, default=8)
     p.add_argument("--think-ms", default="50,300")
     p.add_argument("--faults", default=FAULTS)
@@ -209,10 +201,11 @@ def main(argv: list[str] | None = None) -> None:
     ads = ads_mod.Ads(api_url, db_url)
     ads.require_no_active_campaigns()
     cache = ads.candidate_cache()
-    # The seeded user state, and Redis far from its memory cap: an evicted spend counter, dedup
-    # marker or frequency counter would change the run (the run fails if any key is evicted).
+    # The seeded user state. The state Redis must neither evict nor refuse a write during the
+    # run (an evicted spend counter, dedup marker or frequency counter would change it): the run
+    # fails otherwise. The cache Redis may evict (pages, candidate lists): recorded only.
     ads_mod.reset_redis()
-    evicted = ads_mod.evicted_keys()
+    redis_before = redis_stats.counters()
     # Toxiproxy reachable, and no toxic left from an earlier run.
     with contextlib.suppress(urllib.error.HTTPError):  # 404: none
         pg_slow(False, 0)
@@ -260,7 +253,7 @@ def main(argv: list[str] | None = None) -> None:
     t = time.time()
     verify_mod.wait_for_consumers(("billing", "log-sink", "aggregator"))
     caught_up = time.time() - t
-    evicted = ads_mod.evicted_keys() - evicted
+    rd = redis_stats.delta(redis_before, redis_stats.counters())
     during = repairs_during(started)
     rec = reconcile()
     rep = billing_verify.verify(out, db_url, redis_url)
@@ -273,7 +266,7 @@ def main(argv: list[str] | None = None) -> None:
         "campaign_settings": [{"campaign_id": c["campaign_id"], "bid": c["bid_cpc_cents"],
                                "budget": c["daily_budget_cents"]} for c in camps],
         "caught_up_seconds": round(caught_up, 1), "reconcile": rec, "reconciler_during": during,
-        "evicted_keys": evicted, "candidate_cache": cache,
+        "evicted_keys": rd["state"]["evicted_keys"], "redis": rd, "candidate_cache": cache,
         "pipeline": {k: pipeline[k] for k in ("events", "pages", "checks", "ok")},
     })  # fmt: skip
     rep["ok"] = (
@@ -281,11 +274,12 @@ def main(argv: list[str] | None = None) -> None:
         and pipeline["ok"]
         and rec["redis_ahead"] == 0
         and rec["row_mismatch"] == 0
-        and evicted == 0
+        and redis_stats.state_ok(rd)
     )
     (out / "verify.json").write_text(json.dumps(rep, indent=2))
     billing_verify.print_report(rep)
     verify_mod.print_report(pipeline)
+    print(f"redis    {redis_stats.describe(rd)}")
     raise SystemExit(0 if rep["ok"] else 1)
 
 

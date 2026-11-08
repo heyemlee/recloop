@@ -112,7 +112,15 @@ def summarize(rs: list[dict]) -> dict:
         "caught_up": med([r["consumers_caught_up_s"] for r in rs]),
         "cpu": {
             c: med([r["containers_mid_run"].get(c, {}).get("cpu_pct") for r in rs])
-            for c in ("api", "model-server", "redis", "postgres", "redpanda", "log-sink")
+            for c in (
+                "api",
+                "model-server",
+                "redis",
+                "redis-cache",
+                "postgres",
+                "redpanda",
+                "log-sink",
+            )
         },  # fmt: skip
     }
 
@@ -328,6 +336,8 @@ def render(data: dict) -> str:
                 "api",
                 "model-server",
                 "redis",
+                # Two Redis instances since 2026-11-08 (state, cache); earlier runs had one.
+                *(["redis-cache"] if "redis-cache" in lim else []),
                 "postgres",
                 "redpanda",
                 "aggregator",
@@ -421,18 +431,23 @@ def render(data: dict) -> str:
             rates, {"P99": [s["p99"] for _, s in ladder], "P50": [s["p50"] for _, s in ladder]}
         )
         out += ["Lines: P99 (upper) and P50 (lower), median of the runs.", ""]
+        # Runs since the Redis split (2026-11-08) have a cache instance: its own CPU column.
+        two = any(s["cpu"].get("redis-cache") is not None for _, s in ladder)
+        redis_cols = "state Redis CPU | cache Redis CPU" if two else "Redis CPU"
         out += ["Per stage (server P99, ms) and where the CPU went (container CPU % mid-run, 100 % = one core):", "",
                 "| offered /s | user context | cache get | recall | rank | filter | page store | render | "
-                "api CPU | model server CPU | Redis CPU | PostgreSQL CPU | Redpanda CPU | log-sink lag (max) |",
-                "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]  # fmt: skip
+                f"api CPU | model server CPU | {redis_cols} | PostgreSQL CPU | Redpanda CPU | log-sink lag (max) |",
+                "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|" + ("---:|" if two else "")
+                + "---:|---:|---:|"]  # fmt: skip
         for r, s in ladder:
             st = s["stages"]
             cpu = s["cpu"]
+            redis_cpu = ms(cpu["redis"], 0) + (f" | {ms(cpu.get('redis-cache'), 0)}" if two else "")
             out.append(
                 f"| {r['rate']} | {ms(st.get('user_context'))} | {ms(st.get('cache_get'))} | "
                 f"{ms(st.get('recall'))} | {ms(st.get('rank'))} | {ms(st.get('filter'))} | "
                 f"{ms(st.get('page_store'))} | {ms(st.get('render'))} | {ms(cpu['api'], 0)} | "
-                f"{ms(cpu['model-server'], 0)} | {ms(cpu['redis'], 0)} | {ms(cpu['postgres'], 0)} | "
+                f"{ms(cpu['model-server'], 0)} | {redis_cpu} | {ms(cpu['postgres'], 0)} | "
                 f"{ms(cpu['redpanda'], 0)} | {s['lag_max']['log-sink']:.0f} |"
             )
         out.append("")

@@ -92,9 +92,57 @@ def drill_summary(d: dict) -> list[str]:
         f"{d['charges']:,} charges. {verdict}: {d['charges_expected']:,} expected, "
         f"{d['charges']:,} in the ledger. **{over['actual']} campaign-days with charges above "
         f"budget**; {agreement}. The event-pipeline checks of the same run "
-        f"{'passed' if d['pipeline']['ok'] else '**failed**'}; Redis evicted "
-        f"{d.get('evicted_keys', '?')} keys during it.",
+        f"{'passed' if d['pipeline']['ok'] else '**failed**'}; {redis_outcome(d)}.",
     ]
+
+
+def redis_setup(rd: dict | None) -> str:
+    """The Redis a run had: recorded per instance since the split (sim.redis_stats), else the
+    single instance of the runs before it."""
+    if not rd:
+        return (
+            "one Redis instance (384 MB, `volatile-ttl`: the setup before the split of 2026-11-08)"
+        )
+    return (
+        f"two Redis instances (design §19, 2026-11-08): state (`{rd['state']['policy']}`, "
+        f"{rd['state']['maxmemory_mb']} MB) and cache (`{rd['cache']['policy']}`, "
+        f"{rd['cache']['maxmemory_mb']} MB)"
+    )
+
+
+def drill_redis(d: dict) -> list[str]:
+    """The drill's Redis setup and what the run did to it."""
+    cache = "on" if d.get("candidate_cache") else "off"
+    rd = d.get("redis")
+    if not rd:
+        return [
+            f"The run started from the seeded Redis state, on {redis_setup(rd)}, with the api's "
+            f"candidate cache {cache} to keep 30 minutes of simulated traffic far from Redis's "
+            f"memory cap: Redis evicted {d.get('evicted_keys', 'an unknown number of')} keys during "
+            "the run (an evicted spend counter would make a spent campaign look new to ad serving "
+            "until reconciliation repairs it).",
+        ]
+    return [
+        f"The run started from the seeded Redis state, on {redis_setup(rd)}, with the api's "
+        f"candidate cache {cache}. The state Redis never evicts: when it is full it refuses writes "
+        "(and the run fails), so no spend counter, dedup marker or frequency counter can vanish "
+        f"in the middle of a run. It evicted {rd['state']['evicted_keys']} keys and refused "
+        f"{rd['state']['oom_errors']} writes during the run and held {rd['state']['used_memory_mb']:g} "
+        f"MB at the end; the cache Redis (result pages, candidate lists, which it may drop) evicted "
+        f"{rd['cache']['evicted_keys']:,} keys.",
+    ]
+
+
+def redis_outcome(d: dict) -> str:
+    """What a run did to Redis: the state instance must neither evict nor refuse a write."""
+    rd = d.get("redis")
+    if not rd:
+        return f"Redis evicted {d.get('evicted_keys', '?')} keys during it"
+    return (
+        f"the state Redis evicted {rd['state']['evicted_keys']} keys and refused "
+        f"{rd['state']['oom_errors']} writes during it, the cache Redis evicted "
+        f"{rd['cache']['evicted_keys']:,}"
+    )
 
 
 def drill_section(d: dict) -> list[str]:
@@ -118,11 +166,7 @@ def drill_section(d: dict) -> list[str]:
         "served with a safety margin of 0 clicks, the setting that lets the most clicks "
         "arrive after a budget is spent.",
         "",
-        f"The run started from the seeded Redis state, with the api's candidate cache "
-        f"{'on' if d.get('candidate_cache') else 'off'} to keep 30 minutes of simulated traffic far "
-        f"from Redis's memory cap: Redis evicted {d.get('evicted_keys', 'an unknown number of')} "
-        "keys during the run (an evicted spend counter would make a spent campaign look new to "
-        "ad serving until reconciliation repairs it).",
+        *drill_redis(d),
         "",
         f"During the traffic: {n['kill']} × `kill -9` of the billing container (started again "
         f"{down} s later), {n['redpanda']} restarts of Redpanda, and {n['slow']} windows of "
@@ -272,9 +316,10 @@ def overdelivery_section(o: dict) -> list[str]:
         "billing seconds after its slot was served. The stub pCTR is the same for every ad, so "
         "the auction ranks by bid: the first campaign is shown first and runs out first, and the "
         "next one moves up. The safety margin and pacing are an ads-layer experiment (§8), "
-        "changed between configurations. Each configuration starts from the seeded Redis state; "
-        f"the api ran with its candidate cache {'on' if o.get('candidate_cache') else 'off'}, and "
-        "Redis evicted "
+        "changed between configurations. Each configuration starts from the seeded Redis state, "
+        f"on {redis_setup(o['results'][0].get('redis'))}; the api ran with its candidate cache "
+        f"{'on' if o.get('candidate_cache') else 'off'}, and "
+        + ("the state Redis evicted " if o["results"][0].get("redis") else "Redis evicted ")
         + ", ".join(str(r.get("evicted_keys", "?")) for r in o["results"])
         + " keys during the six runs.",
         "",

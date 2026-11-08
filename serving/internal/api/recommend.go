@@ -436,7 +436,7 @@ func (s *Server) recommend(q *request, specs []mixer.Spec, limit int, debugOn bo
 	}
 
 	// Page (for the cursor) and, after a fresh and complete recall, the candidate cache entry:
-	// one Redis round trip.
+	// one round trip to the cache Redis (cmd/api builds Pages and Cands on the same client).
 	t = time.Now()
 	_, span = q.span("page_store")
 	page := &cache.Page{
@@ -448,7 +448,7 @@ func (s *Server) recommend(q *request, specs []mixer.Spec, limit int, debugOn bo
 	}
 	storeCands := s.Cands != nil && cacheResult != CacheHit && complete && (userOK || q.surface == recall.SurfaceItem)
 	status, err = q.redis(q.budget.For(plan.Tail, renderReserve), func(c context.Context) error {
-		pipe := s.Redis.Pipeline()
+		pipe := s.Pages.R.Pipeline()
 		if err := s.Pages.PutCmd(c, pipe, page); err != nil {
 			return err
 		}

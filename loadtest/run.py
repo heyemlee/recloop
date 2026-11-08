@@ -39,19 +39,16 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from urllib.parse import urlencode
 
+from sim import compose as compose_mod
+
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "artifacts" / "latency"
 K6 = ROOT / ".cache" / "bin" / "k6"
 AGGREGATOR = ROOT / ".cache" / "bin" / "aggregator"
 WORLD = ROOT / "artifacts" / "sim" / "world.json"
-COMPOSE = [
-    "docker",
-    "compose",
-    "-f",
-    str(ROOT / "deploy" / "docker-compose.yml"),
-    "--profile",
-    "bench",
-]
+# This checkout's compose project (COMPOSE_PROJECT_NAME, default the shared `recloop`) with the
+# bench profile: a private checkout must never recreate the shared stack's api.
+COMPOSE = compose_mod.command("bench")
 API = os.environ.get(
     "BENCH_API_URL", f"http://127.0.0.1:{os.environ.get('RECLOOP_BENCH_API_PORT', '18180')}"
 )
@@ -62,6 +59,7 @@ CONTAINERS = [
     "api",
     "model-server",
     "redis",
+    "redis-cache",
     "redpanda",
     "postgres",
     "aggregator",
@@ -74,7 +72,7 @@ FAULTS = {
     "ms_slow": "model server: 30 % of calls +200 ms",
     "ms_latency": "model server: every call +50 ms",
     "ms_down": "model server disconnected",
-    "redis_down": "Redis disconnected",
+    "redis_down": "Redis disconnected",  # both instances (state and cache), as in M2
 }
 
 
@@ -97,6 +95,7 @@ class ApiConfig:
         if not self.proxied:
             env |= {
                 "BENCH_REDIS_URL": "redis://redis:6379/0",
+                "BENCH_CACHE_REDIS_URL": "redis://redis-cache:6379/0",
                 "BENCH_MODEL_SERVER_ADDR": "model-server:18081",
             }
         return env
@@ -237,7 +236,8 @@ class Bench:
         elif fault == "ms_down":
             http("POST", TOXIPROXY + "/proxies/model_server", {"enabled": False})
         elif fault == "redis_down":
-            http("POST", TOXIPROXY + "/proxies/redis", {"enabled": False})
+            for proxy in ("redis", "redis_cache"):
+                http("POST", TOXIPROXY + "/proxies/" + proxy, {"enabled": False})
 
     def reset_state(self) -> float:
         """Consumers caught up, Redis reseeded, faults off. Returns the catch-up time (s)."""
@@ -301,12 +301,12 @@ def prom_by(expr: str, at: float, label: str) -> dict[str, float]:
 
 
 def docker_cpu() -> dict[str, dict]:
-    names = [f"recloop-{c}-1" for c in CONTAINERS]
+    names = [compose_mod.container(c) for c in CONTAINERS]
     raw = sh("docker", "stats", "--no-stream", "--format", "{{json .}}", *names, check=False)
     out = {}
     for line in raw.splitlines():
         d = json.loads(line)
-        name = d["Name"].removeprefix("recloop-").removesuffix("-1")
+        name = compose_mod.service_of(d["Name"])
         out[name] = {
             "cpu_pct": float(d["CPUPerc"].rstrip("%") or 0),
             "mem": d["MemUsage"].split(" / ")[0],
@@ -541,24 +541,22 @@ def environment() -> dict:
     limits = {}
     for c in CONTAINERS:
         raw = sh(
-            "docker", "inspect", f"recloop-{c}-1", "--format", "{{json .HostConfig}}", check=False
-        )
+            "docker", "inspect", compose_mod.container(c), "--format", "{{json .HostConfig}}",
+            check=False,
+        )  # fmt: skip
         if raw.strip():
             hc = json.loads(raw)
             limits[c] = {
                 "cpus": hc.get("NanoCpus", 0) / 1e9,
                 "memory_mb": hc.get("Memory", 0) // (1 << 20),
             }
-    others = [
-        n
-        for n in sh("docker", "ps", "--format", "{{.Names}}").split()
-        if not n.startswith("recloop-")
-    ]
+    others = compose_mod.other_projects_running()
     images = {}
     for c in CONTAINERS:
         raw = sh(
-            "docker", "inspect", f"recloop-{c}-1", "--format", "{{.Config.Image}}", check=False
-        )
+            "docker", "inspect", compose_mod.container(c), "--format", "{{.Config.Image}}",
+            check=False,
+        )  # fmt: skip
         images[c] = raw.strip()
     cpu_model = sh("sysctl", "-n", "machdep.cpu.brand_string", check=False).strip()
     mem = sh("sysctl", "-n", "hw.memsize", check=False).strip()
