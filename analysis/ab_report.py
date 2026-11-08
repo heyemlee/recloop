@@ -448,7 +448,10 @@ def render(run: dict, results: dict, offline: dict | None) -> str:
                         f"{v['p50']:.1f}",
                         f"{v['p99']:.1f}",
                     ]
-                    for a, v in sorted(g.items())
+                    for a, v in sorted(
+                        g.items(),
+                        key=lambda kv: res["arms"].index(kv[0]) if kv[0] in res["arms"] else 99,
+                    )
                 ],
             )
             lines += [""]
@@ -465,17 +468,20 @@ def render(run: dict, results: dict, offline: dict | None) -> str:
     if ab is not None:
         m = ab["metrics"]["ctr"]
         verdict = (
-            "higher"
+            "higher than"
             if m["ci_delta"][0] > 0
-            else "lower"
+            else "lower than"
             if m["ci_delta"][1] < 0
-            else "not significantly different"
+            else "not significantly different from"
         )
+        half = (m["ci_delta"][1] - m["ci_delta"][0]) / 2
         lines += [
             "## Reading",
             "",
-            f"- Home-feed CTR with the LightGBM ranker is {verdict} than with RRF: {m['diff']:+.4f} "
-            f"({m['rel']:+.1%}), 95% CI {_ci(m['ci_delta'])}, p = {m['p']:.3g}.",
+            f"- Home-feed CTR with the LightGBM ranker is {verdict} CTR with RRF: {m['diff']:+.4f} "
+            f"({m['rel']:+.1%}), 95% CI {_ci(m['ci_delta'])}, p = {m['p']:.3g}. The interval's half-width, "
+            f"{half:.4f} ({half / m['a']:.0%} of RRF's CTR), is the size of difference this test could tell from "
+            "zero.",
         ]
         if offline:
             lr = offline["pairs"]["LambdaRank - RRF"]["item"]
@@ -483,6 +489,18 @@ def render(run: dict, results: dict, offline: dict | None) -> str:
                 f"- Offline (`docs/results/offline.md`, test split): NDCG@10 {lr['NDCG@10']['value']:+.4f} "
                 f"{_ci(lr['NDCG@10']['ci'])}, HR@10 {lr['HR@10']['value']:+.4f} {_ci(lr['HR@10']['ci'])}."
             )
+            seg = offline.get("segments", {})
+            sd = seg.get("same_day", {}).get("pairs", {}).get("LambdaRank - RRF")
+            ld = seg.get("later_day", {}).get("pairs", {}).get("LambdaRank - RRF")
+            if sd and ld:
+                lines.append(
+                    "- The offline gain is all in the segment whose target was reviewed on the same day as the last "
+                    f"history item (NDCG@10 {sd['NDCG@10']['value']:+.4f} {_ci(sd['NDCG@10']['ci'])}; later targets "
+                    f"{ld['NDCG@10']['value']:+.4f} {_ci(ld['NDCG@10']['ci'])}). The simulator's users click by text "
+                    "relevance to all their test-period items; it does not model what ties a same-day target to the "
+                    "last history item, so a result near zero here matches the later-day segment and says nothing for "
+                    "or against the same-day gain."
+                )
         lines += [
             "- Both arms make the same calls (Rank runs for every user; the arm only decides which score orders the list), "
             "so the latency and degradation columns compare like with like.",

@@ -64,6 +64,9 @@ SERVED = (
 LAYERS = ("recall", "rank", "ads", "agent")
 
 
+SHUFFLE_PARTITIONS = 64
+
+
 def spark_session(threads: int = 2):
     from pyspark.sql import SparkSession
 
@@ -79,8 +82,12 @@ def spark_session(threads: int = 2):
         .appName("recloop-samples")
         .config("spark.ui.enabled", "false")
         .config("spark.sql.session.timeZone", "UTC")
-        .config("spark.sql.shuffle.partitions", str(threads * 2))
-        .config("spark.driver.memory", "2g")
+        # Many small shuffle partitions (adaptive execution merges them when the data is small):
+        # with 4, a day of ~2.4 M impressions made ~260 MB partitions that overflowed the heap.
+        .config("spark.sql.shuffle.partitions", str(SHUFFLE_PARTITIONS))
+        .config("spark.sql.adaptive.enabled", "true")
+        # The container has 4 GB (Makefile SPARK_RUN): heap 3 GB, the rest for the JVM and Python.
+        .config("spark.driver.memory", "3g")
         .config("spark.driver.bindAddress", "127.0.0.1")
         .config("spark.driver.host", "127.0.0.1")
         .config("spark.sql.sources.partitionOverwriteMode", "dynamic")

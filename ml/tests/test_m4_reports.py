@@ -264,6 +264,24 @@ def test_ab_report_finds_a_real_lift(tmp_path):
     }
     res = ab_report.analyse(df, phase, tmp_path / "none.jsonl")
     assert res["metrics"]["ctr"]["ci_delta"][0] > 0
+    phase.update({"from": 0, "to": 60, "page_views": {"home": 1}, "sessions": 1})
+    run = {"bundle": "v1", "campaigns": 16, "phases": {"ab": phase}}
+    for v in phase["variants"]:
+        v["params"] = {"ranker": v["name"]}
+    pair = {
+        "NDCG@10": {"value": 0.02, "ci": [0.01, 0.03]},
+        "HR@10": {"value": 0.02, "ci": [0.01, 0.03]},
+    }
+    offline = {
+        "pairs": {"LambdaRank - RRF": {"item": pair}},
+        "segments": {
+            "same_day": {"pairs": {"LambdaRank - RRF": pair}},
+            "later_day": {"pairs": {"LambdaRank - RRF": pair}},
+        },
+    }
+    md = ab_report.render(run, {"ab": res}, offline)
+    assert "is higher than CTR with RRF" in md and "half-width" in md
+    assert "The offline gain is all in the segment" in md
 
 
 def test_release_report_renders(tmp_path, monkeypatch):
