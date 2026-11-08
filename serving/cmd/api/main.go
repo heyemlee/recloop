@@ -78,6 +78,7 @@ import (
 	"github.com/heyemlee/recloop/serving/internal/catalog"
 	"github.com/heyemlee/recloop/serving/internal/events"
 	"github.com/heyemlee/recloop/serving/internal/experiment"
+	"github.com/heyemlee/recloop/serving/internal/itemctr"
 	"github.com/heyemlee/recloop/serving/internal/metrics"
 	"github.com/heyemlee/recloop/serving/internal/mixer"
 	"github.com/heyemlee/recloop/serving/internal/ranking"
@@ -441,6 +442,14 @@ func run(log *slog.Logger) error {
 		full := &userstate.Fullness{R: rdb, Log: log}
 		go full.Run(bg, ads.RefreshEvery)
 		adSrv.State = full
+		// The pCTR's recent item CTR: a table of the aggregator's buckets, rebuilt in the
+		// background after every 5-minute boundary (never on the request path).
+		ctr := &itemctr.Refresher{R: rdb, Log: log, Now: time.Now}
+		if _, err := ctr.Refresh(ctx); err != nil {
+			log.Warn("item CTR table not built yet; the pCTR uses its prior until it is", "err", err)
+		}
+		go ctr.Run(bg)
+		adSrv.ItemCTR = ctr
 	}
 
 	srv := &api.Server{

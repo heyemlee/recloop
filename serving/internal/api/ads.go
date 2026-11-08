@@ -16,6 +16,7 @@ import (
 	"github.com/heyemlee/recloop/serving/internal/billing"
 	"github.com/heyemlee/recloop/serving/internal/cache"
 	"github.com/heyemlee/recloop/serving/internal/experiment"
+	"github.com/heyemlee/recloop/serving/internal/itemctr"
 	"github.com/heyemlee/recloop/serving/internal/metrics"
 	"github.com/heyemlee/recloop/serving/internal/mixer"
 	"github.com/heyemlee/recloop/serving/internal/recall"
@@ -50,6 +51,9 @@ type AdServer struct {
 	// State reports whether the state Redis is full (userstate.Fullness); nil: never. While it
 	// is, the frequency caps and spend counters stop counting, so no ads (ads_state_full).
 	State interface{ Full() bool }
+	// ItemCTR holds the items' recent impression and click counts (itemctr.Refresher), the pCTR
+	// model's CTR inputs; nil: none (the model uses its prior).
+	ItemCTR interface{ Current() *itemctr.Table }
 }
 
 func (a *AdServer) draw() float64 {
@@ -214,9 +218,17 @@ func (s *Server) selectAds(q *request, requestID uuid.UUID, positions []int, a e
 	if !s.Naive {
 		pctx, cancel = context.WithTimeout(q.ctx, max(q.budget.For(s.Plan.Ads, s.Plan.Tail), time.Millisecond))
 	}
+	var recent map[int32][4]uint32 // the items' CTR counts (itemctr)
+	if t := q.itemCTR(); t != nil {
+		recent = make(map[int32][4]uint32, len(ids))
+		for _, id := range ids {
+			recent[id] = t.Get(id).Array()
+		}
+	}
 	_, pspan := q.span("ads.pctr")
 	pred, err := model.PredictCTR(pctx, ads.PCTRRequest{
 		UserID: q.uid, Surface: q.surface, ItemIDs: ids, History: q.history, Relevance: q.relevance, Version: version,
+		Counts: recent,
 	})
 	pspan.End()
 	cancel()
@@ -450,7 +462,7 @@ func (s *Server) selectChatAds(w http.ResponseWriter, r *http.Request) {
 		resp.Items = page.Items
 		served.Ads = &res
 		served.PCTRModel = res.pctrModel
-		addRanking(&served, rendered{}, res.Slots)
+		addRanking(&served, rendered{}, res.Slots, q.itemCTR())
 		s.logServed(q.uid, requestID, served)
 	}
 	writeJSON(w, http.StatusOK, resp)

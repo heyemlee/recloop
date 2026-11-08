@@ -90,14 +90,15 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument(
         "--around",
         type=dt.date.fromisoformat,
-        help="the day before, the day and the day after (what the job reads)",
+        help="two days before, the day and the day after (what the job reads: the item CTR "
+        "windows of a page served the day before reach a day further back)",
     )
     p.add_argument("--out", type=Path, default=RAW)
     args = p.parse_args(argv)
     days = list(args.day)
     if args.around:
         one = dt.timedelta(days=1)
-        days += [args.around - one, args.around, args.around + one]
+        days += [args.around - 2 * one, args.around - one, args.around, args.around + one]
     if not days:
         p.error("give --day or --around")
     with psycopg.connect(database_url()) as conn:

@@ -102,3 +102,22 @@ func TestPredictCTRFallsBackToTheFixedRateWithoutAModel(t *testing.T) {
 		t.Fatal("error swallowed")
 	}
 }
+
+func TestPredictCTRSendsTheItemsCounts(t *testing.T) {
+	ms := &fakeMS{resp: &pb.RankResponse{ModelVersion: "v1", FeatureNames: names, AdFeatures: []float32{0.5, 0, 0.7, 0},
+		PctrModel: "logreg", AdPctr: []float32{0.02, 0.01}}}
+	c := &ranking.Client{MS: ms}
+	_, err := c.PredictCTR(context.Background(), ads.PCTRRequest{
+		ItemIDs: []int32{5, 6}, Counts: map[int32][4]uint32{5: {120, 3, 2400, 31}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := ms.last.Ads[0].Counts
+	if got == nil || got.ImpressionsHour != 120 || got.ClicksHour != 3 || got.ImpressionsDay != 2400 || got.ClicksDay != 31 {
+		t.Fatalf("counts of item 5: %v", got)
+	}
+	if ms.last.Ads[1].Counts != nil {
+		t.Fatalf("item 6 has no counts in the request, got %v", ms.last.Ads[1].Counts)
+	}
+}

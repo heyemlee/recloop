@@ -94,7 +94,7 @@ TOOL_PKGS := github.com/bufbuild/buf/cmd/buf google.golang.org/protobuf/cmd/prot
 	fmt sim-world sim srm drill load load-smoke latency-report billing overdelivery billing-drill \
 	billing-report minionerec-gen minionerec-cost minionerec agent-cases agent-eval agent-eval-llm \
 	agent-eval-llm-smoke serve-agent agent-latency train-ranker spark-image samples test-samples \
-	train-pctr collect release-drill release-report ab ab-report clean-processed clean-artifacts
+	train-pctr pctr-report collect release-drill release-report ab ab-report clean-processed clean-artifacts
 
 help: ## List targets
 	@grep -E '^[a-z0-9-]+:.*## ' $(MAKEFILE_LIST) \
@@ -318,8 +318,11 @@ samples: spark-image ## Training samples of DAY (UTC, default today): export eve
 test-samples: spark-image ## The sample job's tests, in its container (2 CPUs)
 	$(SPARK_RUN) -m pytest -q -p no:cacheprovider ml/tests/test_samples.py
 
-train-pctr: ## Logistic-regression pCTR on the samples (artifacts/samples/train) -> artifacts/models/pctr
-	$(PY) -m ml.models.pctr
+train-pctr: ## Logistic-regression pCTR on the samples (artifacts/samples/train), with and without the item CTR columns -> artifacts/models/pctr (PCTR_FLAGS: --days, --label)
+	$(PY) -m ml.models.pctr $(PCTR_FLAGS)
+
+pctr-report: ## docs/results/pctr.md from artifacts/models/pctr/eval (the pCTR with and without the item CTR columns)
+	$(PY) -m analysis.pctr_report
 
 # The M4 runs need the stack, the model server and the api (`make serve-model`, `make serve-api`).
 COLLECT_SECONDS ?= 900

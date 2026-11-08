@@ -55,12 +55,26 @@ class Candidate(_message.Message):
     def __init__(self, item_id: _Optional[int] = ..., hits: _Optional[_Iterable[_Union[SourceHit, _Mapping]]] = ...) -> None: ...
 
 class AdCandidate(_message.Message):
-    __slots__ = ("item_id", "relevance")
+    __slots__ = ("item_id", "relevance", "counts")
     ITEM_ID_FIELD_NUMBER: _ClassVar[int]
     RELEVANCE_FIELD_NUMBER: _ClassVar[int]
+    COUNTS_FIELD_NUMBER: _ClassVar[int]
     item_id: int
     relevance: float
-    def __init__(self, item_id: _Optional[int] = ..., relevance: _Optional[float] = ...) -> None: ...
+    counts: ItemCounts
+    def __init__(self, item_id: _Optional[int] = ..., relevance: _Optional[float] = ..., counts: _Optional[_Union[ItemCounts, _Mapping]] = ...) -> None: ...
+
+class ItemCounts(_message.Message):
+    __slots__ = ("impressions_hour", "clicks_hour", "impressions_day", "clicks_day")
+    IMPRESSIONS_HOUR_FIELD_NUMBER: _ClassVar[int]
+    CLICKS_HOUR_FIELD_NUMBER: _ClassVar[int]
+    IMPRESSIONS_DAY_FIELD_NUMBER: _ClassVar[int]
+    CLICKS_DAY_FIELD_NUMBER: _ClassVar[int]
+    impressions_hour: int
+    clicks_hour: int
+    impressions_day: int
+    clicks_day: int
+    def __init__(self, impressions_hour: _Optional[int] = ..., clicks_hour: _Optional[int] = ..., impressions_day: _Optional[int] = ..., clicks_day: _Optional[int] = ...) -> None: ...
 
 class RankRequest(_message.Message):
     __slots__ = ("history", "candidates", "ads", "pin_version")

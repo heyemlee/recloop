@@ -159,3 +159,40 @@ func TestAdTokenRules(t *testing.T) {
 		t.Fatalf("payload %s", got)
 	}
 }
+
+// The items' CTR counts (package itemctr): impressions and clicks with an impression_id count, in
+// the buckets of the receive time, which Validate keeps in microseconds like events_raw.
+func TestCTRCounterRule(t *testing.T) {
+	id := uuid.Must(uuid.NewV7())
+	now := V7Time(id).Add(123_456_789 * time.Nanosecond) // not a whole microsecond
+	ev, err := Validate(ClientEvent{
+		EventID: id.String(), Type: TypeImpression, UserID: i64(1), ItemID: i32(5),
+		ImpressionID: uuid.Must(uuid.NewV7()).String() + ":3",
+	}, now, known)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ev.Received.Equal(now.Truncate(time.Microsecond)) {
+		t.Fatalf("received %v, want microseconds", ev.Received)
+	}
+	if kind, at := CTRCounter(ev); kind != "i" || !at.Equal(ev.Received) {
+		t.Fatalf("impression: %q %v", kind, at)
+	}
+	ev.Type = TypeClick
+	if kind, _ := CTRCounter(ev); kind != "c" {
+		t.Fatalf("click: %q", kind)
+	}
+	ev.Type = TypeAddToCart
+	if kind, _ := CTRCounter(ev); kind != "" {
+		t.Fatalf("add_to_cart counted: %q", kind)
+	}
+	ev.Type, ev.ImpressionID = TypeClick, ""
+	if kind, _ := CTRCounter(ev); kind != "" {
+		t.Fatalf("a click without an impression_id counted: %q", kind)
+	}
+	// Without a receive time (a row whose server_ts is missing), the event time picks the buckets.
+	ev.ImpressionID, ev.Received = "x:1", time.Time{}
+	if _, at := CTRCounter(ev); !at.Equal(ev.Time) {
+		t.Fatalf("fallback %v", at)
+	}
+}

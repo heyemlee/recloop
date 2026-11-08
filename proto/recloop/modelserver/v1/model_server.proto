@@ -54,6 +54,18 @@ message AdCandidate {
   // SASRec relevance from Retrieve; unset: the model server encodes the history itself (a
   // request whose organic candidates came from the cache made no Retrieve call).
   optional float relevance = 2;
+  // The item's recent impressions and clicks (the api's item CTR table); unset: the api has
+  // none, and a pCTR model with CTR columns uses its prior.
+  ItemCounts counts = 3;
+}
+
+// Impressions and clicks of one item in the complete buckets of the last hour and the last day
+// before the api's table time (serving/internal/itemctr; design §9.2 step 3).
+message ItemCounts {
+  uint32 impressions_hour = 1;
+  uint32 clicks_hour = 2;
+  uint32 impressions_day = 3;
+  uint32 clicks_day = 4;
 }
 
 message RankRequest {

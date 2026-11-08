@@ -5,6 +5,8 @@
 //	aggregator rebuild-from-db  replay events_raw into Redis, then exit
 //	aggregator reset-offsets    move the group to the oldest retained event (stop it first);
 //	                            the next run replays the log into Redis
+//	                            (both after `make seed`; both delete state:seeded_at: the items'
+//	                            CTR buckets of the last day are rebuilt from the whole log)
 //	aggregator wait-lag GROUP [TIMEOUT]   wait (default 5m) until GROUP has consumed everything
 //	                            produced so far
 //
@@ -39,6 +41,7 @@ import (
 	"github.com/heyemlee/recloop/serving/internal/aggregator"
 	"github.com/heyemlee/recloop/serving/internal/consumer"
 	"github.com/heyemlee/recloop/serving/internal/events"
+	"github.com/heyemlee/recloop/serving/internal/itemctr"
 	"github.com/heyemlee/recloop/serving/internal/metrics"
 	"github.com/heyemlee/recloop/serving/internal/store"
 	"github.com/heyemlee/recloop/serving/internal/userstate"
@@ -187,7 +190,9 @@ func rebuildFromDB(ctx context.Context, log *slog.Logger) error {
 		"no_effect", c.Ignored, "invalid", c.Invalid, "seconds", time.Since(t0).Seconds())
 	fmt.Printf("rebuild-from-db: applied %d events (%d already applied, %d without effect) in %.1fs\n",
 		c.Applied, c.Duplicate, c.Ignored, time.Since(t0).Seconds())
-	return nil
+	// The replay recounted the items' CTR buckets from the whole log: the windows no longer
+	// start at the seed (package itemctr).
+	return rdb.Del(ctx, itemctr.SeededAtKey).Err()
 }
 
 func resetOffsets(ctx context.Context, log *slog.Logger) error {
@@ -205,7 +210,14 @@ func resetOffsets(ctx context.Context, log *slog.Logger) error {
 	}
 	log.Info("consumer group reset to the oldest retained events", "group", aggregator.Group, "partitions", n)
 	fmt.Printf("reset-offsets: group %s now starts at the oldest retained event of %d partitions\n", aggregator.Group, n)
-	return nil
+	// The next run recounts the items' CTR buckets from the whole log (they fill up while it
+	// catches up): the windows no longer start at the seed (package itemctr).
+	_, rdb, err := redisStore()
+	if err != nil {
+		return err
+	}
+	defer rdb.Close()
+	return rdb.Del(ctx, itemctr.SeededAtKey).Err()
 }
 
 // waitLag polls the group's lag on the events topic until it is 0 (every record produced so far

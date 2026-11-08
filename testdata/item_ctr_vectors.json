@@ -1,0 +1,278 @@
+{
+ "description": "Item CTR counts (serving/internal/itemctr, ml/samples/job.py): events as the api received them (a repeated event_id is a redelivered copy; the first received one counts), then tables at an as-of time E after an optional seed: [impressions, clicks] of the 12 complete 5-minute buckets before E, then of the 24 complete hours before E's hour. Items not listed have no counts.",
+ "events": [
+  {
+   "event_id": "e01",
+   "item": 1,
+   "type": "impression",
+   "received": "2026-11-08T09:00:00.000000Z",
+   "impression_id": "r0:1"
+  },
+  {
+   "event_id": "e02",
+   "item": 1,
+   "type": "impression",
+   "received": "2026-11-08T09:04:59.999999Z",
+   "impression_id": "r1:1"
+  },
+  {
+   "event_id": "e03",
+   "item": 1,
+   "type": "impression",
+   "received": "2026-11-08T09:05:00.000000Z",
+   "impression_id": "r2:1"
+  },
+  {
+   "event_id": "e04",
+   "item": 1,
+   "type": "impression",
+   "received": "2026-11-08T09:30:00.000000Z",
+   "impression_id": "r3:1"
+  },
+  {
+   "event_id": "e05",
+   "item": 1,
+   "type": "click",
+   "received": "2026-11-08T09:30:01.000000Z",
+   "impression_id": "r4:1"
+  },
+  {
+   "event_id": "e06",
+   "item": 1,
+   "type": "impression",
+   "received": "2026-11-08T09:59:59.999999Z",
+   "impression_id": "r5:1"
+  },
+  {
+   "event_id": "e07",
+   "item": 1,
+   "type": "impression",
+   "received": "2026-11-08T10:00:00.000000Z",
+   "impression_id": "r6:1"
+  },
+  {
+   "event_id": "e08",
+   "item": 1,
+   "type": "click",
+   "received": "2026-11-08T10:00:01.000000Z",
+   "impression_id": "r7:1"
+  },
+  {
+   "event_id": "e09",
+   "item": 1,
+   "type": "impression",
+   "received": "2026-11-08T10:04:59.999999Z",
+   "impression_id": "r8:1"
+  },
+  {
+   "event_id": "e10",
+   "item": 2,
+   "type": "impression",
+   "received": "2026-11-07T09:59:59.999999Z",
+   "impression_id": "r9:1"
+  },
+  {
+   "event_id": "e11",
+   "item": 2,
+   "type": "impression",
+   "received": "2026-11-07T10:00:00.000000Z",
+   "impression_id": "r10:1"
+  },
+  {
+   "event_id": "e12",
+   "item": 2,
+   "type": "click",
+   "received": "2026-11-07T10:30:00.000000Z",
+   "impression_id": "r11:1"
+  },
+  {
+   "event_id": "e13",
+   "item": 3,
+   "type": "impression",
+   "received": "2026-11-08T09:40:00.000000Z",
+   "impression_id": "r12:1"
+  },
+  {
+   "event_id": "e13",
+   "item": 3,
+   "type": "impression",
+   "received": "2026-11-08T09:47:00.000000Z",
+   "impression_id": "r13:1"
+  },
+  {
+   "event_id": "e14",
+   "item": 3,
+   "type": "click",
+   "received": "2026-11-08T09:41:00.000000Z",
+   "impression_id": null
+  },
+  {
+   "event_id": "e15",
+   "item": 3,
+   "type": "add_to_cart",
+   "received": "2026-11-08T09:42:00.000000Z",
+   "impression_id": "r15:1"
+  },
+  {
+   "event_id": "e16",
+   "item": 4,
+   "type": "impression",
+   "received": "2026-11-08T09:20:00.000000Z",
+   "impression_id": "r16:1"
+  },
+  {
+   "event_id": "e17",
+   "item": 4,
+   "type": "click",
+   "received": "2026-11-08T09:21:00.000000Z",
+   "impression_id": "r17:1"
+  },
+  {
+   "event_id": "e18",
+   "item": 5,
+   "type": "impression",
+   "received": "2026-11-08T10:05:00.000000Z",
+   "impression_id": "r18:1"
+  }
+ ],
+ "tables": [
+  {
+   "asof": "2026-11-08T10:05:00Z",
+   "since": null,
+   "counts": {
+    "1": [
+     5,
+     2,
+     5,
+     1
+    ],
+    "2": [
+     0,
+     0,
+     1,
+     1
+    ],
+    "3": [
+     1,
+     0,
+     1,
+     0
+    ],
+    "4": [
+     1,
+     1,
+     1,
+     1
+    ]
+   }
+  },
+  {
+   "asof": "2026-11-08T10:05:00Z",
+   "since": "2026-11-08T09:32:00Z",
+   "counts": {
+    "1": [
+     3,
+     1,
+     0,
+     0
+    ],
+    "3": [
+     1,
+     0,
+     0,
+     0
+    ]
+   }
+  },
+  {
+   "asof": "2026-11-08T10:00:00Z",
+   "since": null,
+   "counts": {
+    "1": [
+     5,
+     1,
+     5,
+     1
+    ],
+    "2": [
+     0,
+     0,
+     1,
+     1
+    ],
+    "3": [
+     1,
+     0,
+     1,
+     0
+    ],
+    "4": [
+     1,
+     1,
+     1,
+     1
+    ]
+   }
+  },
+  {
+   "asof": "2026-11-08T11:00:00Z",
+   "since": null,
+   "counts": {
+    "1": [
+     2,
+     1,
+     7,
+     2
+    ],
+    "3": [
+     0,
+     0,
+     1,
+     0
+    ],
+    "4": [
+     0,
+     0,
+     1,
+     1
+    ],
+    "5": [
+     1,
+     0,
+     1,
+     0
+    ]
+   }
+  },
+  {
+   "asof": "2026-11-08T09:45:00Z",
+   "since": null,
+   "counts": {
+    "1": [
+     4,
+     1,
+     0,
+     0
+    ],
+    "2": [
+     0,
+     0,
+     2,
+     1
+    ],
+    "3": [
+     1,
+     0,
+     0,
+     0
+    ],
+    "4": [
+     1,
+     1,
+     0,
+     0
+    ]
+   }
+  }
+ ]
+}

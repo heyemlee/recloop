@@ -2,7 +2,7 @@
 
 Training data is the sample job's output (ml.samples.job, artifacts/samples/train): home-feed
 impressions whose window has closed, with the features the served event recorded and the
-negatives downsampled (weight = 1 / rate restores them). The features of a row:
+negatives downsampled (weight = 1 / rate restores them). The columns of a row:
 
     sasrec_score (0 when missing) and a missing flag   SASRec's relevance of the item
     pop_log, n_sources                                 popularity, how many sources had it
@@ -11,21 +11,38 @@ negatives downsampled (weight = 1 / rate restores them). The features of a row:
     sponsored (0/1)                                    the slot type
     position, one-hot (1 .. 10, 11-20, 21+)
 
-The position is a training feature only: at prediction it is fixed at the reference position
-(REFERENCE_POSITION, the first sponsored slot), so every ad is scored as if shown at the same
-place and the auction compares relevance, not where an ad happened to be shown before.
+and, in the "ctr" variant, the item's recent CTR: its impressions and clicks in the complete
+buckets of the last hour and the last day before the api's table time (serving/internal/itemctr;
+the values the served event logged, or the sample job's recomputation from the log for samples
+served before the api logged them):
 
-Model selection: the samples in time order are split 64 / 16 / 20; C (L2 strength) is chosen
-on the middle part by weighted log loss, the model refitted on the first 80 % is reported on
-the last 20 % (the future), and the shipped model is refitted on everything with that C.
+    ictr_1h_logit, ictr_24h_logit      (clicks + strength x prior) / (impressions + strength),
+                                       in log-odds; prior = the training rows' CTR
+    ictr_1h_imp_log, ictr_24h_imp_log  log(1 + impressions)
 
-Usage: python -m ml.models.pctr   (after `make samples`; writes artifacts/models/pctr/)
+Missing counts are 0 impressions and 0 clicks: the prior. The position is a training feature
+only: at prediction it is fixed at the reference position (REFERENCE_POSITION, the first
+sponsored slot), so every ad is scored as if shown at the same place and the auction compares
+relevance, not where an ad happened to be shown before.
+
+Model selection: the samples in time order are split 64 / 16 / 20; C (L2 strength) and, with the
+CTR columns, the prior's strength are chosen on the middle part by weighted log loss; the model
+refitted on the first 80 % is reported on the last 20 % (the future); the shipped model is
+refitted on everything with those settings. With counts in the samples both variants are judged
+on the same split (AUC, weighted log loss, calibration by position and by decile of the
+prediction; on every sample and on the sponsored slots alone; user-level paired bootstrap
+intervals of the differences) and the "ctr" variant ships; without, "base" does.
+
+Usage: python -m ml.models.pctr [--days D ...] [--label NAME]   (after `make samples`; writes
+artifacts/models/pctr/model.json and artifacts/models/pctr/eval/<label>.json)
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -43,8 +60,40 @@ PRICE_COLUMNS = tuple(f"price_{b}" for b in range(len(feat.PRICE_EDGES_CENTS) + 
 )
 CONTINUOUS = ("sasrec_score", "pop_log", "n_sources", "cat2_overlap", "leaf_overlap")
 COLUMNS = (*CONTINUOUS, "sasrec_missing", *PRICE_COLUMNS, "sponsored", *POSITION_BUCKETS)
+# The item CTR columns (model_server/ranking.py CTR_COLUMNS) from the counts [impressions, clicks]
+# of the hour, then of the day (the served event's `ictr`).
+CTR_COLUMNS = ("ictr_1h_logit", "ictr_1h_imp_log", "ictr_24h_logit", "ictr_24h_imp_log")
+CTR_INPUTS = ("impressions_hour", "clicks_hour", "impressions_day", "clicks_day")
+CTR_RATE_CLIP = 1e-6
+COLUMNS_CTR = (
+    *CONTINUOUS,
+    *CTR_COLUMNS,
+    "sasrec_missing",
+    *PRICE_COLUMNS,
+    "sponsored",
+    *POSITION_BUCKETS,
+)
 C_GRID = (0.01, 0.1, 1.0, 10.0)
+STRENGTH_GRID = (10.0, 100.0, 1000.0)
 SEED = 20261108
+BOOTSTRAP = 1000
+BOOTSTRAP_SEED = 20261108
+DECILES = 10
+
+
+@dataclass(frozen=True)
+class Variant:
+    name: str
+    columns: tuple[str, ...]
+    continuous: tuple[str, ...]
+
+    @property
+    def uses_ctr(self) -> bool:
+        return any(c in CTR_COLUMNS for c in self.columns)
+
+
+BASE = Variant("base", COLUMNS, CONTINUOUS)
+CTR = Variant("ctr", COLUMNS_CTR, (*CONTINUOUS, *CTR_COLUMNS))
 
 
 def position_bucket(pos: np.ndarray) -> np.ndarray:
@@ -52,33 +101,76 @@ def position_bucket(pos: np.ndarray) -> np.ndarray:
     return np.where(pos <= 10, pos - 1, np.where(pos <= 20, 10, 11))
 
 
-def design(x: np.ndarray, pos: np.ndarray, sponsored: np.ndarray) -> np.ndarray:
-    """Rows of the ranker's feature vector (feat.FEATURES order) -> the model's columns, before
-    standardisation. The model server builds the same matrix (model_server/ranking.py)."""
-    x = np.asarray(x, dtype=np.float64)
-    col = {f: x[:, i] for i, f in enumerate(feat.FEATURES)}
-    n = len(x)
-    out = np.zeros((n, len(COLUMNS)))
-    c = {name: i for i, name in enumerate(COLUMNS)}
-    for f in CONTINUOUS:
-        out[:, c[f]] = np.nan_to_num(col[f], nan=0.0)
-    out[:, c["sasrec_missing"]] = np.isnan(col["sasrec_score"])
-    price = col["price_bucket"]
-    known = ~np.isnan(price)
-    out[np.flatnonzero(known), c["price_0"] + price[known].astype(np.int64)] = 1.0
-    out[~known, c["price_unknown"]] = 1.0
-    out[:, c["sponsored"]] = np.asarray(sponsored, dtype=np.float64)
-    out[np.arange(n), c["pos_1"] + position_bucket(pos)] = 1.0
+def ctr_columns(counts: np.ndarray, prior: float, strength: float) -> dict[str, np.ndarray]:
+    """The CTR columns of counts (n, 4) = [impressions, clicks] of the hour and the day; NaN
+    (missing) counts are 0. The model server computes the same (model_server/ranking.py)."""
+    c = np.nan_to_num(np.asarray(counts, dtype=np.float64).reshape(-1, 4), nan=0.0)
+    out = {}
+    for name, i in (("1h", 0), ("24h", 2)):
+        imp, clk = c[:, i], c[:, i + 1]
+        rate = np.clip(
+            (clk + strength * prior) / (imp + strength), CTR_RATE_CLIP, 1 - CTR_RATE_CLIP
+        )
+        out[f"ictr_{name}_logit"] = np.log(rate) - np.log1p(-rate)
+        out[f"ictr_{name}_imp_log"] = np.log1p(imp)
     return out
 
 
-def load_samples(directory: Path | None = None) -> pd.DataFrame:
+def design(
+    x: np.ndarray,
+    pos: np.ndarray,
+    sponsored: np.ndarray,
+    counts: np.ndarray | None = None,
+    ctr: dict | None = None,
+    columns: tuple[str, ...] = COLUMNS,
+) -> np.ndarray:
+    """Rows of the ranker's feature vector (feat.FEATURES order), positions, slots and the items'
+    counts -> the model's columns by name, before standardisation. The model server builds the
+    same matrix (model_server/ranking.py PCTRModel.design)."""
+    x = np.asarray(x, dtype=np.float64)
+    n = len(x)
+    col = {f: x[:, i] for i, f in enumerate(feat.FEATURES)}
+    if any(c in CTR_COLUMNS for c in columns):
+        if ctr is None:
+            raise ValueError("the CTR columns need the prior and its strength")
+        c = np.full((n, 4), np.nan) if counts is None else counts
+        col.update(ctr_columns(c, ctr["prior"], ctr["strength"]))
+    bucket = position_bucket(pos)
+    price = col["price_bucket"]
+    out = np.zeros((n, len(columns)))
+    for j, name in enumerate(columns):
+        if name in CONTINUOUS or name in CTR_COLUMNS:
+            out[:, j] = np.nan_to_num(col[name], nan=0.0)
+        elif name == "sasrec_missing":
+            out[:, j] = np.isnan(col["sasrec_score"])
+        elif name == "price_unknown":
+            out[:, j] = np.isnan(price)
+        elif name.startswith("price_"):
+            out[:, j] = price == int(name.removeprefix("price_"))
+        elif name == "sponsored":
+            out[:, j] = np.asarray(sponsored, dtype=np.float64)
+        elif name == "pos_11_20":
+            out[:, j] = bucket == 10
+        elif name == "pos_21_up":
+            out[:, j] = bucket == 11
+        elif name.startswith("pos_"):
+            out[:, j] = bucket == int(name.removeprefix("pos_")) - 1
+        else:
+            raise ValueError(f"unknown column {name!r}")
+    return out
+
+
+def load_samples(directory: Path | None = None, days: list[str] | None = None) -> pd.DataFrame:
     directory = directory or SAMPLES
-    days = sorted(directory.glob("day=*"))
-    if not days:
-        raise SystemExit(f"no samples under {directory}: run `make samples`")
+    found = sorted(directory.glob("day=*"))
+    if days:
+        found = [d for d in found if d.name.removeprefix("day=") in set(days)]
+    if not found:
+        raise SystemExit(
+            f"no samples under {directory} for {days or 'any day'}: run `make samples`"
+        )
     frames = []
-    for d in days:
+    for d in found:
         df = pd.read_parquet(d)
         df["day"] = d.name.removeprefix("day=")
         frames.append(df)
@@ -89,25 +181,54 @@ def load_samples(directory: Path | None = None) -> pd.DataFrame:
     return df.sort_values(["t_impression", "impression_id"], kind="stable").reset_index(drop=True)
 
 
-def matrices(df: pd.DataFrame):
+@dataclass
+class Data:
+    x: np.ndarray  # (n, F) the ranker's features, NaN = missing
+    pos: np.ndarray
+    sponsored: np.ndarray
+    counts: np.ndarray | None  # (n, 4), NaN = missing; None: the samples have none
+    y: np.ndarray
+    w: np.ndarray
+
+    def part(self, s: slice | np.ndarray) -> Data:
+        return Data(
+            self.x[s],
+            self.pos[s],
+            self.sponsored[s],
+            None if self.counts is None else self.counts[s],
+            self.y[s],
+            self.w[s],
+        )
+
+
+def has_counts(df: pd.DataFrame) -> bool:
+    return "ictr" in df.columns and bool(df.ictr.notna().all())
+
+
+def matrices(df: pd.DataFrame) -> Data:
     x = np.stack(
         df.features.map(
             lambda v: np.asarray([np.nan if f is None else f for f in v], dtype=np.float64)
         ).to_numpy()
     )
-    sponsored = (df.slot == "sponsored").to_numpy()
-    return (
-        design(x, df.pos.to_numpy(), sponsored),
+    counts = None
+    if has_counts(df):
+        counts = np.stack(df.ictr.map(lambda v: np.asarray(v, dtype=np.float64)).to_numpy())
+    return Data(
+        x,
+        df.pos.to_numpy(),
+        (df.slot == "sponsored").to_numpy(),
+        counts,
         df.label.to_numpy().astype(np.int64),
         df.weight.to_numpy(),
     )
 
 
 class Standardizer:
-    def __init__(self, x: np.ndarray, w: np.ndarray):
-        idx = [COLUMNS.index(f) for f in CONTINUOUS]
-        self.mean = np.zeros(len(COLUMNS))
-        self.scale = np.ones(len(COLUMNS))
+    def __init__(self, x: np.ndarray, w: np.ndarray, variant: Variant = BASE):
+        idx = [variant.columns.index(f) for f in variant.continuous]
+        self.mean = np.zeros(len(variant.columns))
+        self.scale = np.ones(len(variant.columns))
         sub = x[:, idx]
         m = np.average(sub, axis=0, weights=w)
         s = np.sqrt(np.average((sub - m) ** 2, axis=0, weights=w))
@@ -118,17 +239,32 @@ class Standardizer:
         return (x - self.mean) / self.scale
 
 
-def fit(x, y, w, c: float):
+@dataclass
+class Fitted:
+    variant: Variant
+    model: object
+    std: Standardizer
+    c: float
+    ctr: dict | None  # {"prior", "strength"}
+
+    def matrix(self, d: Data) -> np.ndarray:
+        return design(d.x, d.pos, d.sponsored, d.counts, self.ctr, self.variant.columns)
+
+    def predict(self, d: Data) -> np.ndarray:
+        return self.model.predict_proba(self.std(self.matrix(d)))[:, 1]
+
+
+def fit(d: Data, c: float, variant: Variant = BASE, strength: float | None = None) -> Fitted:
     from sklearn.linear_model import LogisticRegression
 
-    std = Standardizer(x, w)
+    ctr = None
+    if variant.uses_ctr:
+        ctr = {"prior": float(np.average(d.y, weights=d.w)), "strength": float(strength)}
+    x = design(d.x, d.pos, d.sponsored, d.counts, ctr, variant.columns)
+    std = Standardizer(x, d.w, variant)
     model = LogisticRegression(C=c, max_iter=2000, solver="lbfgs")
-    model.fit(std(x), y, sample_weight=w)
-    return model, std
-
-
-def predict(model, std, x) -> np.ndarray:
-    return model.predict_proba(std(x))[:, 1]
+    model.fit(std(x), d.y, sample_weight=d.w)
+    return Fitted(variant, model, std, c, ctr)
 
 
 def weighted_logloss(y, p, w) -> float:
@@ -140,116 +276,260 @@ def weighted_logloss(y, p, w) -> float:
 def weighted_auc(y, p, w) -> float:
     from sklearn.metrics import roc_auc_score
 
-    return float(roc_auc_score(y, p, sample_weight=w)) if 0 < y.sum() < len(y) else float("nan")
+    pos = (w * (y == 1)).sum()
+    neg = (w * (y == 0)).sum()
+    return float(roc_auc_score(y, p, sample_weight=w)) if pos > 0 and neg > 0 else float("nan")
 
 
-def evaluate(model, std, x, y, w, df) -> dict:
-    p = predict(model, std, x)
-    base = np.average(y, weights=w)
-    by_pos = {}
-    buckets = position_bucket(df.pos.to_numpy())
-    for b, name in enumerate(POSITION_BUCKETS):
+def calibration(p, y, w, buckets: np.ndarray, names) -> dict:
+    out = {}
+    for b, name in enumerate(names):
         m = buckets == b
-        if m.any():
-            by_pos[name] = {
+        if m.any() and w[m].sum() > 0:
+            out[name] = {
                 "impressions": float(w[m].sum()),
                 "observed": float(np.average(y[m], weights=w[m])),
                 "predicted": float(np.average(p[m], weights=w[m])),
             }
+    return out
+
+
+def deciles(p: np.ndarray) -> np.ndarray:
+    edges = np.quantile(p, np.linspace(0, 1, DECILES + 1)[1:-1])
+    return np.searchsorted(edges, p, side="right")
+
+
+def evaluate(p: np.ndarray, d: Data) -> dict:
+    y, w = d.y, d.w
+    base = np.average(y, weights=w)
+    by_decile = calibration(p, y, w, deciles(p), [f"d{k + 1}" for k in range(DECILES)])
+    ece = sum(abs(v["predicted"] - v["observed"]) * v["impressions"] for v in by_decile.values())
     return {
         "rows": int(len(y)),
         "positives": int(y.sum()),
+        "weighted_impressions": float(w.sum()),
         "logloss": weighted_logloss(y, p, w),
         "logloss_constant": weighted_logloss(y, np.full(len(y), base), w),
         "auc": weighted_auc(y, p, w),
         "observed_ctr": float(base),
         "predicted_ctr": float(np.average(p, weights=w)),
-        "by_position": by_pos,
+        "calibration_error": float(ece / w.sum()),
+        "by_position": calibration(p, y, w, position_bucket(d.pos), POSITION_BUCKETS),
+        "by_decile": by_decile,
     }
 
 
-def to_json(model, std, c: float, info: dict) -> dict:
+def paired_bootstrap(users, d: Data, p_a, p_b, mask=None) -> dict:
+    """AUC and log loss of b minus a, resampling users (B = BOOTSTRAP, fixed seed): the user is
+    the unit, a user's impressions are not independent."""
+    m = np.ones(len(d.y), dtype=bool) if mask is None else mask
+    codes, uniq = pd.factorize(np.asarray(users)[m])
+    y, w, a, b = d.y[m], d.w[m], p_a[m], p_b[m]
+    rng = np.random.default_rng(BOOTSTRAP_SEED)
+    auc, ll = [], []
+    for _ in range(BOOTSTRAP):
+        mult = np.bincount(rng.integers(0, len(uniq), len(uniq)), minlength=len(uniq))
+        ww = w * mult[codes]
+        auc.append(weighted_auc(y, b, ww) - weighted_auc(y, a, ww))
+        ll.append(weighted_logloss(y, b, ww) - weighted_logloss(y, a, ww))
+
+    def summary(point, draws):
+        lo, hi = np.nanpercentile(draws, [2.5, 97.5])
+        return {"diff": float(point), "ci95": [float(lo), float(hi)]}
+
     return {
+        "users": int(len(uniq)),
+        "rows": int(m.sum()),
+        "resamples": BOOTSTRAP,
+        "auc": summary(weighted_auc(y, b, w) - weighted_auc(y, a, w), auc),
+        "logloss": summary(weighted_logloss(y, b, w) - weighted_logloss(y, a, w), ll),
+    }
+
+
+def select(d: Data, a: int, b: int, variant: Variant) -> tuple[dict, list[dict]]:
+    """C (and the prior's strength) by weighted log loss on rows [a, b), fitted on [0, a)."""
+    trials = []
+    train, valid = d.part(slice(0, a)), d.part(slice(a, b))
+    for strength in STRENGTH_GRID if variant.uses_ctr else (None,):
+        for c in C_GRID:
+            f = fit(train, c, variant, strength)
+            trials.append(
+                {
+                    "C": c,
+                    **({"strength": strength} if strength is not None else {}),
+                    "valid_logloss": weighted_logloss(valid.y, f.predict(valid), valid.w),
+                }
+            )
+    best = min(trials, key=lambda t: t["valid_logloss"])
+    return best, trials
+
+
+def position_only(d: Data, b: int, c: float) -> dict:
+    """Position-only baseline on the same split: how much do the other columns add?"""
+    from sklearn.linear_model import LogisticRegression
+
+    cols = [COLUMNS.index(k) for k in ("sponsored", *POSITION_BUCKETS)]
+    x = design(d.x, d.pos, d.sponsored)[:, cols]
+    m = LogisticRegression(C=c, max_iter=2000).fit(x[:b], d.y[:b], sample_weight=d.w[:b])
+    p = m.predict_proba(x[b:])[:, 1]
+    return {
+        "logloss_position_only": weighted_logloss(d.y[b:], p, d.w[b:]),
+        "auc_position_only": weighted_auc(d.y[b:], p, d.w[b:]),
+    }
+
+
+def to_json(f: Fitted, info: dict) -> dict:
+    out = {
         "model": "logreg",
-        "columns": list(COLUMNS),
+        "variant": f.variant.name,
+        "columns": list(f.variant.columns),
         "features": list(feat.FEATURES),
-        "continuous": list(CONTINUOUS),
+        "continuous": list(f.variant.continuous),
         "reference_position": REFERENCE_POSITION,
         "position_buckets": list(POSITION_BUCKETS),
         "price_edges_cents": list(feat.PRICE_EDGES_CENTS),
-        "mean": [float(v) for v in std.mean],
-        "scale": [float(v) for v in std.scale],
-        "coef": [float(v) for v in model.coef_[0]],
-        "intercept": float(model.intercept_[0]),
-        "C": c,
+        "mean": [float(v) for v in f.std.mean],
+        "scale": [float(v) for v in f.std.scale],
+        "coef": [float(v) for v in f.model.coef_[0]],
+        "intercept": float(f.model.intercept_[0]),
+        "C": f.c,
         "training": info,
     }
+    if f.ctr is not None:
+        out["ctr"] = {
+            "prior": f.ctr["prior"],
+            "strength": f.ctr["strength"],
+            "inputs": list(CTR_INPUTS),
+            "columns": list(CTR_COLUMNS),
+            "rate_clip": CTR_RATE_CLIP,
+        }
+    return out
 
 
-def predict_json(m: dict, x: np.ndarray, pos: np.ndarray, sponsored: np.ndarray) -> np.ndarray:
+def predict_json(
+    m: dict, x: np.ndarray, pos: np.ndarray, sponsored: np.ndarray, counts: np.ndarray | None = None
+) -> np.ndarray:
     """The shipped model from its JSON (what the model server evaluates)."""
-    z = (design(x, pos, sponsored) - np.asarray(m["mean"])) / np.asarray(m["scale"])
+    z = (
+        design(x, pos, sponsored, counts, m.get("ctr"), tuple(m["columns"])) - np.asarray(m["mean"])
+    ) / np.asarray(m["scale"])
     return 1.0 / (1.0 + np.exp(-(z @ np.asarray(m["coef"]) + m["intercept"])))
 
 
-def main() -> None:
+def run_variant(d: Data, a: int, b: int, variant: Variant):
+    best, trials = select(d, a, b, variant)
+    strength = best.get("strength")
+    held = fit(d.part(slice(0, b)), best["C"], variant, strength)
+    test = d.part(slice(b, len(d.y)))
+    p = held.predict(test)
+    res = evaluate(p, test)
+    sp = test.sponsored.astype(bool)
+    res["sponsored"] = evaluate(p[sp], test.part(sp)) if sp.any() else None
+    res.update(position_only(d, b, best["C"]))
+    final = fit(d, best["C"], variant, strength)
+    return {"best": best, "trials": trials, "held_out": res, "p": p, "final": final}
+
+
+def time_span(df: pd.DataFrame, s: slice) -> list[str]:
+    t = pd.to_datetime(df.t_impression.iloc[s], utc=True)
+    return [t.min().isoformat(), t.max().isoformat()] if len(t) else []
+
+
+def main(argv: list[str] | None = None) -> None:
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument("--days", nargs="*", default=None, help="sample days (default: all)")
+    p.add_argument("--label", default=None, help="name of the evaluation file (default: the days)")
+    args = p.parse_args(argv)
     t0 = time.monotonic()
-    df = load_samples()
-    x, y, w = matrices(df)
+    df = load_samples(days=args.days)
+    d = matrices(df)
     n = len(df)
     a, b = int(n * 0.64), int(n * 0.80)
-    trials = []
-    for c in C_GRID:
-        model, std = fit(x[:a], y[:a], w[:a], c)
-        p = predict(model, std, x[a:b])
-        trials.append({"C": c, "valid_logloss": weighted_logloss(y[a:b], p, w[a:b])})
-    best = min(trials, key=lambda t: t["valid_logloss"])["C"]
-    model, std = fit(x[:b], y[:b], w[:b], best)
-    held_out = evaluate(model, std, x[b:], y[b:], w[b:], df.iloc[b:])
-    # Position-only baseline on the same split: how much do the other features add?
-    pos_cols = [COLUMNS.index(c) for c in ("sponsored", *POSITION_BUCKETS)]
-    from sklearn.linear_model import LogisticRegression
+    variants = [BASE, CTR] if d.counts is not None else [BASE]
+    runs = {v.name: run_variant(d, a, b, v) for v in variants}
+    shipped = runs[variants[-1].name]
+    final = shipped["final"]
 
-    base = LogisticRegression(C=best, max_iter=2000).fit(
-        x[:b][:, pos_cols], y[:b], sample_weight=w[:b]
-    )
-    p_base = base.predict_proba(x[b:][:, pos_cols])[:, 1]
-    held_out["logloss_position_only"] = weighted_logloss(y[b:], p_base, w[b:])
-    held_out["auc_position_only"] = weighted_auc(y[b:], p_base, w[b:])
-
-    final, final_std = fit(x, y, w, best)
-    coef = dict(zip(COLUMNS, final.coef_[0] / final_std.scale, strict=True))  # per raw unit
+    coef = dict(zip(final.variant.columns, final.model.coef_[0] / final.std.scale, strict=True))
     position_effect = {name: float(coef[name] - coef["pos_1"]) for name in POSITION_BUCKETS}
     meta_dir = SAMPLES.parent / "meta"
     days = sorted(df.day.unique().tolist())
+    samples_meta = {
+        dd: json.loads((meta_dir / f"{dd}.json").read_text())
+        for dd in days
+        if (meta_dir / f"{dd}.json").exists()
+    }
     info = {
         "days": days,
         # The sample job's counts for those days, as they were when this model was trained
         # (a later `make samples` of the same day replaces the files).
-        "samples_meta": {
-            d: json.loads((meta_dir / f"{d}.json").read_text())
-            for d in days
-            if (meta_dir / f"{d}.json").exists()
-        },
+        "samples_meta": samples_meta,
         "rows": int(n),
-        "positives": int(y.sum()),
-        "weighted_impressions": float(w.sum()),
+        "positives": int(d.y.sum()),
+        "weighted_impressions": float(d.w.sum()),
         "split": {"train": a, "valid": b - a, "test": n - b, "by": "impression time"},
-        "c_grid": trials,
-        "selected_C": best,
-        "held_out": held_out,
+        "c_grid": shipped["trials"],
+        "selected_C": shipped["best"]["C"],
+        "held_out": shipped["held_out"],
         "position_log_odds_vs_pos1": position_effect,
         "seconds": round(time.monotonic() - t0, 1),
     }
-    doc = to_json(final, final_std, best, info)
+    if final.ctr is not None:
+        info["selected_strength"] = final.ctr["strength"]
+    doc = to_json(final, info)
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / "model.json").write_text(json.dumps(doc, indent=2) + "\n")
-    print(
-        f"pctr     {n:,} rows ({int(y.sum()):,} clicks) from {', '.join(info['days'])}; C {best}; held-out "
-        f"AUC {held_out['auc']:.3f} (position only {held_out['auc_position_only']:.3f}), log loss "
-        f"{held_out['logloss']:.4f} vs constant {held_out['logloss_constant']:.4f}; predicted CTR "
-        f"{held_out['predicted_ctr']:.4f} vs observed {held_out['observed_ctr']:.4f} -> {OUT}"
+
+    label = args.label or "_".join(days)
+    ev = {
+        "label": label,
+        "days": days,
+        "rows": int(n),
+        "positives": int(d.y.sum()),
+        "users": int(df.user_id.nunique()),
+        "sponsored_rows": int(d.sponsored.sum()),
+        "split": {
+            "train": [0, a, *time_span(df, slice(0, a))],
+            "valid": [a, b, *time_span(df, slice(a, b))],
+            "test": [b, n, *time_span(df, slice(b, n))],
+        },
+        "counts_source": (
+            df.ictr_source.value_counts().to_dict() if "ictr_source" in df.columns else {}
+        ),
+        "item_ctr_checks": {dd: m.get("item_ctr") for dd, m in samples_meta.items()},
+        "variants": {
+            k: {"selected": r["best"], "trials": r["trials"], "held_out": r["held_out"]}
+            for k, r in runs.items()
+        },
+        "shipped": final.variant.name,
+    }
+    if "ctr" in runs:
+        test = d.part(slice(b, n))
+        users = df.user_id.to_numpy()[b:]
+        pa, pb = runs["base"]["p"], runs["ctr"]["p"]
+        ev["comparison"] = {
+            "all": paired_bootstrap(users, test, pa, pb),
+            "sponsored": paired_bootstrap(users, test, pa, pb, test.sponsored.astype(bool))
+            if test.sponsored.any()
+            else None,
+        }
+    (OUT / "eval").mkdir(parents=True, exist_ok=True)
+    (OUT / "eval" / f"{label}.json").write_text(json.dumps(ev, indent=2) + "\n")
+
+    held = shipped["held_out"]
+    line = (
+        f"pctr     {n:,} rows ({int(d.y.sum()):,} clicks) from {', '.join(days)}; {final.variant.name} "
+        f"C {final.c}; held-out AUC {held['auc']:.3f} (position only {held['auc_position_only']:.3f}), "
+        f"log loss {held['logloss']:.4f} vs constant {held['logloss_constant']:.4f}; predicted CTR "
+        f"{held['predicted_ctr']:.4f} vs observed {held['observed_ctr']:.4f}"
     )
+    if "comparison" in ev:
+        c = ev["comparison"]["all"]
+        line += (
+            f"; with the CTR columns AUC {c['auc']['diff']:+.4f} [{c['auc']['ci95'][0]:+.4f}, "
+            f"{c['auc']['ci95'][1]:+.4f}], log loss {c['logloss']['diff']:+.5f}"
+        )
+    print(line + f" -> {OUT}")
 
 
 if __name__ == "__main__":

@@ -157,6 +157,15 @@ var (
 	AdGates = reg(prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "recloop_ad_gate_total", Help: "Campaigns held back on a request, by gate.",
 	}, []string{"gate"}))
+	// ItemCTRBuilds: builds of the api's item CTR table (the pCTR's recent impressions and
+	// clicks), by result (ok, error).
+	ItemCTRBuilds = reg(prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "recloop_item_ctr_builds_total", Help: "Builds of the item CTR table, by result.",
+	}, []string{"result"}))
+	// ItemCTRAge: seconds since the as-of time of the table in use (normally 15 s to 5 min 15 s).
+	ItemCTRAge = reg(prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "recloop_item_ctr_age_seconds", Help: "Age of the item CTR table's as-of time.",
+	}))
 
 	// BillingClicks by outcome (charged, duplicate_impression, duplicate_event, expired,
 	// mismatch, invalid, unknown_campaign).
