@@ -105,7 +105,8 @@ func PG(t *testing.T) *store.Store {
 	}
 	t.Cleanup(st.Close)
 	if _, err := st.Pool.Exec(ctx, `TRUNCATE ad_clicks, ad_charges, campaign_budget_daily, campaign_items,
-		campaigns, advertisers, events_raw, orders, model_versions; DELETE FROM items; DELETE FROM users`); err != nil {
+		campaigns, advertisers, events_raw, orders, model_version_events, model_versions; DELETE FROM items;
+		DELETE FROM users`); err != nil {
 		t.Fatal(err)
 	}
 	return st
