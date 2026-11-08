@@ -1,0 +1,74 @@
+--- a/evaluate.py
++++ b/evaluate.py
+@@ -10,12 +10,14 @@
+ from LogitProcessor import ConstrainedLogitsProcessor
+ from accelerate import Accelerator
+ import random
+-import bitsandbytes as bnb
++import time
+ 
+ 
+ 
+ if torch.cuda.is_available():
+     device = "cuda"
++elif torch.backends.mps.is_available():
++    device = "mps"
+ else:
+     device = "cpu"
+ P = 998244353
+@@ -49,6 +51,9 @@
+     length_penalty: float=0.0,
+     max_new_tokens: int = 256,
+     num_beams: int = 50,
++    dtype: str = "bfloat16",
++    attn_implementation: str = "",
++    timing_json: str = "",
+ ):
+     random.seed(seed)
+     set_seed(seed)
+@@ -57,7 +62,8 @@
+     category = category_dict[category]
+     print(category)
+ 
+-    model = AutoModelForCausalLM.from_pretrained(base_model, torch_dtype=torch.bfloat16, device_map="auto")
++    setup_start = time.perf_counter()
++    model = AutoModelForCausalLM.from_pretrained(base_model, torch_dtype=getattr(torch, dtype), attn_implementation=attn_implementation or None)
+     model.eval()
+     with open(info_file, 'r') as f:
+         info = f.readlines()
+@@ -221,6 +227,7 @@
+         return real_outputs
+     
+     model = model.to(device)
++    setup_seconds = time.perf_counter() - setup_start
+ 
+     from tqdm import tqdm
+     outputs = []
+@@ -230,9 +237,17 @@
+         new_encodings.append(encodings[i * batch_size: (i + 1) * batch_size])
+ 
+     
++    batches = []
+     for idx, encodings in enumerate(tqdm(new_encodings)):
+         # Use standard evaluation
++        batch_start = time.perf_counter()
+         output = evaluate(encodings, max_new_tokens=max_new_tokens, num_beams=num_beams, length_penalty=length_penalty)
++        batch = {"size": len(encodings), "seconds": time.perf_counter() - batch_start}
++        if device == "mps":
++            batch["mps_allocated"] = torch.mps.current_allocated_memory()
++            batch["mps_driver_allocated"] = torch.mps.driver_allocated_memory()
++            torch.mps.empty_cache()  # batch lengths differ: cached blocks would pile up
++        batches.append(batch)
+         
+         outputs = outputs + output
+        
+@@ -245,6 +260,9 @@
+             test_data[i].pop('dedup')  
+     with open(result_json_data, 'w') as f:
+         json.dump(test_data, f, indent=4)
++    if timing_json:
++        with open(timing_json, 'w') as f:
++            json.dump({"device": device, "dtype": dtype, "attn_implementation": model.config._attn_implementation, "setup_seconds": setup_seconds, "batches": batches}, f, indent=1)
+ 
+ if __name__ == '__main__':
+     fire.Fire(main)

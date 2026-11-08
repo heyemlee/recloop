@@ -48,6 +48,7 @@ BENCH := $(COMPOSE) --profile bench
 UV := uv run --project ml --frozen
 PY := $(UV) python
 MS := uv run --project model_server --frozen
+MR := uv run --project minionerec --frozen
 AG := uv run --project agent --frozen
 # The agent's query encoder (sentence-transformers + torch) is an optional dependency group.
 AGE := $(AG) --group encoder
@@ -64,8 +65,9 @@ TOOL_PKGS := github.com/bufbuild/buf/cmd/buf google.golang.org/protobuf/cmd/prot
 .PHONY: help setup images up down down-volumes bench-up bench-down migrate migrate-status data \
 	data-weights ingest train paper-sasrec eval ann bundle seed build-aggregator rebuild-redis tools \
 	k6 proto sqlc generate build-api serve-model serve-api serve-web web-install test lint test-ml \
-	test-model-server test-agent test-go test-web test-props e2e fmt sim-world sim srm drill load \
-	load-smoke latency-report agent-cases agent-eval agent-eval-llm clean-processed clean-artifacts
+	test-model-server test-minionerec test-agent test-go test-web test-props e2e fmt sim-world sim \
+	srm drill load load-smoke latency-report minionerec-gen minionerec-cost minionerec agent-cases \
+	agent-eval agent-eval-llm clean-processed clean-artifacts
 
 help: ## List targets
 	@grep -E '^[a-z0-9-]+:.*## ' $(MAKEFILE_LIST) \
@@ -129,6 +131,19 @@ eval: ## Offline evaluation of Pop / ItemCF / SASRec -> docs/results/offline.md 
 
 ann: ## ANN benchmark + index updates -> docs/results/ann.md (~25 min; run on an idle machine)
 	$(PY) -m ml.ann.run $(ANN_FLAGS)
+
+# MiniOneRec (M7): generation runs natively on the Mac's GPU (MPS) in its own environment
+# (minionerec/); scoring and the report use the ml environment. Needs `make data-weights`.
+MINIONEREC_ARGS ?= --name test
+minionerec-gen: ## MiniOneRec on MPS over the test split (~5 h; MINIONEREC_ARGS="--name trial --users 200")
+	$(MR) python -m minionerec.generate $(MINIONEREC_ARGS)
+
+minionerec-cost: ## MiniOneRec latency / memory at 10, 20, 50 beams (MPS) and SASRec on the CPU (~25 min, idle machine)
+	$(MR) python -m minionerec.cost $(MINIONEREC_COST_ARGS)
+	$(PY) -m ml.eval.sasrec_cost
+
+minionerec: ## Score MiniOneRec's generations like make eval -> docs/results/minionerec.md (no GPU)
+	$(PY) -m ml.eval.minionerec
 
 bundle: ## Build artifacts/bundles/<version> and point artifacts/bundles/current at it
 	$(PY) -m ml.bundle.build
@@ -239,10 +254,10 @@ agent-eval-llm: ## Language-model agents (MODELS=..., REPEATS=3, MAX_COST_USD=..
 	$(AGE) python -m agent.eval.run --skip-offline $(foreach m,$(MODELS),--llm $(m)) \
 		--repeats $(or $(REPEATS),3) --max-cost-usd $(MAX_COST_USD)
 
-test: lint test-ml test-model-server test-agent test-go ## Lint and run the Python and Go tests (DB / Redis tests skip when the stack is down)
+test: lint test-ml test-model-server test-minionerec test-agent test-go ## Lint and run the Python and Go tests (DB / Redis tests skip when the stack is down)
 
-PYDIRS := ml sim loadtest analysis
-lint: ## ruff check + format check (ml, sim, loadtest, analysis, model_server, agent)
+PYDIRS := ml sim loadtest analysis minionerec
+lint: ## ruff check + format check (ml, sim, loadtest, analysis, minionerec, model_server, agent)
 	$(UV) ruff check $(PYDIRS)
 	$(UV) ruff format --check $(PYDIRS)
 	$(MS) ruff check model_server
@@ -258,6 +273,11 @@ test-ml:
 
 test-model-server:
 	$(MS) pytest model_server/tests
+
+# The minionerec environment is locked for Apple Silicon only (MPS); elsewhere its tests skip.
+test-minionerec:
+	@if [ "$$(uname -sm)" = "Darwin arm64" ]; then $(MR) pytest minionerec/tests; \
+	else echo "skip minionerec tests: the environment is Apple Silicon only"; fi
 
 # Scripted language model and an in-memory catalog; the database and encoder tests skip when the
 # stack is down or the `encoder` group / model files are missing. Never calls a paid API.

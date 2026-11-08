@@ -4,8 +4,9 @@ Sources (all pinned):
   * MiniOneRec GitHub repo, full history, checked out at MINIONEREC_COMMIT. The converter used for
     the data release is extracted from RELEASE_COMMIT with `git show` (main has a later edit).
   * Amazon Review Data (2018), Office Products: 5-core reviews and product metadata from UCSD.
-  * MiniOneRec Office checkpoint on Hugging Face: tokenizer/config files only by default.
-    model.safetensors (3.56 GB) is needed from M7 on; pass --with-weights to fetch it.
+  * MiniOneRec Office checkpoint on Hugging Face (Apache-2.0): tokenizer/config files only by
+    default. Generation (M7) also needs model.safetensors (3.56 GB) and the rest of the
+    tokenizer (vocab, merges, tokenizer.json, generation_config); --with-weights fetches them.
   * BAAI/bge-small-en-v1.5 (MIT) on Hugging Face: the sentence encoder of items.text_emb (M1).
 
 Every file is checked against a SHA-256 recorded on first download. Re-running is cheap: files
@@ -102,6 +103,32 @@ HF_WEIGHTS = _hf(
     3_556_236_128,
     "69cddd1c19244e6925fcdc073fb54622f1367f749e193949f9456592f6d437fd",
 )
+# What generation needs besides the weights (M7): the full Qwen2 tokenizer with the 600 SID
+# tokens (tokenizer.json is an LFS object; its SHA-256 is the Hub's LFS oid), the generation
+# defaults, and trainer_state.json, which records what the checkpoint is (GRPO step 1038 of 3456).
+HF_GENERATION_FILES = [
+    _hf(
+        "tokenizer.json",
+        11_532_202,
+        "727f175c5ff824b7cfa45c8577e293b356b255b215a504834c4451298bd5c50a",
+    ),
+    _hf(
+        "vocab.json", 2_776_833, "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+    ),
+    _hf(
+        "merges.txt", 1_671_853, "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5"
+    ),
+    _hf(
+        "generation_config.json",
+        121,
+        "55b2b4462aedccc5858edd8d7aa0fa7aebf8a3bf9245f9a095ddeba8a9a1650a",
+    ),
+    _hf(
+        "trainer_state.json",
+        502_245,
+        "a460e160ec6582f05622523e50f3fdf28e8a22b7405694c75247095b86f15f07",
+    ),
+]
 
 
 TEXT_MODEL_REPO = "BAAI/bge-small-en-v1.5"
@@ -251,7 +278,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--with-weights",
         action="store_true",
-        help="also download Office_ckpt/model.safetensors (3.56 GB; first needed in M7)",
+        help="also download Office_ckpt/model.safetensors (3.56 GB) and the remaining tokenizer "
+        "files (first needed in M7)",
     )
     args = parser.parse_args(argv)
 
@@ -259,6 +287,8 @@ def main(argv: list[str] | None = None) -> None:
     for remote in UCSD_FILES + HF_FILES + TEXT_MODEL_FILES:
         fetch(remote)
     if args.with_weights:
+        for remote in HF_GENERATION_FILES:
+            fetch(remote)
         fetch(HF_WEIGHTS)
     else:
         print("skip      Office_ckpt/model.safetensors (pass --with-weights to fetch, 3.56 GB)")
