@@ -1,6 +1,10 @@
 """Load the dataset users' state into Redis (`make seed`).
 
-Redis holds only derived state (design §7.2), so this flushes the database and rebuilds it:
+Redis holds only derived state (design §7.2), so this flushes the database and rebuilds it. There
+are two instances (design §19, 2026-11-08): the state Redis (REDIS_URL) gets the keys below; the
+cache Redis (CACHE_REDIS_URL: result pages, candidate cache) is flushed too, first: a candidate
+list cached under cand:{uid}:...:{hv} would otherwise be found again once hv is back at its seed
+value, for a different history.
 
   * u:{uid}:hist   ZSET item -> time (ms): each user's training-period interactions are treated
                    as having happened (design §2.2); the most recent 50 are kept. Review times are
@@ -14,7 +18,7 @@ Redis holds only derived state (design §7.2), so this flushes the database and 
 hv, seen and the dedup markers start empty. Events stored in PostgreSQL are not replayed here;
 rebuilding Redis from the event log comes with the aggregator in M2.
 
-Usage: REDIS_URL=redis://... python -m ml.data.seed_redis
+Usage: REDIS_URL=redis://... CACHE_REDIS_URL=redis://... python -m ml.data.seed_redis
 """
 
 from __future__ import annotations
@@ -30,6 +34,7 @@ import redis
 from ml import paths
 
 DEFAULT_REDIS_URL = "redis://localhost:16390/0"
+DEFAULT_CACHE_REDIS_URL = "redis://localhost:16391/0"
 HISTORY_MAX = 50  # serving/internal/userstate.HistoryMax
 DEMO_CATEGORIES = 8
 CHUNK = 500
@@ -90,6 +95,17 @@ def main() -> None:
     users = pd.read_parquet(paths.USERS_PARQUET, columns=["user_id"])
     train = inter[inter.split == "train"].sort_values(["user_id", "seq_idx"])
 
+    cache_url = os.environ.get("CACHE_REDIS_URL", DEFAULT_CACHE_REDIS_URL)
+    cache = redis.Redis.from_url(cache_url)
+    try:
+        cache.ping()
+    except redis.ConnectionError as e:
+        raise SystemExit(
+            f"the cache Redis ({cache_url}) is not reachable ({e}): the stack has two Redis "
+            "instances since 2026-11-08, `make up` starts both"
+        ) from e
+    # Before the state: if both URLs name one database, this must not wipe the seed.
+    cache.flushdb()
     r = redis.Redis.from_url(url)
     r.ping()
     r.flushdb()
@@ -111,7 +127,7 @@ def main() -> None:
     pipe.execute()
     print(
         f"redis    {n_users:,} users with history ({n_hist:,} items), "
-        f"{len(demo)} demo users, {time.monotonic() - t0:.1f}s"
+        f"{len(demo)} demo users, {time.monotonic() - t0:.1f}s (cache Redis flushed)"
     )
     for d in demo:
         print(f"  {d['label']} ({d['history_len']} items)")

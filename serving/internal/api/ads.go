@@ -18,6 +18,7 @@ import (
 	"github.com/heyemlee/recloop/serving/internal/experiment"
 	"github.com/heyemlee/recloop/serving/internal/metrics"
 	"github.com/heyemlee/recloop/serving/internal/mixer"
+	"github.com/heyemlee/recloop/serving/internal/recall"
 	"github.com/heyemlee/recloop/serving/internal/resilience"
 	"github.com/heyemlee/recloop/serving/internal/userstate"
 )
@@ -46,6 +47,9 @@ type AdServer struct {
 	Policy ads.Policy
 	// Draw returns uniform numbers in [0, 1) for pacing (math/rand when nil).
 	Draw func() float64
+	// State reports whether the state Redis is full (userstate.Fullness); nil: never. While it
+	// is, the frequency caps and spend counters stop counting, so no ads (ads_state_full).
+	State interface{ Full() bool }
 }
 
 func (a *AdServer) draw() float64 {
@@ -90,6 +94,7 @@ const (
 	adsEmpty      = "empty"       // no eligible ad
 	adsNotAllowed = "not_allowed" // the degradation chain rules ads out (§5.1)
 	adsStale      = "stale"       // the campaign snapshot is too old (PostgreSQL unreachable)
+	adsStateFull  = "state_full"  // the state Redis refuses writes: caps and spend stop counting
 )
 
 // adResult is what the ads stage decided for one request.
@@ -98,6 +103,8 @@ type adResult struct {
 	Policy  adPolicyView `json:"policy"`
 	Stats   ads.Stats    `json:"stats"`
 	Slots   []cache.Slot `json:"-"`
+	// pctrModel names the model that scored the candidates ("fixed", "logreg").
+	pctrModel string
 }
 
 type adPolicyView struct {
@@ -117,6 +124,12 @@ func (s *Server) selectAds(q *request, requestID uuid.UUID, positions []int, a e
 	defer func() { metrics.AdRequests.WithLabelValues(q.surface, res.Outcome).Inc() }()
 	if !adsAllowed(q.degraded) {
 		res.Outcome = adsNotAllowed
+		return res, nil
+	}
+	if s.Ads.State != nil && s.Ads.State.Full() {
+		res.Outcome = adsStateFull
+		q.degrade("ads_state_full")
+		s.warn("ads_state_full", "the state Redis is full (frequency caps and spend stop counting): no ads")
 		return res, nil
 	}
 	snap := s.Ads.Index.Current()
@@ -178,15 +191,36 @@ func (s *Server) selectAds(q *request, requestID uuid.UUID, positions []int, a e
 		return res, nil
 	}
 
-	// pCTR of every candidate item (at the reference position, §9.2 step 3).
+	// pCTR of every candidate item (at the reference position, §9.2 step 3). With an M4
+	// bundle the logistic regression runs in the model server (Rank), which also returns the
+	// features it used; the served event logs them for the sponsored slots.
 	ids := make([]int32, 0, len(cands))
 	for _, c := range cands {
 		ids = append(ids, c.ItemID)
 	}
 	slices.Sort(ids)
 	ids = slices.Compact(ids)
-	ctrs, err := s.Ads.PCTR.PredictCTR(q.ctx, ads.PCTRRequest{UserID: q.uid, Surface: q.surface, ItemIDs: ids})
-	if err != nil || len(ctrs) != len(ids) {
+	model := s.Ads.PCTR
+	version := ""
+	if q.bundle != nil {
+		if s.Rank != nil && q.bundle.Ranking != nil {
+			model = s.Rank
+		}
+		if s.Bundles != nil {
+			version = q.bundle.Version
+		}
+	}
+	pctx, cancel := q.ctx, context.CancelFunc(func() {})
+	if !s.Naive {
+		pctx, cancel = context.WithTimeout(q.ctx, max(q.budget.For(s.Plan.Ads, s.Plan.Tail), time.Millisecond))
+	}
+	_, pspan := q.span("ads.pctr")
+	pred, err := model.PredictCTR(pctx, ads.PCTRRequest{
+		UserID: q.uid, Surface: q.surface, ItemIDs: ids, History: q.history, Relevance: q.relevance, Version: version,
+	})
+	pspan.End()
+	cancel()
+	if err != nil || len(pred.CTR) != len(ids) {
 		if s.Naive {
 			return res, errFatal{"pctr", err}
 		}
@@ -195,9 +229,14 @@ func (s *Server) selectAds(q *request, requestID uuid.UUID, positions []int, a e
 		s.warn("pctr_error", "pCTR failed: no ads", "err", err)
 		return res, nil
 	}
+	res.pctrModel = pred.Model
 	ctr := make(map[int32]float64, len(ids))
+	feats := make(map[int32][]float32, len(ids))
 	for i, id := range ids {
-		ctr[id] = ctrs[i]
+		ctr[id] = pred.CTR[i]
+		if pred.Features != nil {
+			feats[id] = pred.Features[i]
+		}
 	}
 	for i := range cands {
 		cands[i].PCTR = ctr[cands[i].ItemID]
@@ -223,7 +262,7 @@ func (s *Server) selectAds(q *request, requestID uuid.UUID, positions []int, a e
 		}
 		res.Slots = append(res.Slots, cache.Slot{
 			Position: pos, ItemID: w.ItemID, CampaignID: w.CampaignID, PriceCents: w.PriceCents,
-			PCTRPPM: w.PCTRPPM, AdToken: tok,
+			PCTRPPM: w.PCTRPPM, AdToken: tok, Features: feats[w.ItemID], FeatureNames: pred.FeatureNames,
 		})
 		metrics.AdSlots.WithLabelValues(q.surface, strconv.Itoa(pos)).Inc()
 	}
@@ -333,7 +372,7 @@ func (s *Server) selectChatAds(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	q := &request{s: s, ctx: r.Context(), surface: SurfaceChat, seed: -1, uid: *body.UserID, now: s.Now(), degraded: []string{}}
+	q := &request{s: s, ctx: r.Context(), surface: SurfaceChat, seed: -1, uid: *body.UserID, now: s.Now(), degraded: []string{}, bundle: s.active()}
 	if !s.Naive {
 		plan := s.Plan
 		plan.Total = plan.UserContext + plan.Ads + plan.Tail
@@ -371,6 +410,7 @@ func (s *Server) selectChatAds(w http.ResponseWriter, r *http.Request) {
 		}
 		q.degrade("user_state_" + status) // rules the ads out (adsAllowed)
 	}
+	q.history = recall.Recent(uc.History, recall.HistoryWindow)
 	candidates := make(map[int32]bool, len(body.CandidateItemIDs))
 	for _, id := range body.CandidateItemIDs {
 		candidates[id] = true
@@ -406,9 +446,11 @@ func (s *Server) selectChatAds(w http.ResponseWriter, r *http.Request) {
 		for i, sl := range res.Slots {
 			list[i] = mixer.Fused{ItemID: sl.ItemID, Primary: SourceAds}
 		}
-		rendered, served := s.render(requestID, SurfaceChat, -1, assign, configVersion, q.degraded, list, res.Slots, 0, len(list), false, uc.HV)
-		resp.Items = rendered.Items
+		page, served := s.render(requestID, SurfaceChat, -1, assign, configVersion, q.degraded, list, res.Slots, 0, len(list), false, uc.HV)
+		resp.Items = page.Items
 		served.Ads = &res
+		served.PCTRModel = res.pctrModel
+		addRanking(&served, rendered{}, res.Slots)
 		s.logServed(q.uid, requestID, served)
 	}
 	writeJSON(w, http.StatusOK, resp)

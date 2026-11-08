@@ -22,9 +22,13 @@ write-ups in `docs/results/`.
   `ann.md`, `make load` writes `latency.md`; `make latency-report` re-renders it from
   `artifacts/latency/results.json`; `make billing` writes `billing.md`, `make billing-report`
   re-renders it from `artifacts/billing/`; `make agent-eval` writes `agent.md`, `make
-  agent-latency` adds its chat-path section); change the generator, not the file. The committed `offline.md` is `make setup`, then `make paper-sasrec`,
-  then `make eval`. `make eval` re-runs give the same bytes; `make train` runs on the CPU with fixed
-  seeds, and two runs with the same worker / thread counts gave identical weights. The committed
+  agent-latency` adds its chat-path section; `make release-drill` writes `release.md`, `make
+  release-report` re-renders it from `artifacts/release/drill.json`; `make ab-report` writes
+  `ab.md` from `artifacts/ab/` and the sample job's impressions); change the generator, not the
+  file. The committed `offline.md` is `make setup`, then `make paper-sasrec`,
+  then `make eval` (`make setup` includes `make train-ranker`). `make eval` re-runs give the same
+  bytes; `make train` runs on the CPU with fixed seeds, and two runs with the same worker / thread
+  counts gave identical weights; `make train-ranker` (one thread) gives the same model. The committed
   `agent.md` is a fresh database (`make setup`: no orders, stock as ingested), then `make
   agent-eval`, then `make agent-latency` with the services up; re-runs differ only in their
   latency sections, and the report says when the database had orders (each one took a unit of
@@ -36,49 +40,65 @@ write-ups in `docs/results/`.
 ## Layout
 
 ```
-deploy/docker-compose.yml   PostgreSQL 18 + pgvector, Redis, Redpanda (+ topic init), log-sink
-                            (Redpanda Connect), aggregator, billing (+ pg-proxy: Toxiproxy between
-                            billing and PostgreSQL), Prometheus, Grafana, OTel collector, Jaeger;
-                            profile `bench`: Toxiproxy, api and model-server containers
-deploy/connect/ prometheus/ grafana/ otel/ jaeger/ toxiproxy/   their configuration;
-                            model-server.Dockerfile (bench image), web.Dockerfile (Next.js
-                            standalone build, for the cluster)
+deploy/docker-compose.yml   PostgreSQL 18 + pgvector, Redis (state + cache, redis_exporter), Redpanda
+                            (+ topic init), log-sink (Redpanda Connect), aggregator, billing
+                            (+ pg-proxy: Toxiproxy between billing and PostgreSQL), Prometheus,
+                            Grafana, OTel collector, Jaeger; profile `bench`: Toxiproxy, api and
+                            model-server containers
+deploy/connect/ prometheus/ grafana/ otel/ jaeger/ toxiproxy/   their configuration (Grafana:
+                            dashboard + provisioning/alerting/redis.yml); model-server.Dockerfile
+                            (bench image); spark.Dockerfile + spark/ (the sample job's image:
+                            PySpark 4.2.1, Temurin 21 JRE, its own uv lock); web.Dockerfile
+                            (Next.js standalone build, for the cluster)
 deploy/kind/                local Kubernetes (M5): cluster.yaml (one node, port mappings, bundles
                             mount), versions.lock (kind / kubectl / helm, node image and charts,
                             sha256-pinned), values/ (the official charts' values), cluster.sh
 deploy/helm/recloop-infra/  CloudNativePG Cluster (pgvector), Redis StatefulSets, topic Job
 deploy/helm/recloop/        api (HPA), model-server, aggregator + billing (StatefulSets, KEDA),
-                            log-sink, web, pg-proxy, ServiceMonitors, Grafana dashboard
+                            log-sink, web, pg-proxy, ServiceMonitors, Grafana dashboard + alerts
 proto/                      buf workspace; recloop/modelserver/v1/model_server.proto (design §13.2)
 serving/                    Go module github.com/heyemlee/recloop/serving
   cmd/api/                  HTTP api (:18080): /v1/recommendations, /v1/events, /v1/items/{id},
                             /v1/advertisers, /v1/campaigns[/{id}[/report]], ...,
-                            POST /internal/ads/select
+                            POST /internal/ads/select, /internal/admin/* (M4: releases,
+                            experiments, the model server's fault switch)
   cmd/aggregator/           events -> Redis (incl. frequency caps); rebuild-from-db, reset-offsets,
                             wait-lag
   cmd/billing/              sponsored clicks -> charge ledger + Redis spend; reconcile every minute;
                             `billing reconcile` = one pass
   internal/                 api, mixer (fan-out, RRF, filters), recall, experiment, events (record
                             format, Redpanda publisher, served writer, Direct = M1's sync path),
-                            userstate (Redis + apply.lua), cache (pages, candidate cache, codec),
+                            userstate (Redis + apply.lua, health: fullness, error kinds), cache
+                            (pages, candidate cache, codec),
                             resilience (budgets, breakers), consumer (consume loop, lag),
                             aggregator, metrics (Prometheus), tracing (OTel), catalog, bundle,
                             store, ads (GSP auction, pCTR interface, campaign settings, serving:
                             campaign index, gates, pacing), adtoken (signed ad_token), billing
-                            (charge transaction, Redis spend.lua, consumer, reconcile + raise.lua)
+                            (charge transaction, Redis spend.lua, consumer, reconcile + raise.lua),
+                            ranking (M4: the model server's Rank: features, LightGBM, pCTR),
+                            release (M4: model versions built -> ... -> retired, reconcile),
+                            bundle (+ registry: several versions at once)
   internal/store/db/        sqlc output; queries in internal/store/queries, schema = migrations/
   internal/testutil/        test DB per package (recloop_test_<package>) and Redis DB 15
   migrations/               goose (00001 catalog, 00002 events/orders/experiments/models,
                             00003 default experiment, 00004 text_emb stored inline,
                             00005 purchase -> order trigger on events_raw, 00006 advertisers,
-                            campaigns, budget rows, ad_charges, ad_clicks)
+                            campaigns, budget rows, ad_charges, ad_clicks, 00007 release times +
+                            one active version + model_version_events)
   gen/                      protoc-gen-go output
-model_server/               Python 3.12 uv project (own .venv): gRPC Retrieve over a bundle (:18081),
-                            admin.py: fault switch + /metrics on :18082
+model_server/               Python 3.12 uv project (own .venv): gRPC Retrieve and Rank (:18081);
+                            registry.py: several bundle versions, pin_version; ranking.py: the
+                            features, the ONNX ranker, the pCTR; admin.py: fault switch, /metrics,
+                            /bundles on :18082
 ml/                         Python 3.12 uv project (own .venv); run modules from the repo root
   data/                     download, prefilter_meta, preprocess, catalog, verify, text_embed,
                             ingest, seed_redis
-  models/                   pop, itemcf, sasrec (+ train_sasrec)
+  models/                   pop, itemcf, sasrec (+ train_sasrec), rrf, ranker (+ train_ranker:
+                            LightGBM LambdaRank), pctr (logistic regression)
+  ranking/                  candidates (the api's recall + RRF replayed), features, onnx_trees
+                            (LightGBM -> ONNX TreeEnsembleRegressor)
+  samples/                  export (events_raw -> Parquet by day), job (PySpark: attribution,
+                            labels, downsampled training samples; runs in its container)
   eval/                     splits, metrics, bootstrap, calc_check, report, run, minionerec_sasrec,
                             minionerec (+ _report), sasrec_cost, footprint, machine
   bundle/                   build (+ faiss_index, run in a torch-free subprocess)
@@ -89,12 +109,16 @@ minionerec/                 Python 3.12 uv project (own .venv, Apple Silicon onl
                             evaluate.py + evaluate.py.patch on MPS (upstream, generate, cost)
 web/                        Next.js 16 + shadcn/ui (:13000); /api/v1/* is proxied to the Go api
                             (/internal is not), /api/v1/chat to the agent service; e2e/;
-                            /advertiser is the advertiser console, /chat the shopping assistant
+                            /advertiser is the advertiser console, /chat the shopping assistant,
+                            /admin the internal admin page (only with RECLOOP_ADMIN=1)
 sim/                        traffic simulator (world, click model, sessions + fault switches, verify,
-                            drill; ads, billing_drill, billing_verify, overdelivery); runs in the
-                            ml environment (`$(PY) -m sim.<module>`)
+                            drill; ads, billing_drill, billing_verify, overdelivery; compose: this
+                            checkout's compose project, redis_stats: both Redis instances; M4:
+                            standing campaigns, traffic in the background, admin client,
+                            release_drill, ab); runs in the ml environment (`$(PY) -m sim.<module>`)
 loadtest/                   k6 scenario recs.js, experiment runner run.py, report.py (latency.md)
-analysis/                   served_attribution.sql, srm.py, billing_report.py (billing.md)
+analysis/                   served_attribution.sql, srm.py, billing_report.py (billing.md),
+                            ab_report.py (ab.md), release_report.py (release.md)
 kube/                       runs on the kind cluster: cluster (kubectl, Prometheus, watcher), run
                             (rollout, HPA, KEDA), drill (sim.billing_drill on pods), report
                             (deploy.md); ml environment
@@ -114,7 +138,9 @@ agent/                      Python 3.12 uv project (own .venv): the shopping ass
                             chat_latency (the chat path through the running services)
 data/        (ignored) raw/ downloads, hf/ model files, processed/ outputs of `make data`
 third_party/ (ignored) MiniOneRec and SASRec.pytorch clones
-artifacts/   (ignored) models/sasrec, bundles/<version> + bundles/current, eval/, e2e/, logs/,
+artifacts/   (ignored) models/sasrec, models/ranker, models/pctr, bundles/<version> +
+             bundles/current, eval/, e2e/, logs/, samples/ (raw/, impressions/, train/, meta/),
+             release/, ab/,
              sim/ (world.json, run ledgers), latency/ (results.json),
              minionerec/ (runs/<name>/, cost/, upstream/ = the staged, patched evaluate.py),
              deploy/ (results.json, k6 summaries, drill/)
@@ -123,7 +149,8 @@ artifacts/   (ignored) models/sasrec, bundles/<version> + bundles/current, eval/
 ## Commands
 
 ```
-make setup         # up, data, ingest, train, eval, bundle, seed, web-install: clean checkout -> demo
+make setup         # up, data, ingest, train, train-ranker, eval, bundle, seed, web-install:
+                   # clean checkout -> demo
 make up            # images + compose up --wait (event pipeline and monitoring too) + migrations
 make images        # cross-compile api, aggregator, billing into .cache/linux, build recloop/go:dev
 make data          # fetch + checksum inputs, re-run MiniOneRec preprocessing, export, verify,
@@ -131,15 +158,20 @@ make data          # fetch + checksum inputs, re-run MiniOneRec preprocessing, e
 make ingest        # migrations + items (text_emb, simulated stock) / users into PostgreSQL
 make train         # SASRec grid on train/valid (CPU, ~11 min) -> artifacts/models/sasrec
 make paper-sasrec  # re-run MiniOneRec's sasrec.py on the split (~18 min; make eval picks it up)
-make eval          # Pop / ItemCF / SASRec -> docs/results/offline.md (needs train; no database)
+make train-ranker  # LightGBM LambdaRank on the validation split (~7 min) -> artifacts/models/ranker
+make eval          # Pop / ItemCF / SASRec / RRF / LambdaRank -> docs/results/offline.md (needs
+                   # train and train-ranker; no database)
 make ann           # ANN benchmark + index updates -> docs/results/ann.md (~25 min; idle machine:
                    # it marks the report preliminary when the load average is above 2 at the start)
-make bundle        # artifacts/bundles/<version> (ONNX encoder, FAISS, ItemCF/Pop tables), current ->
-make seed          # FLUSHDB Redis, load dataset users' train-period history + demo users
+make bundle        # artifacts/bundles/<version> (ONNX encoder, FAISS, ItemCF/Pop tables, M4: feature
+                   # tables, ONNX ranker, pCTR if trained); current -> it only when there is none
+                   # (BUNDLE_FLAGS=--current forces it; --sasrec PATH, --no-ranker, --no-pctr)
+make seed          # FLUSHDB both Redis instances (cache first), load dataset users' train-period
+                   # history + demo users into the state Redis
 make rebuild-redis # seed + replay events_raw (FROM=db, default) or the event log (FROM=log)
 make serve-model   # model server on :18081 (bundle: artifacts/bundles/current)
 make serve-api     # Go api on :18080
-make serve-web     # Next.js dev server on :13000
+make serve-web     # Next.js dev server on :13000 (ADMIN=1: the /admin page works)
 make test          # ruff + pytest (ml, model_server, minionerec, agent) + go vet/test; DB/Redis tests
                    # skip when down
 make test-props    # long run of the ads / ad_token / billing property tests (CHECKS=2000, ~4 min)
@@ -156,13 +188,23 @@ make load          # latency experiments -> docs/results/latency.md (~90 min; id
 make load-smoke    # 1 repeat, 15 s runs -> artifacts/latency/smoke.md (development)
 make latency-report  # re-render latency.md from artifacts/latency/results.json
 make billing       # overdelivery + billing-drill -> docs/results/billing.md (~75 min; stack, model
-                   # server and `CANDIDATE_CACHE=off make serve-api` up; reseeds Redis; refuses to
-                   # run while other campaigns are active)
+                   # server and api up; reseeds Redis; refuses to run while other campaigns are
+                   # active)
 make overdelivery  # safety margin 0 / 5 / 20 clicks x pacing, 6 x ~5 min -> artifacts/billing/
 make billing-drill # 30 min of traffic, kill -9 billing, Redpanda restarts, PostgreSQL +200 ms
                    # for billing; then the ledger against the simulator's truth, charge by charge
 make billing-report  # re-render billing.md from artifacts/billing/
 make k6            # build k6 v2.3.0 (tools/k6) into .cache/bin
+make spark-image   # the sample job's image (recloop/spark:dev)
+make samples       # DAY=YYYY-MM-DD (UTC, default today): export events_raw around it, then the
+                   # PySpark job -> artifacts/samples/{impressions,train,meta}
+make test-samples  # the sample job's tests, in its container
+make train-pctr    # logistic-regression pCTR on artifacts/samples/train -> artifacts/models/pctr
+make collect       # standing campaigns + COLLECT_SECONDS (900) of simulated traffic for samples
+make release-drill # NEW=<version> BAD=<version>: canary 5% -> full rollout, then BAD activated
+                   # and rolled back, under traffic (~35 min) -> docs/results/release.md
+make ab            # A/A, then RRF vs LightGBM, 2 x 20 min of traffic -> artifacts/ab/; then
+                   # `make samples` and `make ab-report` -> docs/results/ab.md
 make agent-cases   # regenerate agent/eval/cases.jsonl from the items table (read-only)
 make agent-eval    # shopping assistant: baseline + oracle agents -> docs/results/agent.md (~1 min)
 make serve-agent   # shopping assistant service on :18083 (POST /v1/chat; rules parser unless
@@ -203,8 +245,11 @@ preview browser. Ports and URLs are in `.env.example`.
 
 Go integration tests use `DATABASE_URL` / `REDIS_URL`: each test package gets its own database
 on that server (`recloop_test_<package>`, created, migrated and emptied by `testutil.PG`) and
-Redis DB 15. Several checkouts testing at once should each point them at a stack of their own
-(e.g. `docker compose -p <name> -f deploy/docker-compose.yml up` with other `RECLOOP_*_PORT`s).
+Redis DB 15 (the api tests' cache instance: DB 13). Several checkouts testing at once should each
+point them at a stack of their own: `COMPOSE_PROJECT_NAME` and other `RECLOOP_*_PORT`s in the
+checkout's `.env` (the Makefile's `$(COMPOSE)` passes `-p` and `--env-file .env`; the drills and
+`loadtest/run.py` use `sim/compose.py`, never the shared `recloop` project by accident;
+`RECLOOP_GO_IMAGE` / `RECLOOP_MS_IMAGE` keep the images private).
 
 Caches (`UV_CACHE_DIR`, `GOMODCACHE`, `GOCACHE`, `BUF_CACHE_DIR`, npm) default to `.cache/` in
 the repo. Inside the Claude Code sandbox these must run outside it: docker, anything that
@@ -286,13 +331,15 @@ interpreter at exit: `ORT_DISABLE_TELEMETRY=1` (Makefile, model-server image, `m
 - Ports: Redpanda 19092 (admin 19644), log-sink 14195, aggregator metrics 18090, Prometheus
   19090, Grafana 13001 (dashboard "RecLoop"), Jaeger 16686, OTLP 14317 / 14318; bench api 18180,
   bench model-server admin 18182, Toxiproxy 18474; M3: billing metrics 18092, pg-proxy API 18475,
-  model server admin `MODEL_SERVER_ADMIN_PORT` (18082). `make serve-api` / `serve-model` send traces
-  to the collector (`OTEL_EXPORTER_OTLP_ENDPOINT`); the api serves `/metrics`.
+  model server admin `MODEL_SERVER_ADMIN_PORT` (18082); cache Redis 16391 (state Redis 16390).
+  `make serve-api` / `serve-model` send traces to the collector (`OTEL_EXPORTER_OTLP_ENDPOINT`);
+  the api serves `/metrics`.
 - Load tests run on the bench profile: api and model server containers (2 CPU each); the fault
   experiment reaches the model server and Redis through Toxiproxy, the rest directly (the proxy
   adds its own tail); k6 runs on the host; before every run the consumers catch up and Redis is
-  reseeded. Redis has `maxmemory 384mb` + `volatile-ttl` (pages and caches
-  go first). Measurements need an idle machine and the coordinator's go-ahead.
+  reseeded (both instances). Until 2026-11-08 one Redis had `maxmemory 384mb` + `volatile-ttl`
+  (`latency.md` was measured so); now pages and candidates have the cache instance to
+  themselves (see Redis below). Measurements need an idle machine and the coordinator's go-ahead.
 - Simulator: `sim/world.py` (2,024 test-period users, targets = their test items, click model
   = examination x relevance by text similarity), `sim/run.py` (sessions, fault switches, ledger),
   `sim/verify.py` (events_raw / orders / Redis vs the ledger), `sim/drill.py`.
@@ -327,7 +374,8 @@ interpreter at exit: `ORT_DISABLE_TELEMETRY=1` (Makefile, model-server image, `m
   frequency below the cap, pacing -> `FixedPCTR` (`ADS_FIXED_PCTR` 0.01, floor `ADS_MIN_PCTR`)
   -> `ads.Run` -> signed tokens. The page store keeps the slots (later pages show them); ads are
   never in the candidate cache. Failure: organic feed, `ads_<timeout|error|skipped>` /
-  `pctr_error` in `degraded`; the §5.1 chain (no user state, SASRec or ranker) rules ads out.
+  `pctr_error` in `degraded`; the §5.1 chain (no user state, SASRec or ranker) rules ads out, and
+  so does a full state Redis (`ads_state_full`: caps and spend stop counting).
   The brand cap is an organic rule: ads are not counted in it.
 - Serving policy: `ADS_SAFETY_MARGIN_CLICKS` (5), `ADS_PACING` (off): pacing serves a campaign
   with probability 1 while its spend is on or behind budget x elapsed share of today's flight
@@ -358,18 +406,128 @@ interpreter at exit: `ORT_DISABLE_TELEMETRY=1` (Makefile, model-server image, `m
 - Billing runs (`make billing`): `sim.overdelivery` and `sim.billing_drill` create their own
   campaigns through the api (and end them), refuse to start while other campaigns are active,
   reseed Redis before every configuration (`ml.data.seed_redis`, after the consumers caught
-  up), and write `artifacts/billing/`. Redis must not evict during them (`evicted_keys` is
-  recorded; the drill fails on any): run the api with `CANDIDATE_CACHE=off`, or 30 minutes of
-  simulated traffic fill the 384 MB. The truth (`sim.billing_verify`) comes from the simulator's
+  up), and write `artifacts/billing/`. The state Redis must neither evict nor refuse a write
+  during them (the drill fails otherwise); the cache Redis's evictions are recorded
+  (`sim.redis_stats`). The api runs with its defaults (candidate cache on). The over-delivery
+  study in `billing.md` is from 2026-11-08 01:20 UTC, before the split (one Redis, candidate cache
+  off); the report names each section's setup. The truth (`sim.billing_verify`) comes from the simulator's
   ledger only: the tokens it was served (claims read, not verified), its clicks, which ones it
-  forged (`forge` fault). `--dwell-ms` delays a page's events (time to click). The drill's
-  docker commands use `COMPOSE_PROJECT_NAME` and the repo's `.env`; `PG_PROXY_URL` reaches
-  pg-proxy.
+  forged (`forge` fault). `--dwell-ms` delays a page's events (time to click). The drills'
+  docker commands go through `sim/compose.py`; `PG_PROXY_URL` reaches pg-proxy.
 - Property tests (rapid; billing ones against PostgreSQL): a sequential model with technical
   and business duplicates, late / forged / mismatched clicks, budget changes and crashes at every
   step must match the database exactly; concurrent workers must give the order-independent
   truth (one charge per clicked impression, spend = min(budget, prices), each outcome counted
   once). `make test` runs 30 cases each, `make test-props` 2,000.
+
+## Redis: state and cache (M3, 2026-11-08)
+
+- Two instances (design §19, 2026-11-08), both without persistence (derived state, rebuilt from
+  the log). State `redis` (`REDIS_URL`, 16390): `u:{uid}:*`, `dedup:*`, `fc:*`, `spend:*`,
+  `demo:users`; `noeviction`, `RECLOOP_REDIS_MAXMEMORY` 1 GB (container 1.5 GB). Cache
+  `redis-cache` (`CACHE_REDIS_URL`, 16391): `page:*`, `cand:*`; `allkeys-lru`, 384 MB. The api
+  uses both (user context, ads MGET, demo users: state; candidate cache, pages: cache; the page +
+  candidate write is still one pipeline). `CACHE_REDIS_URL` defaults to the cache instance and
+  never falls back to `REDIS_URL`; the api warns at start when the state instance evicts, the
+  cache does not, or both URLs reach one instance (same run_id). Aggregator, billing and
+  reconciliation use the state instance only.
+- Sizing (measured on redis 8.10, replaying the 30-minute billing drill with apply.lua): 124 B per
+  event (7-day dedup marker) + 76 B per (user, item) seen in 24 h; the seed is 3 MB, the drill
+  ~117 MB, one `make load` run ~150 MB (reseeded before every run). 1 GB holds ~6.8 M events of a
+  week. When the state instance is full it refuses writes (a script at its first write: nothing
+  half applied): the aggregator retries its batch (offsets uncommitted, lag grows, no loss),
+  billing still charges in PostgreSQL but its spend update and reconciliation's repairs fail, the
+  api serves no ads (`userstate.Fullness`: INFO every 5 s, full at 98 % of maxmemory or on a new
+  `errorstat_OOM`). Remedy: `make seed` / `make rebuild-redis`, or a larger maxmemory.
+- Visible: redis_exporter v1.95.0 (`job="redis"`, label `redis="state"|"cache"`):
+  `redis_memory_*`, `redis_evicted_keys_total`, `redis_errors_total{err="OOM"}`; the services'
+  `recloop_redis_errors_total{component,op,kind}` and the api's `recloop_redis_state_full`.
+  Grafana: the dashboard's Redis row and the provisioned alert rules (state evicted, state full,
+  write errors, state above 80 %, reconciliation stale, aggregator lag, exporter missing); no
+  contact point locally (the Alerting page shows them).
+
+## Ranking and releases (M4)
+
+- Offline ranker: `ml/ranking/candidates.py` replays the api's home feed on a split (SASRec,
+  ItemCF (score > 0) and Pop top 200 each, by score then item id; weighted RRF, k = 60, summed in
+  the sources' order, ties by best rank then item id; 300 candidates). `ml/ranking/features.py`:
+  10 features (each source's score and rank if it returned the item, popularity, how many
+  sources, price bucket, level-2 / leaf category overlap with the history; NaN = missing).
+  `make train-ranker`: LightGBM LambdaRank on the validation split (recall models fitted on train
+  rows; queries without the target among the candidates left out), grid by 4-fold CV over users,
+  refit with the mean best rounds. LightGBM is built from source without OpenMP (ml/pyproject.toml
+  `[tool.uv]`): one thread, deterministic, and it can share a process with torch. The item log's
+  CTR features of design §4.3 are not used: the dataset has no impressions and simulated clicks
+  follow the test targets (leakage); the user's decision is pending.
+- Bundle (M4 files): `features.json` (item tables), `ranker.onnx` (ml/ranking/onnx_trees.py:
+  thresholds rounded down to float32, LightGBM's missing-value rules, |x| <= 1e-35 read as 0;
+  checked against LightGBM on every validation candidate), `ranker.txt`, `rank_golden.json`,
+  `pctr.json` (when `make train-pctr` ran). A bundle without them still serves (RRF, fixed pCTR).
+- Model server: `Rank(history, candidates + each source's (rank, score), ads + optional
+  relevance, pin_version)` -> feature rows, LightGBM scores, pCTR of the ads (logistic regression
+  in numpy at the reference position 3). Retrieve scores `ad_item_ids` with the same user vector.
+  Several versions at once (`registry.py`): a request names its version (`pin_version`), else
+  the default; versions are found by name under the startup bundle's parent directory; loading
+  replays the golden data (encoder, ranker, pCTR). Admin: `GET/POST /bundles`, `PUT
+  /bundles/default`, `DELETE /bundles/<version>`.
+- api: a request reads its bundle once: the rank variant's `pin_version` if loaded, else the
+  active one; recall and Rank pin the model server to it. On the home feed with an M4 bundle,
+  Rank runs for every user (both rank variants: features for the served log, the LightGBM score)
+  under the ranking budget (25 ms; skipped below 5 ms; breaker `rank` of its own); the rank
+  variant's `{"ranker": "lightgbm"}` orders the list by it (ties: RRF's order), `rrf` (default,
+  `RANKER`) keeps RRF's. A failed call: RRF's order, `rank_<status>` in `degraded`, no ads
+  (§5.1); a degraded list is not cached. Served items log `f` (features, null = missing) and
+  `lgbm`; the payload `features` (names), `ranker`, `pctr_model`. Candidate-cache hits carry no
+  organic features. Ads: the in-flight campaigns' in-stock, unbought items go into Retrieve;
+  pCTR comes from Rank (`ranking.Client` implements `ads.PCTRModel`), FixedPCTR when the bundle
+  has no pCTR model (features are logged either way). `RANK=off`: RRF and FixedPCTR only.
+- Releases (`internal/release`, design §6): `model_versions` built -> validated -> canary ->
+  active -> retired, every step a row of `model_version_events` (migration 00007; at most one
+  active version). validate = the api (checksums, catalog size, ItemCF golden queries) and the
+  model server (its golden data) load the version while the active one serves; canary = the
+  rank-layer experiment `release-canary` over buckets [0, 10 x percent) with `pin_version`;
+  activate = one transaction retires the previous version, the api switches at once, the model
+  server's default follows, the canary ends; rollback = back to the version the active one
+  replaced, within 30 minutes (both sides keep it loaded that long); an aborted canary is
+  retired without having been active. Every api instance reconciles every 2 s (loads the
+  active, canary and recently retired versions, unloads the rest; under the release lock, so a
+  pass never undoes a step it raced with); at startup the api takes
+  model_versions' active version (the startup bundle only when there is none). Admin api:
+  `/internal/admin/models` (GET, POST {version}), `.../models/{version}/validate|canary|activate`,
+  `/internal/admin/canary/abort`, `/internal/admin/rollback`, `/internal/admin/experiments[/{id}
+  [/stop]]` (GET / PUT / POST), `/internal/admin/fault` (GET / PUT).
+- Admin page: `web/src/app/admin` (experiments and their split, versions with validate / canary /
+  full rollout / abort / roll back, the release record, the fault switch); its server-side route
+  `/admin/api/*` forwards an allowlist to the api's `/internal/admin/*` only when the web app runs
+  with `RECLOOP_ADMIN=1`; otherwise 404.
+- Samples (`ml/samples`, design §7.5): `export.py` writes events_raw by day and type to
+  `artifacts/samples/raw/` on the host; `job.py` (PySpark, local mode) reads served of D-1..D,
+  impressions of D-1..D, clicks / carts / purchases of D..D+1; one row per event_id, one
+  impression per impression_id (a click without one stands for it), joined to its served record
+  on (request_id, position) (no record or another item: dropped, counted); label = a click within
+  30 minutes (event times = UUIDv7 times); carted / purchased within 30 minutes after the click;
+  `final = false` until the window has passed (`--complete-through`, default the newest event);
+  training samples = final home-feed impressions with served features, negatives kept by a hash
+  of the impression id below the rate (0.1) with weight 1 / rate. The job runs in a container
+  (`deploy/spark.Dockerfile`, `--network none --hostname localhost`, as the host user with a
+  one-line passwd mounted): HotSpot JVMs started from the Claude app's processes on this Mac
+  crash at startup (SIGBUS in CodeHeap::allocate, Temurin 17 and 21).
+- pCTR (`ml/models/pctr.py`): logistic regression (scikit-learn) on the samples' features plus
+  the slot and the position (one-hot 1..10, 11-20, 21+), weighted; C chosen on a time-ordered
+  split, judged on the last 20 % (AUC, log loss, calibration by position); the model server sets
+  the position to 3 and sponsored to 1.
+- Runs (stack, model server and api up; one at a time on an idle machine): `make collect`, then
+  `make samples` and `make train-pctr`, `make bundle` (the release), `make bundle
+  BUNDLE_FLAGS="--sasrec artifacts/models/sasrec/trials/8.pt"` (a bad release: the BCE trial),
+  `make release-drill NEW=... BAD=...`, `make ab`, `make samples`, `make ab-report`. The runs
+  reseed Redis between phases (`make ab` does it itself). The drills' traffic (`sim.traffic`)
+  pauses 50-300 ms between a session's page views (16 sessions: ~85 page views/s); unpaced, the
+  simulator is a load test that fills the 1 GB state Redis within 15 minutes. The release drill's
+  phases run from step to step by the steps' own times; `python -m sim.release_drill --analyse`
+  re-derives its tables from `artifacts/release/` (then `make release-report`). After simulated
+  traffic, `make samples` gets `SAMPLES_FLAGS="--complete-through <the traffic's end + 30 min,
+  UTC>"`: the simulator has stopped, so nothing can arrive later and this reads what a run 30
+  minutes later would (the default, the newest event, leaves the last 30 minutes not final).
 
 ## Local Kubernetes (M5)
 

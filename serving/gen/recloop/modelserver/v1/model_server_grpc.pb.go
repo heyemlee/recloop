@@ -32,9 +32,10 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type ModelServerClient interface {
 	// Encodes the history into a user vector and returns the top-k organic candidates from the
-	// item index; also scores the eligible ad items (M3).
+	// item index; the same user vector also scores the eligible ad items (relevance, §9.2).
 	Retrieve(ctx context.Context, in *RetrieveRequest, opts ...grpc.CallOption) (*RetrieveResponse, error)
-	// M3: pCTR for ad candidates; M4: LightGBM ranking of organic candidates. Not implemented yet.
+	// Describes and scores candidates with the bundle's ranking models (M4): the ranker's
+	// features and LightGBM score of every organic candidate, and the pCTR of every ad candidate.
 	Rank(ctx context.Context, in *RankRequest, opts ...grpc.CallOption) (*RankResponse, error)
 }
 
@@ -71,9 +72,10 @@ func (c *modelServerClient) Rank(ctx context.Context, in *RankRequest, opts ...g
 // for forward compatibility.
 type ModelServerServer interface {
 	// Encodes the history into a user vector and returns the top-k organic candidates from the
-	// item index; also scores the eligible ad items (M3).
+	// item index; the same user vector also scores the eligible ad items (relevance, §9.2).
 	Retrieve(context.Context, *RetrieveRequest) (*RetrieveResponse, error)
-	// M3: pCTR for ad candidates; M4: LightGBM ranking of organic candidates. Not implemented yet.
+	// Describes and scores candidates with the bundle's ranking models (M4): the ranker's
+	// features and LightGBM score of every organic candidate, and the pCTR of every ad candidate.
 	Rank(context.Context, *RankRequest) (*RankResponse, error)
 	mustEmbedUnimplementedModelServerServer()
 }

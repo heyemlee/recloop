@@ -13,7 +13,7 @@ The store with the debug panel on: every request shows its recall sources, fusio
 model version and experiment groups. Two dataset users get different feeds; after a click on a
 binder, the next feed includes items recalled via that binder (outlined in the GIF).
 
-**Status: work in progress.** Milestones M0 to M3 are done:
+**Status: work in progress.** Milestones M0 to M4 are done:
 
 - a reproducible data pipeline, the catalog in PostgreSQL, and offline evaluation of Pop,
   ItemCF and SASRec with bootstrap intervals and a comparison with the published SASRec
@@ -46,14 +46,27 @@ binder, the next feed includes items recalled via that binder (outlined in the G
   8 × `kill -9` of billing, Redpanda restarts and a slowed-down PostgreSQL, the ledger equals
   the simulator's truth charge by charge. With a safety margin of 5 clicks no click went
   unbilled in the over-delivery study, at the cost of about 10 % of the top campaign's budget
-  left unspent ([results](docs/results/billing.md)).
+  left unspent ([results](docs/results/billing.md)). Redis keeps user state, dedup markers and
+  the ad counters in an instance that never evicts: when it is full it refuses writes, Grafana
+  raises an alert and the feed shows no ads; result pages and cached candidates live in a
+  second instance that evicts the least recently used.
+- ranking and releases: a LightGBM LambdaRank ranker over the online candidates, trained on
+  the validation split with features the dataset period has (click rates from the logs would
+  leak the simulator's test targets), beats RRF offline: NDCG@10 +0.0186 [+0.0144, +0.0233],
+  all of it on targets reviewed the same day as the last history item. Sponsored slots get a
+  pCTR from a logistic regression on samples that Spark joins from the event log. A model
+  bundle goes live through validation, a 5 % canary with guardrails and a full rollout, and a
+  rollback switches a pointer back; under simulated traffic every switch took effect within
+  0.07 s. The A/A test passes, and the ranker's CTR change on simulated traffic, +0.0001
+  [−0.0005, +0.0006], is not significant: the simulator clicks by text relevance and has no
+  same-day effect ([release](docs/results/release.md), [A/B](docs/results/ab.md)).
 
 Ahead of M4, an ANN benchmark compares exact search with IVF, HNSW and IVF-PQ on synthetic
 catalogs of up to 1M items, and studies incremental index updates against full rebuilds. Exact
 search is enough until it needs about 1 ms of CPU per query (about 250K items); at 1M items
 IVF-Flat reaches recall@100 0.995 at a P99 of 152 µs ([results](docs/results/ann.md)).
 
-M7, done ahead of M4 and M5: MiniOneRec, a generative recommender (Qwen2.5-1.5B fine-tuned to
+M7, done ahead of M5: MiniOneRec, a generative recommender (Qwen2.5-1.5B fine-tuned to
 emit an item's semantic ID, decoded with beam search constrained to the catalog), was re-run
 with its published Office checkpoint on this Mac's GPU. Its result reproduces: its own calc.py
 gives HR@10 0.1570 and NDCG@10 0.1237 against the paper's 0.1634 and 0.1242, both inside our
@@ -74,8 +87,7 @@ gold constraints reach 100 %, so the misses are parsing errors; a reply takes 15
 without a model. The runs with Claude (Opus 5.5 by default, against Sonnet 5.5 and Haiku 5.5)
 wait for an API key ([results](docs/results/agent.md)).
 
-Next up: a LightGBM ranker with a gradual release and A/B tests (M4) and a local Kubernetes
-deployment (M5).
+Next up: a local Kubernetes deployment (M5).
 
 ## Run
 
@@ -92,7 +104,8 @@ make test         # Python and Go tests; make e2e runs the browser check
 make drill        # duplicates + consumer crashes under simulated traffic, then a consistency check
 make load         # latency experiments on CPU-limited containers -> docs/results/latency.md
 make billing      # ad over-delivery study + billing chaos drill -> docs/results/billing.md
-                  # (run the api as CANDIDATE_CACHE=off make serve-api)
+make release-drill  # canary, full rollout and rollback under traffic -> docs/results/release.md
+make ab           # A/A + A/B of the ranker on simulated traffic -> docs/results/ab.md
 ```
 
 Grafana (dashboard "RecLoop") is at http://localhost:13001, Jaeger at http://localhost:16686,

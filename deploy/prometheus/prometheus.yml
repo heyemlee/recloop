@@ -27,6 +27,21 @@ scrape_configs:
   - job_name: log-sink
     static_configs:
       - targets: ["log-sink:4195"]
+  # Both Redis instances through one redis_exporter (multi-target): redis="state" | "cache".
+  - job_name: redis
+    metrics_path: /scrape
+    static_configs:
+      - targets: ["redis://redis:6379"]
+        labels: {redis: state}
+      - targets: ["redis://redis-cache:6379"]
+        labels: {redis: cache}
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__address__]
+        target_label: instance
+      - target_label: __address__
+        replacement: redis-exporter:9121
   - job_name: redpanda
     metrics_path: /public_metrics
     static_configs:

@@ -4,9 +4,21 @@
 //
 //	API_ADDR               listen address (127.0.0.1:18080)
 //	DATABASE_URL           PostgreSQL (postgres://recloop:recloop@localhost:15432/recloop?sslmode=disable)
-//	REDIS_URL              Redis (redis://localhost:16390/0)
+//	REDIS_URL              state Redis: user state, spend and frequency counters; never evicts
+//	                       (redis://localhost:16390/0)
+//	CACHE_REDIS_URL        cache Redis: result pages and the candidate cache; evicts the least
+//	                       recently used (redis://localhost:16391/0). Never the state instance:
+//	                       pages would fill it, so there is no fallback to REDIS_URL.
 //	MODEL_SERVER_ADDR      gRPC model server (127.0.0.1:18081)
-//	RECLOOP_BUNDLE         bundle directory (artifacts/bundles/current)
+//	RECLOOP_BUNDLE         bundle directory (artifacts/bundles/current): the startup version;
+//	                       model_versions' active version wins when there is one (M4)
+//	RECLOOP_BUNDLES_DIR    where versions live by name (the startup bundle's parent)
+//	MODEL_SERVER_ADMIN_URL the model server's admin port (http://127.0.0.1:18082): releases
+//	                       load and switch versions there, the admin page sets faults
+//	RANK                   on (default): the model server's Rank for bundles with ranking
+//	                       models (features, LightGBM, pCTR); off: RRF and the fixed pCTR only
+//	RANKER                 the default ranker when the rank experiment does not set one
+//	                       (rrf; or lightgbm)
 //	EVENTS_MODE            redpanda: events go to the event log (default); direct: written to
 //	                       PostgreSQL and Redis synchronously, M1's path, no Redpanda needed
 //	KAFKA_BROKERS          Redpanda seed brokers, comma-separated (localhost:19092)
@@ -42,6 +54,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -67,7 +80,9 @@ import (
 	"github.com/heyemlee/recloop/serving/internal/experiment"
 	"github.com/heyemlee/recloop/serving/internal/metrics"
 	"github.com/heyemlee/recloop/serving/internal/mixer"
+	"github.com/heyemlee/recloop/serving/internal/ranking"
 	"github.com/heyemlee/recloop/serving/internal/recall"
+	"github.com/heyemlee/recloop/serving/internal/release"
 	"github.com/heyemlee/recloop/serving/internal/resilience"
 	"github.com/heyemlee/recloop/serving/internal/store"
 	"github.com/heyemlee/recloop/serving/internal/tracing"
@@ -171,6 +186,63 @@ func adServer(ctx context.Context, bg context.Context, st *store.Store, log *slo
 	}, nil
 }
 
+// redisClient connects to the Redis of an environment variable (default def).
+func redisClient(ctx context.Context, name, def string, naive bool, log *slog.Logger) (*redis.Client, error) {
+	opts, err := redis.ParseURL(env(name, def))
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", name, err)
+	}
+	if !naive {
+		// Deadlines come from the request budget; a retry inside a 5 ms budget is pointless.
+		opts.ContextTimeoutEnabled = true
+		opts.MaxRetries = -1
+		opts.DialTimeout = 100 * time.Millisecond
+		opts.PoolTimeout = 50 * time.Millisecond
+		opts.MinIdleConns = 8
+	}
+	c := redis.NewClient(opts)
+	if err := c.Ping(ctx).Err(); err != nil {
+		log.Warn("redis unreachable; requests degrade until it is back", "env", name, "err", err)
+	}
+	return c, nil
+}
+
+// checkRedis warns about a setup that would lose state silently or fill it: the state instance
+// evicting keys, the cache instance not evicting, or both URLs on one instance (same run_id). A
+// Redis that is down, or refuses INFO / CONFIG, is not checked.
+func checkRedis(ctx context.Context, state, cache *redis.Client, log *slog.Logger) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	runID := func(c *redis.Client) string {
+		raw, err := c.Info(ctx, "server").Result()
+		if err != nil {
+			return ""
+		}
+		for _, line := range strings.Split(raw, "\n") {
+			if v, ok := strings.CutPrefix(strings.TrimSpace(line), "run_id:"); ok {
+				return v
+			}
+		}
+		return ""
+	}
+	policy := func(c *redis.Client) string {
+		v, err := c.ConfigGet(ctx, "maxmemory-policy").Result()
+		if err != nil {
+			return ""
+		}
+		return v["maxmemory-policy"]
+	}
+	if id := runID(state); id != "" && id == runID(cache) {
+		log.Warn("REDIS_URL and CACHE_REDIS_URL are the same Redis: result pages and candidates fill the state instance")
+	}
+	if p := policy(state); p != "" && p != "noeviction" {
+		log.Warn("the state Redis evicts keys: dedup markers, frequency caps and spend counters can disappear", "maxmemory-policy", p)
+	}
+	if p := policy(cache); p == "noeviction" {
+		log.Warn("the cache Redis does not evict: once it is full, pages and the candidate cache fail", "maxmemory-policy", p)
+	}
+}
+
 // spanName keeps span names to the route, not the concrete path.
 func spanName(_ string, r *http.Request) string {
 	p := r.URL.Path
@@ -216,27 +288,49 @@ func run(log *slog.Logger) error {
 	if cat.Len() != b.NumItems {
 		return errors.New("catalog and bundle disagree on the number of items: run `make ingest`")
 	}
-	if err := st.RegisterActiveModel(ctx, b.Version, b.Dir, b.Manifest); err != nil {
+	// Bundle versions (design §6): model_versions says which one is active; without one, the
+	// startup bundle becomes it (M1's behaviour).
+	bundles := bundle.NewRegistry(env("RECLOOP_BUNDLES_DIR", filepath.Dir(b.Dir)), b)
+	check := func(nb *bundle.Bundle) error {
+		if nb.NumItems != cat.Len() {
+			return fmt.Errorf("bundle %s has %d items, the catalog %d", nb.Version, nb.NumItems, cat.Len())
+		}
+		return recall.CheckItemCFGolden(nb)
+	}
+	active, err := st.ActiveModel(ctx)
+	switch {
+	case err != nil:
 		return err
+	case active == "":
+		if err := st.RegisterActiveModel(ctx, b.Version, b.Dir, b.Manifest); err != nil {
+			return err
+		}
+	case active != b.Version:
+		ab, err := bundles.Ensure(active)
+		if err == nil {
+			err = check(ab)
+		}
+		if err != nil {
+			return fmt.Errorf("model_versions says %s is active, but it does not load: %w", active, err)
+		}
+		if err := bundles.SetActive(active); err != nil {
+			return err
+		}
+		log.Info("active bundle from model_versions", "version", active)
 	}
 
-	ropts, err := redis.ParseURL(env("REDIS_URL", "redis://localhost:16390/0"))
+	// Two Redis instances (design §19, 2026-11-08): state and cache.
+	rdb, err := redisClient(ctx, "REDIS_URL", "redis://localhost:16390/0", naive, log)
 	if err != nil {
 		return err
 	}
-	if !naive {
-		// Deadlines come from the request budget; a retry inside a 5 ms budget is pointless.
-		ropts.ContextTimeoutEnabled = true
-		ropts.MaxRetries = -1
-		ropts.DialTimeout = 100 * time.Millisecond
-		ropts.PoolTimeout = 50 * time.Millisecond
-		ropts.MinIdleConns = 8
-	}
-	rdb := redis.NewClient(ropts)
 	defer rdb.Close()
-	if err := rdb.Ping(ctx).Err(); err != nil {
-		log.Warn("redis unreachable; requests degrade until it is back", "err", err)
+	cacheRdb, err := redisClient(ctx, "CACHE_REDIS_URL", "redis://localhost:16391/0", naive, log)
+	if err != nil {
+		return err
 	}
+	defer cacheRdb.Close()
+	checkRedis(ctx, rdb, cacheRdb, log)
 
 	gopts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
 	if tracingOn {
@@ -313,33 +407,56 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	var msBreaker, pgBreaker *resilience.Breaker
+	var msBreaker, pgBreaker, rankBreaker *resilience.Breaker
 	if !naive {
 		msBreaker = resilience.NewBreaker("model_server", breakerCfg, breakerChange)
 		pgBreaker = resilience.NewBreaker("postgres", breakerCfg, breakerChange)
-		for _, name := range []string{"model_server", "postgres"} {
+		// Rank gets a breaker of its own: a slow Rank must not cut Retrieve (SASRec recall).
+		rankBreaker = resilience.NewBreaker("rank", breakerCfg, breakerChange)
+		for _, name := range []string{"model_server", "postgres", "rank"} {
 			metrics.BreakerState.WithLabelValues(name).Set(0)
 		}
 	}
+	var rankClient *ranking.Client
+	if env("RANK", "on") != "off" {
+		fixed, err := envFloat("ADS_FIXED_PCTR", 0.01)
+		if err != nil {
+			return err
+		}
+		rankClient = &ranking.Client{MS: ms, Breaker: rankBreaker, Fixed: ads.FixedPCTR(fixed)}
+	}
+	msAdmin := release.HTTPModelServer{Base: env("MODEL_SERVER_ADMIN_URL", "http://127.0.0.1:18082")}
+	releases := &release.Controller{Store: st, Bundles: bundles, MS: msAdmin, Check: check, Log: log, Now: time.Now}
+	go releases.Run(bg, 2*time.Second)
 	var cands *cache.CandidateCache
 	if env("CANDIDATE_CACHE", "on") != "off" {
-		cands = &cache.CandidateCache{R: rdb, TTL: cache.CandidateTTL}
+		cands = &cache.CandidateCache{R: cacheRdb, TTL: cache.CandidateTTL}
 	}
 	adSrv, err := adServer(ctx, bg, st, log)
 	if err != nil {
 		return err
 	}
+	if adSrv != nil {
+		// While the state Redis is full, frequency caps and spend stop counting: no ads.
+		full := &userstate.Fullness{R: rdb, Log: log}
+		go full.Run(bg, ads.RefreshEvery)
+		adSrv.State = full
+	}
 
 	srv := &api.Server{
-		Catalog: cat,
-		Bundle:  b,
-		Users:   users,
-		Pages:   cache.Pages{R: rdb},
-		Cands:   cands,
-		Exps:    exps,
-		Events:  publisher,
-		Served:  served,
-		Redis:   rdb,
+		Catalog:       cat,
+		Bundle:        b,
+		Bundles:       bundles,
+		Rank:          rankClient,
+		DefaultRanker: env("RANKER", ranking.RRF),
+		Release:       releases,
+		Users:         users,
+		Pages:         cache.Pages{R: cacheRdb},
+		Cands:         cands,
+		Exps:          exps,
+		Events:        publisher,
+		Served:        served,
+		Redis:         rdb,
 		Sources: map[string][]mixer.Spec{
 			recall.SurfaceHome: {
 				{Source: recall.SASRec{Client: ms}, Timeout: envMillis("SASREC_TIMEOUT_MS", 35), MinTimeout: 5 * time.Millisecond, K: 200, Breaker: msBreaker},
@@ -368,12 +485,15 @@ func run(log *slog.Logger) error {
 		Ready: func(ctx context.Context) map[string]string {
 			ctx, cancel := context.WithTimeout(ctx, time.Second)
 			defer cancel()
-			out := map[string]string{"postgres": "ok", "redis": "ok", "model_server": "ok"}
+			out := map[string]string{"postgres": "ok", "redis": "ok", "redis_cache": "ok", "model_server": "ok"}
 			if err := st.Pool.Ping(ctx); err != nil {
 				out["postgres"] = err.Error()
 			}
 			if err := rdb.Ping(ctx).Err(); err != nil {
 				out["redis"] = err.Error()
+			}
+			if err := cacheRdb.Ping(ctx).Err(); err != nil {
+				out["redis_cache"] = err.Error()
 			}
 			if r, err := health.Check(ctx, &healthpb.HealthCheckRequest{}); err != nil {
 				out["model_server"] = err.Error()
@@ -410,7 +530,7 @@ func run(log *slog.Logger) error {
 	httpSrv := &http.Server{Addr: addr, Handler: handler, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 2 * time.Minute}
 	errc := make(chan error, 1)
 	go func() { errc <- httpSrv.ListenAndServe() }()
-	log.Info("api listening", "addr", addr, "bundle", b.Version, "config_version", exps.Current().Version,
+	log.Info("api listening", "addr", addr, "bundle", bundles.Active().Version, "config_version", exps.Current().Version,
 		"events", env("EVENTS_MODE", "redpanda"), "naive", naive, "candidate_cache", cands != nil, "tracing", tracingOn,
 		"budget_ms", srv.Plan.Total.Milliseconds(), "breaker_window", breakerCfg.String(), "ads", adSrv != nil)
 

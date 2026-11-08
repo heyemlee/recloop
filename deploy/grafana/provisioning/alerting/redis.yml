@@ -1,0 +1,219 @@
+# Redis alerts (design §19, 2026-11-08). The state Redis never evicts: when it is full it refuses
+# writes, the aggregator stops applying events (and retries), billing's spend counters and the
+# frequency caps stop counting, and the api serves no ads (ads_state_full). These rules make that
+# visible. No contact point is configured locally: firing rules show in Grafana's Alerting page.
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: Redis
+    folder: RecLoop
+    interval: 30s
+    rules:
+      - uid: recloop-redis-state-evicted
+        title: State Redis evicted keys
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: sum(increase(redis_evicted_keys_total{job="redis",redis="state"}[5m])) or vector(0)
+              instant: true
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [0]}
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels: {severity: critical}
+        annotations:
+          summary: The state Redis evicted keys
+          description: >-
+            Its maxmemory-policy must be noeviction: dedup markers, spend counters or frequency
+            caps may be gone. Check the container's command; rebuild with `make rebuild-redis`.
+
+      - uid: recloop-redis-state-full
+        title: State Redis full (writes refused)
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: >-
+                (sum(increase(redis_errors_total{job="redis",redis="state",err="OOM"}[5m])) or vector(0))
+                + (sum(increase(recloop_redis_errors_total{kind="oom"}[5m])) or vector(0))
+              instant: true
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [0]}
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels: {severity: critical}
+        annotations:
+          summary: The state Redis is at maxmemory and refuses writes
+          description: >-
+            The aggregator retries its batch (events wait in Redpanda, nothing is lost), spend and
+            frequency counters stop counting, the api serves no ads. Free memory (`make seed`, or
+            raise RECLOOP_REDIS_MAXMEMORY and recreate the container); the aggregator then catches
+            up and reconciliation repairs the spend counters.
+
+      - uid: recloop-redis-state-write-errors
+        title: State Redis writes failing
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: sum(increase(recloop_redis_errors_total[5m])) or vector(0)
+              instant: true
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [0]}
+        noDataState: OK
+        execErrState: Error
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: Writes of the aggregator, billing or reconciliation to the state Redis fail
+          description: >-
+            recloop_redis_errors_total by component, op and kind (oom, timeout, other) on the
+            dashboard's Redis row.
+
+      - uid: recloop-redis-state-memory
+        title: State Redis above 80 % of its memory
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: >-
+                max(redis_memory_used_bytes{job="redis",redis="state"}
+                / redis_memory_max_bytes{job="redis",redis="state"})
+              instant: true
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [0.8]}
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: The state Redis fills up
+          description: >-
+            About 124 B per event for 7 days (dedup markers) and 76 B per user and item seen in
+            24 hours. At maxmemory it refuses writes: reseed (`make seed`) or raise
+            RECLOOP_REDIS_MAXMEMORY before it does.
+
+      - uid: recloop-reconcile-stale
+        title: Reconciliation has not succeeded for 5 minutes
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: time() - max(recloop_reconcile_last_success_timestamp_seconds)
+              instant: true
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [300]}
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels: {severity: warning}
+        annotations:
+          summary: Billing's reconciliation fails (every minute)
+          description: >-
+            The spend counters ad serving reads are not repaired from the ledger; a full state
+            Redis refuses the repairs. See billing's log and the Redis row.
+
+      - uid: recloop-aggregator-stuck
+        title: Aggregator lag high for 2 minutes
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: max(recloop_consumer_lag{group="aggregator"})
+              instant: true
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [5000]}
+        noDataState: OK
+        execErrState: Error
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: The aggregator does not keep up (or its state Redis refuses writes)
+          description: >-
+            User state, frequency caps and seen items fall behind the events. A full state Redis
+            stops it entirely (see the other Redis alerts).
+
+      - uid: recloop-redis-not-scraped
+        title: Redis metrics missing
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: prometheus
+            model:
+              refId: A
+              # redis_up: the exporter reached the instance (up only says the exporter answered).
+              expr: min(redis_up{job="redis"}) or vector(0)
+              instant: true
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: lt, params: [1]}
+        noDataState: OK
+        execErrState: Error
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: redis_exporter does not reach both Redis instances
+          description: Without it, evictions and refused writes of the instances are not seen.

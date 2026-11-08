@@ -122,12 +122,30 @@ var (
 	}, []string{"result"}))
 )
 
+// ---------------------------------------------------------------- Redis
+
+var (
+	// RedisErrors: failed writes to the state Redis, by component (aggregator, billing,
+	// reconcile, api), operation (apply, spend, repair) and kind: oom (the instance is full and
+	// refuses writes: it never evicts), timeout or other. The instance's own view (evictions,
+	// rejected commands, memory) comes from redis_exporter (redis_* series).
+	RedisErrors = reg(prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "recloop_redis_errors_total", Help: "Failed writes to the state Redis by component, operation and kind.",
+	}, []string{"component", "op", "kind"}))
+	// RedisStateFull: 1 while the api sees the state Redis as full (used memory at 98 % of
+	// maxmemory, or a write refused since the last check): it serves no ads then.
+	RedisStateFull = reg(prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "recloop_redis_state_full", Help: "1 while the state Redis is full or refused a write since the last check (the api serves no ads).",
+	}))
+)
+
 // ---------------------------------------------------------------- ads and billing
 
 var (
 	// AdRequests by surface and outcome: filled (at least one sponsored slot), empty (no
 	// eligible ad), not_allowed (the degradation chain rules ads out), stale (no fresh campaign
-	// snapshot), timeout / error / skipped (the ads stage's Redis read).
+	// snapshot), state_full (the state Redis refuses writes: frequency caps and spend stop
+	// counting), timeout / error / skipped (the ads stage's Redis read).
 	AdRequests = reg(prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "recloop_ad_requests_total", Help: "Ad requests by surface and outcome.",
 	}, []string{"surface", "outcome"}))

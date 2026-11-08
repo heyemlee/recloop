@@ -55,6 +55,10 @@ type Slot struct {
 	PriceCents int32  `json:"price"`
 	PCTRPPM    int64  `json:"pctr_ppm"`
 	AdToken    string `json:"ad_token"`
+	// M4: the features the pCTR model saw, for the first page's served event only (not kept
+	// in the page entry: the later pages never show a sponsored slot).
+	Features     []float32 `json:"-"`
+	FeatureNames []string  `json:"-"`
 }
 
 const pageFormat = 'P'
