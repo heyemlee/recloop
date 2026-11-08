@@ -1,7 +1,9 @@
 import type { NextConfig } from "next";
 
-// The browser talks to the Go api through this app (/api/* -> RECLOOP_API_URL/*), so events
-// sent with navigator.sendBeacon stay same-origin and no CORS setup is needed.
+// The browser talks to the Go api through this app (/api/v1/* -> RECLOOP_API_URL/v1/*), so
+// events sent with navigator.sendBeacon stay same-origin and no CORS setup is needed. Only the
+// public /v1 routes are proxied: /internal/* (the shopping assistant's ads endpoint) and
+// /metrics stay off the browser's reach.
 const apiUrl = process.env.RECLOOP_API_URL ?? "http://127.0.0.1:18080";
 
 const nextConfig: NextConfig = {
@@ -18,7 +20,7 @@ const nextConfig: NextConfig = {
     },
   },
   async rewrites() {
-    return [{ source: "/api/:path*", destination: `${apiUrl}/:path*` }];
+    return [{ source: "/api/v1/:path*", destination: `${apiUrl}/v1/:path*` }];
   },
 };
 

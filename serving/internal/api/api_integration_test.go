@@ -15,7 +15,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 
+	"github.com/heyemlee/recloop/serving/internal/ads"
+	"github.com/heyemlee/recloop/serving/internal/adtoken"
+	"github.com/heyemlee/recloop/serving/internal/aggregator"
 	"github.com/heyemlee/recloop/serving/internal/api"
 	"github.com/heyemlee/recloop/serving/internal/bundle"
 	"github.com/heyemlee/recloop/serving/internal/cache"
@@ -35,7 +39,7 @@ const nItems = 40
 
 // testPlan is generous: the integration tests check behaviour, not latency.
 var testPlan = resilience.Plan{Total: 2 * time.Second, UserContext: 500 * time.Millisecond, CacheGet: 200 * time.Millisecond,
-	Recall: 500 * time.Millisecond, Rank: 100 * time.Millisecond, Tail: 500 * time.Millisecond}
+	Recall: 500 * time.Millisecond, Rank: 100 * time.Millisecond, Ads: 200 * time.Millisecond, Tail: 500 * time.Millisecond}
 
 // fixture: an api on the test database and Redis DB 15, with in-process sources only.
 type fixture struct {
@@ -44,10 +48,32 @@ type fixture struct {
 	srv    *httptest.Server
 	served *events.ServedWriter
 	cat    *catalog.Catalog
+	rdb    *redis.Client
+	exps   *experiment.Loader
+	ads    *api.AdServer // nil unless the fixture serves ads
 	cancel context.CancelFunc
 }
 
-func newFixture(t *testing.T) *fixture {
+// fixtureOpts: the catalog size (nItems by default; the last item is sold out), whether the api
+// serves ads, and the request plan (testPlan by default).
+type fixtureOpts struct {
+	items int
+	ads   bool
+	plan  *resilience.Plan
+	prep  func(*store.Store) // runs after the items are seeded, before the catalog is loaded
+}
+
+func newFixture(t *testing.T) *fixture { return newFixtureWith(t, fixtureOpts{}) }
+
+func newFixtureWith(t *testing.T, o fixtureOpts) *fixture {
+	nItems := nItems
+	if o.items > 0 {
+		nItems = o.items
+	}
+	plan := testPlan
+	if o.plan != nil {
+		plan = *o.plan
+	}
 	st := testutil.PG(t)
 	rdb := testutil.Redis(t)
 	testutil.SeedItems(t, st, nItems, func(i int) int {
@@ -56,6 +82,9 @@ func newFixture(t *testing.T) *fixture {
 		}
 		return 3
 	})
+	if o.prep != nil {
+		o.prep(st)
+	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	ctx := context.Background()
 	cat, err := catalog.Load(ctx, st, log)
@@ -84,11 +113,26 @@ func newFixture(t *testing.T) *fixture {
 	served := events.NewServedWriter(events.PGServed{DB: st}, 128, log)
 	go served.Run(bg, 50, 10*time.Millisecond)
 	users := userstate.Store{R: rdb}
+	direct := &events.Direct{DB: st, State: users, OnStock: cat.SetStock, Now: time.Now}
+	var adSrv *api.AdServer
+	if o.ads {
+		keys, err := adtoken.ParseKeys(testAdKeys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		adSrv = &api.AdServer{
+			Index: ads.NewIndex(func(ctx context.Context, today time.Time) ([]ads.Campaign, error) {
+				return st.Campaigns(ctx, nil, today)
+			}, time.Now, log),
+			PCTR: ads.FixedPCTR(0.01), Keys: keys, Policy: ads.Policy{MinPCTR: 0.001},
+		}
+		direct.FreqKey = aggregator.FreqKeys(keys) // the aggregator's rule on the direct path
+	}
 	s := &api.Server{
 		Catalog: cat, Bundle: b, Users: users, Pages: cache.Pages{R: rdb}, Exps: exps,
 		Cands:  &cache.CandidateCache{R: rdb},
-		Events: &events.Direct{DB: st, State: users, OnStock: cat.SetStock, Now: time.Now},
-		Served: served, Redis: rdb, Plan: testPlan, Campaigns: st,
+		Events: direct,
+		Served: served, Redis: rdb, Plan: plan, Campaigns: st, Ads: adSrv,
 		Sources: map[string][]mixer.Spec{
 			recall.SurfaceHome: {
 				{Source: recall.ItemCF{B: b}, Timeout: 50 * time.Millisecond, K: 200},
@@ -102,7 +146,7 @@ func newFixture(t *testing.T) *fixture {
 		},
 		Log: log, Now: time.Now,
 	}
-	f := &fixture{t: t, st: st, srv: httptest.NewServer(s.Handler()), served: served, cat: cat, cancel: cancel}
+	f := &fixture{t: t, st: st, srv: httptest.NewServer(s.Handler()), served: served, cat: cat, rdb: rdb, exps: exps, ads: adSrv, cancel: cancel}
 	t.Cleanup(func() {
 		f.srv.Close()
 		cancel()

@@ -10,6 +10,7 @@ DATABASE_URL ?= postgres://recloop:recloop@localhost:$(RECLOOP_PG_PORT)/recloop?
 REDIS_URL ?= redis://localhost:$(RECLOOP_REDIS_PORT)/0
 API_PORT ?= 18080
 MODEL_SERVER_PORT ?= 18081
+MODEL_SERVER_ADMIN_PORT ?= 18082
 WEB_PORT ?= 13000
 API_ADDR ?= 127.0.0.1:$(API_PORT)
 MODEL_SERVER_ADDR ?= 127.0.0.1:$(MODEL_SERVER_PORT)
@@ -26,9 +27,12 @@ RECLOOP_BENCH_API_PORT ?= 18180
 OTEL_EXPORTER_OTLP_ENDPOINT ?= http://localhost:14317
 TRACING := OTEL_EXPORTER_OTLP_ENDPOINT=$(OTEL_EXPORTER_OTLP_ENDPOINT) OTEL_EXPORTER_OTLP_INSECURE=true
 AD_TOKEN_KEYS ?= dev1:recloop-dev-only-ad-token-key-not-a-secret-0001
+# M3: the Toxiproxy API in front of billing's PostgreSQL connection (the billing drill).
+RECLOOP_PG_PROXY_PORT ?= 18475
+PG_PROXY_URL ?= http://localhost:$(RECLOOP_PG_PROXY_PORT)
 export RECLOOP_PG_PORT RECLOOP_REDIS_PORT DATABASE_URL REDIS_URL API_ADDR MODEL_SERVER_PORT \
-	MODEL_SERVER_ADDR RECLOOP_API_URL RECLOOP_BUNDLE RECLOOP_KAFKA_PORT KAFKA_BROKERS \
-	PROMETHEUS_URL RECLOOP_BENCH_API_PORT AD_TOKEN_KEYS
+	MODEL_SERVER_ADMIN_PORT MODEL_SERVER_ADDR RECLOOP_API_URL RECLOOP_BUNDLE RECLOOP_KAFKA_PORT \
+	KAFKA_BROKERS PROMETHEUS_URL RECLOOP_BENCH_API_PORT AD_TOKEN_KEYS PG_PROXY_URL
 # onnxruntime's telemetry uploader (macOS) can crash the interpreter at exit: off everywhere.
 export ORT_DISABLE_TELEMETRY := 1
 
@@ -59,11 +63,11 @@ TOOL_PKGS := github.com/bufbuild/buf/cmd/buf google.golang.org/protobuf/cmd/prot
 	google.golang.org/grpc/cmd/protoc-gen-go-grpc github.com/sqlc-dev/sqlc/cmd/sqlc
 
 .PHONY: help setup images up down down-volumes bench-up bench-down migrate migrate-status data \
-	data-weights ingest train paper-sasrec eval ann bundle seed build-aggregator rebuild-redis tools \
-	k6 proto sqlc generate build-api serve-model serve-api serve-web web-install test lint test-ml \
-	test-model-server test-minionerec test-go test-web test-props e2e fmt sim-world sim srm drill \
-	load load-smoke latency-report minionerec-gen minionerec-cost minionerec clean-processed \
-	clean-artifacts
+	data-weights ingest train paper-sasrec eval ann bundle seed build-aggregator build-billing \
+	rebuild-redis tools k6 proto sqlc generate build-api serve-model serve-api serve-web web-install \
+	test lint test-ml test-model-server test-minionerec test-go test-web test-props e2e fmt sim-world \
+	sim srm drill load load-smoke latency-report billing overdelivery billing-drill billing-report \
+	minionerec-gen minionerec-cost minionerec clean-processed clean-artifacts
 
 help: ## List targets
 	@grep -E '^[a-z0-9-]+:.*## ' $(MAKEFILE_LIST) \
@@ -72,15 +76,16 @@ help: ## List targets
 setup: up data ingest train eval bundle seed web-install ## Everything from a clean checkout to a runnable demo
 	@echo "ready: run make serve-model, make serve-api and make serve-web (three terminals)"
 
-# The Go services as linux binaries for the containers (aggregator; api in the bench profile).
+# The Go services as linux binaries for the containers (aggregator, billing; api in the bench
+# profile).
 LINUX := $(CURDIR)/.cache/linux
 images: ## Cross-compile the Go services into .cache/linux and build their image (recloop/go:dev)
 	mkdir -p $(LINUX)
 	cd serving && CGO_ENABLED=0 GOOS=linux GOARCH=$$(go env GOARCH) GOFLAGS=-modcacherw \
-		go build -trimpath -o $(LINUX)/ ./cmd/api ./cmd/aggregator
+		go build -trimpath -o $(LINUX)/ ./cmd/api ./cmd/aggregator ./cmd/billing
 	$(COMPOSE) build aggregator
 
-up: images ## Start the stack (PostgreSQL, Redis, Redpanda, log-sink, aggregator, monitoring) + migrations
+up: images ## Start the stack (PostgreSQL, Redis, Redpanda, log-sink, aggregator, billing, monitoring) + migrations
 	$(COMPOSE) up -d --wait
 	$(MAKE) migrate
 
@@ -150,6 +155,9 @@ seed: ## Flush Redis and load the dataset users' histories and the demo users
 build-aggregator:
 	cd serving && GOFLAGS=-modcacherw go build -o $(BIN)/aggregator ./cmd/aggregator
 
+build-billing:
+	cd serving && GOFLAGS=-modcacherw go build -o $(BIN)/billing ./cmd/billing
+
 # Redis holds derived state only (design §7.2). Rebuild = the seed state + every event since:
 #   FROM=db  (default) replay events_raw (everything ever logged, M1's direct writes included)
 #   FROM=log reset the aggregator's group to the start of the event log (7 days of retention)
@@ -190,7 +198,8 @@ build-api: ## Build the Go api into .cache/bin/api
 	cd serving && GOFLAGS=-modcacherw go build -o $(BIN)/api ./cmd/api
 
 serve-model: ## Model server (gRPC) on MODEL_SERVER_PORT, serving artifacts/bundles/current
-	$(TRACING) $(MS) python -m model_server --bundle "$(RECLOOP_BUNDLE)" --port $(MODEL_SERVER_PORT)
+	$(TRACING) $(MS) python -m model_server --bundle "$(RECLOOP_BUNDLE)" --port $(MODEL_SERVER_PORT) \
+		--admin-port $(MODEL_SERVER_ADMIN_PORT)
 
 serve-api: build-api ## Go api on API_ADDR
 	$(TRACING) $(BIN)/api
@@ -234,6 +243,25 @@ load-smoke: bench-up k6 sim-world build-aggregator ## Short make load (1 repeat,
 
 latency-report: ## Re-render docs/results/latency.md from artifacts/latency/results.json
 	$(PY) -m loadtest.report
+
+# ---------------------------------------------------------------- M3: ads and billing
+
+# Both runs need the stack (billing included), the model server and the api, the latter run as
+# `CANDIDATE_CACHE=off make serve-api` (otherwise 30 minutes of simulated traffic fill Redis's
+# 384 MB and it evicts keys; the runs record evictions, the drill fails on any). Each run
+# reseeds Redis, creates campaigns of its own through the api and ends them afterwards.
+billing: overdelivery billing-drill ## Over-delivery study + 30-minute billing drill -> docs/results/billing.md (~75 min)
+
+overdelivery: sim-world build-aggregator build-billing ## Safety margins 0 / 5 / 20 clicks, with and without pacing (~35 min) -> artifacts/billing/overdelivery.json, billing.md
+	$(PY) -m sim.overdelivery $(OVERDELIVERY_FLAGS)
+	$(PY) -m analysis.billing_report
+
+billing-drill: sim-world build-aggregator build-billing ## 30 min of traffic, kill -9 of billing, Redpanda restarts, PostgreSQL +200 ms; ledger vs truth -> billing.md
+	$(PY) -m sim.billing_drill $(BILLING_DRILL_FLAGS)
+	$(PY) -m analysis.billing_report
+
+billing-report: ## Re-render docs/results/billing.md from artifacts/billing/
+	$(PY) -m analysis.billing_report
 
 test: lint test-ml test-model-server test-minionerec test-go ## Lint and run the Python and Go tests (DB / Redis tests skip when the stack is down)
 

@@ -13,12 +13,36 @@ export type ItemCard = {
 export type RecItem = {
   position: number;
   item_id: number;
+  /** "organic" or "sponsored" (positions 3 and 9 of the home feed, design §9.2). */
   slot: string;
+  /** "Sponsored" on sponsored slots: shown on the tile. */
+  label?: string;
   source: string;
   score: number;
   impression_id: string;
+  campaign_id?: number;
+  /** Sponsored slots: sent back with the slot's impression and click events (billing, frequency caps). */
+  ad_token?: string;
   sources: Hit[];
   item?: ItemCard;
+};
+
+export type AdSlot = { pos: number; item_id: number; campaign_id: number; price: number; pctr_ppm: number };
+
+export type AdsDebug = {
+  outcome: string;
+  policy: { safety_margin_clicks: number; pacing: boolean; min_pctr: number };
+  stats: {
+    campaigns: number;
+    in_flight: number;
+    no_item: number;
+    budget: number;
+    freq_cap: number;
+    pacing: number;
+    candidates: number;
+    winners: number;
+  };
+  slots: AdSlot[] | null;
 };
 
 export type Assignment = { bucket: number; exp_id?: string; variant: string };
@@ -51,6 +75,7 @@ export type Debug = {
   diversity_promotions: number;
   backfill: number;
   offset: number;
+  ads?: AdsDebug;
   took_ms: number;
 };
 

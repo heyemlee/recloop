@@ -46,7 +46,7 @@ type ClientEvent struct {
 	ItemID       *int32          `json:"item_id"`
 	RequestID    string          `json:"request_id,omitempty"`
 	ImpressionID string          `json:"impression_id,omitempty"`
-	AdToken      string          `json:"ad_token,omitempty"`  // sponsored slots only (design §7.1, §9.3)
+	AdToken      string          `json:"ad_token,omitempty"`  // clicks and impressions of sponsored slots (design §7.1, §9.3)
 	ClientTS     string          `json:"client_ts,omitempty"` // RFC 3339
 	Props        json.RawMessage `json:"props,omitempty"`     // small object, stored as payload
 }
@@ -61,7 +61,7 @@ type Event struct {
 	ItemID       int32
 	RequestID    uuid.NullUUID
 	ImpressionID string
-	AdToken      string    // sponsored clicks; billing verifies it (M3)
+	AdToken      string    // sponsored clicks (billing) and impressions (frequency caps)
 	ClientTS     time.Time // zero if not sent
 	Received     time.Time // when the api accepted the event (events_raw.server_ts)
 	Payload      []byte    // nil if no props
@@ -151,8 +151,9 @@ func Validate(ce ClientEvent, now time.Time, knownItem func(int32) bool) (Event,
 		ev.RequestID = uuid.NullUUID{UUID: rid, Valid: true}
 	}
 	if ce.AdToken != "" {
-		if ce.Type != TypeClick || ce.ImpressionID == "" {
-			return Event{}, errors.New("ad_token belongs to a click with an impression_id")
+		// Clicks carry it for billing, impressions for the frequency cap (design §9.2, §9.3).
+		if (ce.Type != TypeClick && ce.Type != TypeImpression) || ce.ImpressionID == "" {
+			return Event{}, errors.New("ad_token belongs to a click or impression with an impression_id")
 		}
 		if len(ce.AdToken) > MaxAdToken {
 			return Event{}, errors.New("ad_token is too long")

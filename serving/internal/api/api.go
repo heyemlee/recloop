@@ -38,6 +38,8 @@ type Server struct {
 	Redis   redis.UniversalClient
 	// Campaigns is the advertiser api's store; nil leaves its routes out.
 	Campaigns CampaignStore
+	// Ads serves the sponsored slots of the home feed and /internal/ads/select; nil: no ads.
+	Ads *AdServer
 	// Sources per surface, and the default RRF weights per surface (an experiment variant's
 	// "rrf_weights" param overrides them).
 	Sources map[string][]mixer.Spec
@@ -80,6 +82,9 @@ func (s *Server) Handler() http.Handler {
 	if s.Campaigns != nil {
 		s.campaignRoutes(mux)
 	}
+	// Internal: for the shopping assistant's service, not the browser (the web app proxies
+	// /api/v1/* only).
+	mux.HandleFunc("POST /internal/ads/select", s.selectChatAds)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})

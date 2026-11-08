@@ -6,14 +6,16 @@
 name: recloop
 
 x-go-image: &go-image
-  # The Go services (api, aggregator) as static binaries on an empty image. `make images`
-  # cross-compiles them on the host into .cache/linux (same module cache, no network here).
-  image: recloop/go:dev
+  # The Go services (api, aggregator, billing) as static binaries on an empty image. `make
+  # images` cross-compiles them on the host into .cache/linux (same module cache, no network
+  # here). A private compose project (-p) sets RECLOOP_GO_IMAGE so it does not retag the
+  # shared image.
+  image: ${RECLOOP_GO_IMAGE:-recloop/go:dev}
   build:
     context: ../.cache/linux
     dockerfile_inline: |
       FROM scratch
-      COPY api aggregator /usr/local/bin/
+      COPY api aggregator billing /usr/local/bin/
       USER 65534:65534
 
 services:
@@ -134,7 +136,8 @@ services:
           cpus: "1"
           memory: 512m
 
-  # events -> per-user state in Redis (serving/cmd/aggregator).
+  # events -> per-user state in Redis (serving/cmd/aggregator), including the frequency caps of
+  # sponsored slots (it verifies the impressions' ad_tokens).
   aggregator:
     <<: *go-image
     entrypoint: ["/usr/local/bin/aggregator"]
@@ -143,6 +146,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       DATABASE_URL: postgres://recloop:recloop@postgres:5432/recloop?sslmode=disable
       AGGREGATOR_METRICS_ADDR: 0.0.0.0:18090
+      AD_TOKEN_KEYS: ${AD_TOKEN_KEYS:-dev1:recloop-dev-only-ad-token-key-not-a-secret-0001}
       GOMEMLIMIT: 220MiB
     ports:
       - "127.0.0.1:${RECLOOP_AGGREGATOR_PORT:-18090}:18090"
@@ -157,6 +161,55 @@ services:
         limits:
           cpus: "1"
           memory: 256m
+
+  # Sponsored clicks -> the charge ledger in PostgreSQL and the spend counters in Redis
+  # (serving/cmd/billing, design §9.3), plus the reconciliation every minute (§9.4).
+  billing:
+    <<: *go-image
+    entrypoint: ["/usr/local/bin/billing"]
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+      REDIS_URL: redis://redis:6379/0
+      # Through pg-proxy, so the billing drill can slow PostgreSQL down (sim.billing_drill).
+      DATABASE_URL: postgres://recloop:recloop@pg-proxy:15433/recloop?sslmode=disable
+      AD_TOKEN_KEYS: ${AD_TOKEN_KEYS:-dev1:recloop-dev-only-ad-token-key-not-a-secret-0001}
+      BILLING_METRICS_ADDR: 0.0.0.0:18092
+      GOMEMLIMIT: 220MiB
+    ports:
+      - "127.0.0.1:${RECLOOP_BILLING_PORT:-18092}:18092"
+    depends_on:
+      redpanda-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      pg-proxy:
+        condition: service_started
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 256m
+
+  # Toxiproxy between billing and PostgreSQL: a latency toxic on it is the billing drill's
+  # "PostgreSQL 200 ms slower" (design §9.3). Without toxics it only forwards.
+  pg-proxy:
+    image: ghcr.io/shopify/toxiproxy:2.13.0
+    command: ["-host=0.0.0.0", "-config=/config/pg-proxy.json"]
+    volumes:
+      - ./toxiproxy/pg-proxy.json:/config/pg-proxy.json:ro
+    ports:
+      - "127.0.0.1:${RECLOOP_PG_PROXY_PORT:-18475}:8474"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 64m
 
   prometheus:
     image: prom/prometheus:v3.15.1
@@ -289,6 +342,7 @@ services:
       RECLOOP_RESILIENCE: ${RECLOOP_RESILIENCE:-full}
       CANDIDATE_CACHE: ${CANDIDATE_CACHE:-on}
       BREAKER_WINDOW: ${BREAKER_WINDOW:-time:10s:20:10}
+      AD_TOKEN_KEYS: ${AD_TOKEN_KEYS:-dev1:recloop-dev-only-ad-token-key-not-a-secret-0001}
       ACCESS_LOG: "0"
       GOMEMLIMIT: 440MiB
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317

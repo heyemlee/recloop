@@ -12,7 +12,8 @@ import (
 )
 
 const replayEvents = `-- name: ReplayEvents :many
-SELECT event_id, type, user_id, item_id
+SELECT event_id, type, user_id, item_id, impression_id, server_ts,
+       COALESCE(payload ->> 'ad_token', '')::text AS ad_token
 FROM events_raw
 WHERE event_day = $1
   AND type IN ('impression', 'click', 'add_to_cart', 'purchase')
@@ -28,13 +29,17 @@ type ReplayEventsParams struct {
 }
 
 type ReplayEventsRow struct {
-	EventID pgtype.UUID
-	Type    string
-	UserID  int64
-	ItemID  pgtype.Int4
+	EventID      pgtype.UUID
+	Type         string
+	UserID       int64
+	ItemID       pgtype.Int4
+	ImpressionID pgtype.Text
+	ServerTs     pgtype.Timestamptz
+	AdToken      string
 }
 
-// Client events of one day in event_id (= UUIDv7 time) order, for rebuilding Redis.
+// Client events of one day in event_id (= UUIDv7 time) order, for rebuilding Redis. The
+// ad_token of a sponsored impression (kept in the payload) rebuilds its frequency-cap counter.
 func (q *Queries) ReplayEvents(ctx context.Context, arg ReplayEventsParams) ([]ReplayEventsRow, error) {
 	rows, err := q.db.Query(ctx, replayEvents, arg.EventDay, arg.After, arg.N)
 	if err != nil {
@@ -49,6 +54,9 @@ func (q *Queries) ReplayEvents(ctx context.Context, arg ReplayEventsParams) ([]R
 			&i.Type,
 			&i.UserID,
 			&i.ItemID,
+			&i.ImpressionID,
+			&i.ServerTs,
+			&i.AdToken,
 		); err != nil {
 			return nil, err
 		}

@@ -144,18 +144,51 @@ WHERE campaign_id = sqlc.arg(campaign_id) AND day BETWEEN sqlc.arg(from_day) AND
 GROUP BY day, token_status
 ORDER BY day, token_status;
 
--- Sponsored impressions: impression events whose served record has this campaign at that
--- position (served items carry campaign_id on sponsored slots, §7.1), by the served day.
--- Impression events of late-evening requests may land on the next day.
+-- Sponsored impressions: impression events of the positions where a served record had this
+-- campaign (served items carry campaign_id on sponsored slots, §7.1), by the served day.
+-- Impression events of late-evening requests may land on the next day. It starts from the
+-- campaign's slots and looks their impressions up by request (indexed): starting from every
+-- impression of the period took 26 s on 3.9 M events_raw rows, this 1.7 s.
 -- name: ReportImpressionDays :many
-SELECT s.event_day AS day, count(DISTINCT i.impression_id)::int AS impressions
-FROM events_raw AS i
-JOIN events_raw AS s ON s.request_id = i.request_id AND s.type = 'served'
-WHERE i.type = 'impression'
-  AND i.event_day BETWEEN sqlc.arg(from_day)::date AND sqlc.arg(to_day)::date + 1
-  AND s.event_day BETWEEN sqlc.arg(from_day)::date AND sqlc.arg(to_day)::date
-  AND s.payload -> 'items' @> jsonb_build_array(jsonb_build_object(
-        'pos', split_part(i.impression_id, ':', 2)::int,
-        'campaign_id', sqlc.arg(campaign_id)::bigint))
-GROUP BY s.event_day
-ORDER BY s.event_day;
+SELECT sl.day, count(DISTINCT i.impression_id)::int AS impressions
+FROM (
+  SELECT s.event_day AS day, s.request_id, (it ->> 'pos')::int AS pos
+  FROM events_raw AS s
+  CROSS JOIN LATERAL jsonb_array_elements(s.payload -> 'items') AS it
+  WHERE s.type = 'served'
+    AND s.event_day BETWEEN sqlc.arg(from_day)::date AND sqlc.arg(to_day)::date
+    AND s.payload -> 'items' @> jsonb_build_array(jsonb_build_object('campaign_id', sqlc.arg(campaign_id)::bigint))
+    AND (it ->> 'campaign_id')::bigint = sqlc.arg(campaign_id)::bigint
+) AS sl
+JOIN events_raw AS i
+  ON i.request_id = sl.request_id AND i.type = 'impression'
+ AND i.impression_id = sl.request_id::text || ':' || sl.pos
+ AND i.event_day BETWEEN sqlc.arg(from_day)::date AND sqlc.arg(to_day)::date + 1
+GROUP BY sl.day
+ORDER BY sl.day;
+
+-- ---------------------------------------------------------------- reconciliation (§9.4)
+
+-- Every budget row of the given days with its spend recomputed from the ledger. One statement,
+-- one snapshot: the row and its charges are written by the same transaction, so they agree.
+-- name: ReconcileDays :many
+SELECT b.campaign_id, b.day, b.budget_cents, b.spent_cents,
+       COALESCE(l.charges, 0)::int AS charges,
+       COALESCE(l.billed_cents, 0)::bigint AS ledger_cents
+FROM campaign_budget_daily AS b
+LEFT JOIN (
+  SELECT campaign_id, day, count(*) AS charges, sum(billed_cents) AS billed_cents
+  FROM ad_charges
+  WHERE day = ANY(sqlc.arg(days)::date[])
+  GROUP BY campaign_id, day
+) AS l ON l.campaign_id = b.campaign_id AND l.day = b.day
+WHERE b.day = ANY(sqlc.arg(days)::date[])
+ORDER BY b.campaign_id, b.day;
+
+-- The charges of one campaign-day that moved money, each with its click event (the key of
+-- its Redis dedup marker).
+-- name: ChargesOfDay :many
+SELECT click_event_id, billed_cents
+FROM ad_charges
+WHERE campaign_id = $1 AND day = $2 AND billed_cents > 0
+ORDER BY click_event_id;

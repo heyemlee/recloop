@@ -1,6 +1,7 @@
 // Package aggregator turns the event log into per-user state in Redis (design §7.2): recent
-// history, history version, purchases and recent impressions. It is the only writer of that
-// state in normal operation; the api reads it on every request.
+// history, history version, purchases, recent impressions and the frequency-cap counters of
+// sponsored slots. It is the only writer of that state in normal operation; the api reads it on
+// every request.
 //
 // Each event is applied by the Lua script of userstate, which sets the dedup marker
 // dedup:aggregator:{event_id} and updates the state in one atomic step, so a redelivered event
@@ -9,17 +10,43 @@ package aggregator
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync/atomic"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
 
+	"github.com/heyemlee/recloop/serving/internal/adtoken"
 	"github.com/heyemlee/recloop/serving/internal/events"
 	"github.com/heyemlee/recloop/serving/internal/metrics"
 	"github.com/heyemlee/recloop/serving/internal/store"
 	"github.com/heyemlee/recloop/serving/internal/userstate"
 )
+
+// FreqKeys is the rule that maps the impression of a sponsored slot to its frequency-cap
+// counter (design §9.2: the cap counts impression events, not serves). The impression carries
+// the slot's ad_token; it counts when the token verifies (an expired one too: the impression
+// happened) and names this impression, user and item, on the counter of the day the slot was
+// served. Anything else counts nothing. nil keys: no caps are counted.
+func FreqKeys(keys *adtoken.Keys) func(events.Event) string {
+	if keys == nil {
+		return nil
+	}
+	return func(ev events.Event) string {
+		at := ev.Received
+		if at.IsZero() {
+			at = ev.Time
+		}
+		c, err := keys.Verify(ev.AdToken, at)
+		if (err != nil && !errors.Is(err, adtoken.ErrExpired)) || !c.Matches(ev.ImpressionID, ev.UserID, ev.ItemID) {
+			metrics.FreqCapTokens.WithLabelValues("rejected").Inc()
+			return ""
+		}
+		metrics.FreqCapTokens.WithLabelValues("counted").Inc()
+		return userstate.FreqKey(ev.UserID, c.CampaignID, c.Day())
+	}
+}
 
 // Group is the aggregator's consumer group (and its dedup group in Redis).
 const Group = userstate.DedupGroup
@@ -32,8 +59,10 @@ type Applier interface {
 // Aggregator applies events to user state.
 type Aggregator struct {
 	State Applier
-	Now   func() time.Time
-	Log   *slog.Logger
+	// FreqKey maps sponsored impressions to frequency-cap counters (FreqKeys); nil: none.
+	FreqKey func(events.Event) string
+	Now     func() time.Time
+	Log     *slog.Logger
 
 	invalidLogged atomic.Int64 // unix seconds of the last "invalid record" log line
 }
@@ -69,7 +98,7 @@ func (a *Aggregator) HandleRecords(ctx context.Context, recs []*kgo.Record) (Cou
 		}
 		evs = append(evs, ev)
 	}
-	changes := events.Changes(evs)
+	changes := events.Changes(evs, a.FreqKey)
 	c.Ignored += len(evs) - len(changes)
 	if err := a.apply(ctx, changes, &c); err != nil {
 		return c, err
@@ -121,9 +150,12 @@ func (a *Aggregator) Rebuild(ctx context.Context, st *store.Store, page int) (Co
 				continue
 			}
 			at := events.V7Time(r.EventID.Bytes)
-			evs = append(evs, events.Event{ID: r.EventID.Bytes, Time: at, Day: events.Day(at), Type: r.Type, UserID: r.UserID, ItemID: r.ItemID.Int32})
+			evs = append(evs, events.Event{
+				ID: r.EventID.Bytes, Time: at, Day: events.Day(at), Type: r.Type, UserID: r.UserID, ItemID: r.ItemID.Int32,
+				ImpressionID: r.ImpressionID.String, AdToken: r.AdToken, Received: r.ServerTs.Time,
+			})
 		}
-		changes := events.Changes(evs)
+		changes := events.Changes(evs, a.FreqKey)
 		var c Counts
 		c.Ignored = len(evs) - len(changes)
 		if err := a.apply(ctx, changes, &c); err != nil {

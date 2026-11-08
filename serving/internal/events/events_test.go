@@ -133,10 +133,16 @@ func TestAdTokenRules(t *testing.T) {
 	if _, err := Validate(click, now, known); err != nil {
 		t.Fatal(err)
 	}
+	// Sponsored impressions carry the token too (the frequency cap needs the campaign).
 	imp := click
 	imp.Type = TypeImpression
-	if _, err := Validate(imp, now, known); err == nil {
-		t.Fatal("ad_token on an impression accepted")
+	if ev, err := Validate(imp, now, known); err != nil || ev.AdToken != "t" {
+		t.Fatalf("ad_token on an impression: %v", err)
+	}
+	cart := click
+	cart.Type = TypeAddToCart
+	if _, err := Validate(cart, now, known); err == nil {
+		t.Fatal("ad_token on an add_to_cart accepted")
 	}
 	noImp := click
 	noImp.ImpressionID = ""

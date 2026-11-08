@@ -11,10 +11,16 @@ then change how it is delivered, never what it is:
     reorder       the batch is shuffled and sent after the next one
     late          the event is held back and sent when the session ends
     double_click  a second click on the same impression (a new event: a business duplicate)
+    forge         a click on a sponsored slot carries a tampered ad_token (billing must refuse it)
+
+Sponsored slots (design §9.2) are treated like the web client treats them: their impression
+and click events carry the slot's ad_token. A user may stay on a page for a while before acting
+(--dwell-ms): its events are sent after that, which is the delay between serving an ad and its
+click reaching billing.
 
 A 5xx or a dropped connection is retried with the same body, like the web client. The ledger
 (JSONL) and the "before" snapshot (hv per user, stock, orders) are what sim.verify checks the
-pipeline's result against.
+pipeline's result against; sim.billing_verify checks the charge ledger against the clicks.
 
 Usage: python -m sim.run --sessions 2000 --concurrency 16 [--faults duplicate=0.1,resend=0.05]
 """
@@ -32,6 +38,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
+from sim import ads as ads_mod
 from sim import world as world_mod
 from sim.client import Api, uuid7
 
@@ -46,6 +53,7 @@ class Faults:
     reorder: float = 0.0
     late: float = 0.0
     double_click: float = 0.0
+    forge: float = 0.0
 
     @classmethod
     def parse(cls, spec: str) -> Faults:
@@ -70,6 +78,7 @@ class Stats:
     post_failures: int = 0
     delivered: int = 0  # event copies POSTed and accepted (duplicates included)
     faults: Counter = field(default_factory=Counter)
+    ads: Counter = field(default_factory=Counter)  # sponsored slots served, impressions, clicks
 
     def merge(self, o: Stats) -> None:
         self.sessions += o.sessions
@@ -81,6 +90,7 @@ class Stats:
         self.post_failures += o.post_failures
         self.delivered += o.delivered
         self.faults.update(o.faults)
+        self.ads.update(o.ads)
 
 
 class Ledger:
@@ -110,12 +120,23 @@ class Session:
 
     # ------------------------------------------------------------- events
 
-    def event(self, typ: str, user: int, item: int, impression: str | None = None) -> dict:
+    def event(
+        self,
+        typ: str,
+        user: int,
+        item: int,
+        impression: str | None = None,
+        ad_token: str | None = None,
+        forged: bool = False,
+    ) -> dict:
         ev = {"event_id": uuid7(), "type": typ, "user_id": user, "item_id": item}
         if impression:
             ev["impression_id"] = impression
+        if ad_token:
+            ev["ad_token"] = ad_token
         self.stats.events[typ] += 1
-        self.sim.ledger.write("event", **ev)
+        # The ledger also says which tokens the simulator forged: the truth billing must match.
+        self.sim.ledger.write("event", **ev, **({"forged": True} if forged else {}))
         return ev
 
     def post(self, batch: list[dict]) -> None:
@@ -175,6 +196,8 @@ class Session:
         targets = set(targets)
         surface, item, cursor = "home", None, None
         for _ in range(s.max_pages):
+            if self.sim.deadline and time.time() > self.sim.deadline:
+                break  # the run is over: the session ends here (its held-back events still go)
             if cursor:
                 path = f"/v1/recommendations?user_id={user}&limit=20&cursor={cursor}"
                 kind = "next_page"
@@ -193,36 +216,48 @@ class Session:
             if status != 200 or not resp:
                 surface, item, cursor = "home", None, None
                 continue
+            sponsored = [
+                {"pos": r["position"], "item_id": r["item_id"], "campaign_id": r.get("campaign_id"),
+                 "impression_id": r["impression_id"]}
+                for r in resp["items"] if r.get("ad_token")
+            ]  # fmt: skip
+            self.stats.ads["slots_served"] += len(sponsored)
             self.sim.ledger.write(
                 "page",
                 request_id=resp["request_id"],
                 user_id=user,
                 surface=kind,
+                t=round(time.time(), 3),
                 offset=(resp["items"][0]["position"] - 1) if resp["items"] else 0,
                 variants={k: v["variant"] for k, v in resp["experiments"].items()},
                 buckets={k: v["bucket"] for k, v in resp["experiments"].items()},
                 degraded=resp["degraded"],
+                **({"sponsored": sponsored} if sponsored else {}),
             )
             visible = rng.randint(s.visible_min, s.visible_max)
             batch, clicked = [], None
             for rec in resp["items"][:visible]:
                 pos, it = rec["position"], rec["item_id"]
-                batch.append(self.event("impression", user, it, rec["impression_id"]))
+                tok = rec.get("ad_token")
+                batch.append(self.event("impression", user, it, rec["impression_id"], tok))
+                self.stats.ads["impressions"] += bool(tok)
                 if clicked is None and rng.random() < self.w.p_click(user, it, pos):
                     clicked = rec
             bought = False
             if clicked:
                 it = clicked["item_id"]
-                batch.append(self.event("click", user, it, clicked["impression_id"]))
+                batch.append(self.click(user, clicked))
                 if rng.random() < self.faults.double_click:
                     self.stats.faults["double_click"] += 1
-                    batch.append(self.event("click", user, it, clicked["impression_id"]))
+                    batch.append(self.click(user, clicked))
                 p_cart = s.p_cart_target if it in targets else s.p_cart
                 if rng.random() < p_cart:
                     batch.append(self.event("add_to_cart", user, it))
                     if rng.random() < s.p_buy:
                         batch.append(self.event("purchase", user, it))
                         bought = True
+            if self.sim.dwell_ms[1] > 0:  # the user stays on the page before acting
+                time.sleep(rng.uniform(*self.sim.dwell_ms) / 1000)
             self.deliver(batch)
             if self.sim.think_ms:
                 time.sleep(rng.uniform(*self.sim.think_ms) / 1000)
@@ -238,13 +273,35 @@ class Session:
         self.flush()
         self.stats.sessions += 1
 
+    def click(self, user: int, rec: dict) -> dict:
+        """A click on rec; on a sponsored slot it carries the slot's ad_token (or, with the forge
+        fault, a tampered one)."""
+        tok = rec.get("ad_token")
+        forged = bool(tok) and self.rng.random() < self.faults.forge
+        if forged:
+            tok = ads_mod.tamper(tok, self.rng)
+            self.stats.faults["forge"] += 1
+        self.stats.ads["clicks"] += bool(tok)
+        return self.event("click", user, rec["item_id"], rec["impression_id"], tok, forged)
+
 
 class Simulator:
-    def __init__(self, world, api_url, faults, ledger, think_ms=(0.0, 0.0), seed=world_mod.SEED):
+    def __init__(
+        self,
+        world,
+        api_url,
+        faults,
+        ledger,
+        think_ms=(0.0, 0.0),
+        seed=world_mod.SEED,
+        dwell_ms=(0.0, 0.0),
+    ):
         self.world, self.api_url, self.faults, self.ledger = world, api_url, faults, ledger
-        self.think_ms, self.seed = think_ms, seed
+        self.think_ms, self.seed, self.dwell_ms = think_ms, seed, dwell_ms
+        self.deadline: float | None = None
 
     def run(self, sessions: int, concurrency: int, deadline: float | None = None) -> Stats:
+        self.deadline = deadline
         lock = threading.Lock()
         started = [0]
         total = Stats()
@@ -298,7 +355,8 @@ def run_main(args, on_start=None) -> dict:
     (out / "before.json").write_text(json.dumps(before))
     ledger = Ledger(out / "ledger.jsonl")
     think = tuple(float(x) for x in args.think_ms.split(","))
-    sim = Simulator(w, args.api, faults, ledger, think_ms=think, seed=args.seed)
+    dwell = tuple(float(x) for x in args.dwell_ms.split(","))
+    sim = Simulator(w, args.api, faults, ledger, think_ms=think, seed=args.seed, dwell_ms=dwell)
     t0 = time.time()
     if on_start:
         on_start()
@@ -323,6 +381,7 @@ def run_main(args, on_start=None) -> dict:
         "post_retries": stats.post_retries,
         "post_failures": stats.post_failures,
         "fault_counts": dict(stats.faults),
+        "ads": dict(stats.ads),
     }
     (out / "summary.json").write_text(json.dumps(summary, indent=2))
     pv = sum(stats.page_views.values())
@@ -341,8 +400,13 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--sessions", type=int, default=2000)
     p.add_argument("--concurrency", type=int, default=16)
     p.add_argument("--think-ms", default="0,0", help="min,max pause between page views")
+    p.add_argument(
+        "--dwell-ms", default="0,0", help="min,max time on a page before its events are sent"
+    )
     p.add_argument("--max-seconds", type=float, default=0)
-    p.add_argument("--faults", default="", help="e.g. duplicate=0.1,resend=0.05,late=0.05")
+    p.add_argument(
+        "--faults", default="", help="e.g. duplicate=0.1,resend=0.05,late=0.05,forge=0.02"
+    )
     p.add_argument("--seed", type=int, default=world_mod.SEED)
     p.add_argument("--out", default=str(DEFAULT_OUT / "run"))
     return p
