@@ -426,10 +426,17 @@ def test_pctr_report_renders_both_variants_and_the_check(tmp_path, monkeypatch):
     monkeypatch.setattr(pctr, "OUT", tmp_path / "model")
     monkeypatch.setattr(pctr, "BOOTSTRAP", 40)
     pctr.main(["--label", "synthetic"])
-    evals, model = pctr_report.load(tmp_path / "model")
-    md = pctr_report.render(evals, model)
+    evals, model, checks = pctr_report.load(tmp_path / "model", meta)
+    assert checks == {"2026-11-08": check}
+    md = pctr_report.render(evals, model, checks)
     assert "## synthetic" in md and "With item CTR" in md and "the AUC is higher" in md
+    assert f"| synthetic | {evals[0]['rows']:,} | logged |" in md
+    assert "## Online against offline" in md and "of 900 eligible impressions" in md
     assert "796 (99.50%) equal" in md and "4 logged below the log" in md
+    assert "100 were served before the api logged counts" in md
+    # Without the meta files: the copies the evaluation took at training time.
+    assert pctr_report.render(evals, model) == md
+    assert "100.0% in its day window" in md and "served from" not in md
     assert "Known limitations" in md and "not validated" in md
     assert "/Users/" not in md and str(tmp_path) not in md
     # Without counts in the samples: the base model only, and the report says so.

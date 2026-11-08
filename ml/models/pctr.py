@@ -33,7 +33,8 @@ on the same split (AUC, weighted log loss, calibration by position and by decile
 prediction; on every sample and on the sponsored slots alone; user-level paired bootstrap
 intervals of the differences) and the "ctr" variant ships; without, "base" does.
 
-Usage: python -m ml.models.pctr [--days D ...] [--label NAME]   (after `make samples`; writes
+Usage: python -m ml.models.pctr [--days D ...] [--since T] [--until T] [--label NAME]   (after
+`make samples`; --since / --until keep the samples served in [since, until); writes
 artifacts/models/pctr/model.json and artifacts/models/pctr/eval/<label>.json)
 """
 
@@ -160,7 +161,19 @@ def design(
     return out
 
 
-def load_samples(directory: Path | None = None, days: list[str] | None = None) -> pd.DataFrame:
+def utc(t: str) -> pd.Timestamp:
+    """An ISO time; one without a zone is UTC."""
+    ts = pd.Timestamp(t)
+    return ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
+
+
+def load_samples(
+    directory: Path | None = None,
+    days: list[str] | None = None,
+    since: str | None = None,
+    until: str | None = None,
+) -> pd.DataFrame:
+    """The training samples of the given days (default: all), served in [since, until)."""
     directory = directory or SAMPLES
     found = sorted(directory.glob("day=*"))
     if days:
@@ -175,6 +188,15 @@ def load_samples(directory: Path | None = None, days: list[str] | None = None) -
         df["day"] = d.name.removeprefix("day=")
         frames.append(df)
     df = pd.concat(frames, ignore_index=True)
+    t = pd.to_datetime(df.t_impression, utc=True)
+    keep = np.ones(len(df), dtype=bool)
+    if since:
+        keep &= (t >= utc(since)).to_numpy()
+    if until:
+        keep &= (t < utc(until)).to_numpy()
+    df = df[keep]
+    if df.empty:
+        raise SystemExit(f"no samples served in [{since}, {until})")
     names = {tuple(n) for n in df.feature_names}
     if names != {feat.FEATURES}:
         raise SystemExit(f"samples carry features {names}, the ranker has {feat.FEATURES}")
@@ -435,13 +457,33 @@ def time_span(df: pd.DataFrame, s: slice) -> list[str]:
     return [t.min().isoformat(), t.max().isoformat()] if len(t) else []
 
 
+def coverage(d: Data) -> dict | None:
+    """Share of the (weighted) impressions whose item had at least one impression in the hour
+    and in the day window: a window with no counts leaves its columns at the prior."""
+    if d.counts is None or not len(d.y):
+        return None
+    c = np.nan_to_num(d.counts, nan=0.0)
+    return {
+        "hour": float(np.average(c[:, 0] > 0, weights=d.w)),
+        "day": float(np.average(c[:, 2] > 0, weights=d.w)),
+    }
+
+
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--days", nargs="*", default=None, help="sample days (default: all)")
     p.add_argument("--label", default=None, help="name of the evaluation file (default: the days)")
+    p.add_argument(
+        "--since",
+        default=None,
+        help="only samples served at or after this ISO time (UTC unless it names a zone)",
+    )
+    p.add_argument("--until", default=None, help="only samples served before this ISO time")
     args = p.parse_args(argv)
+    since = utc(args.since).isoformat() if args.since else None
+    until = utc(args.until).isoformat() if args.until else None
     t0 = time.monotonic()
-    df = load_samples(days=args.days)
+    df = load_samples(days=args.days, since=since, until=until)
     d = matrices(df)
     n = len(df)
     a, b = int(n * 0.64), int(n * 0.80)
@@ -461,6 +503,8 @@ def main(argv: list[str] | None = None) -> None:
     }
     info = {
         "days": days,
+        "since": since,
+        "until": until,
         # The sample job's counts for those days, as they were when this model was trained
         # (a later `make samples` of the same day replaces the files).
         "samples_meta": samples_meta,
@@ -484,6 +528,8 @@ def main(argv: list[str] | None = None) -> None:
     ev = {
         "label": label,
         "days": days,
+        "since": since,
+        "until": until,
         "rows": int(n),
         "positives": int(d.y.sum()),
         "users": int(df.user_id.nunique()),
@@ -496,6 +542,7 @@ def main(argv: list[str] | None = None) -> None:
         "counts_source": (
             df.ictr_source.value_counts().to_dict() if "ictr_source" in df.columns else {}
         ),
+        "counts_coverage": {"all": coverage(d), "test": coverage(d.part(slice(b, n)))},
         "item_ctr_checks": {dd: m.get("item_ctr") for dd, m in samples_meta.items()},
         "variants": {
             k: {"selected": r["best"], "trials": r["trials"], "held_out": r["held_out"]}

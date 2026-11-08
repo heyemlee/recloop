@@ -194,7 +194,7 @@ make samples       # DAY=YYYY-MM-DD (UTC, default today): export events_raw arou
 make test-samples  # the sample job's tests, in its container
 make train-pctr    # logistic-regression pCTR on artifacts/samples/train, with and without the
                    # item CTR columns -> artifacts/models/pctr (model.json, eval/<label>.json;
-                   # PCTR_FLAGS="--days D --label NAME")
+                   # PCTR_FLAGS="--days D --since T --label NAME")
 make pctr-report   # docs/results/pctr.md from artifacts/models/pctr/eval
 make collect       # standing campaigns + COLLECT_SECONDS (900) of simulated traffic for samples
 make release-drill # NEW=<version> BAD=<version>: canary 5% -> full rollout, then BAD activated
@@ -419,12 +419,13 @@ interpreter at exit: `ORT_DISABLE_TELEMETRY=1` (Makefile, model-server image, `m
   reconciliation use the state instance only.
 - Sizing (measured on redis 8.10, replaying the 30-minute billing drill with apply.lua): 124 B per
   event (7-day dedup marker) + 76 B per (user, item) seen in 24 h; the seed is 3 MB, the drill
-  ~117 MB, one `make load` run ~150 MB (reseeded before every run). 1 GB holds ~6.8 M events of a
-  week. When the state instance is full it refuses writes (a script at its first write: nothing
-  half applied): the aggregator retries its batch (offsets uncommitted, lag grows, no loss),
-  billing still charges in PostgreSQL but its spend update and reconciliation's repairs fail, the
-  api serves no ads (`userstate.Fullness`: INFO every 5 s, full at 98 % of maxmemory or on a new
-  `errorstat_OOM`). Remedy: `make seed` / `make rebuild-redis`, or a larger maxmemory.
+  ~117 MB, one `make load` run ~150 MB (reseeded before every run); the item CTR buckets (M4)
+  stay under 14 MB. 1 GB holds ~6.8 M events of a week. When the state instance is full it
+  refuses writes (a script at its first write: nothing half applied): the aggregator retries its
+  batch (offsets uncommitted, lag grows, no loss), billing still charges in PostgreSQL but its
+  spend update and reconciliation's repairs fail, the api serves no ads (`userstate.Fullness`:
+  INFO every 5 s, full at 98 % of maxmemory or on a new `errorstat_OOM`). Remedy: `make seed` /
+  `make rebuild-redis`, or a larger maxmemory.
 - Visible: redis_exporter v1.95.0 (`job="redis"`, label `redis="state"|"cache"`):
   `redis_memory_*`, `redis_evicted_keys_total`, `redis_errors_total{err="OOM"}`; the services'
   `recloop_redis_errors_total{component,op,kind}` and the api's `recloop_redis_state_full`.
@@ -525,8 +526,10 @@ interpreter at exit: `ORT_DISABLE_TELEMETRY=1` (Makefile, model-server image, `m
   seed (records from before: E = 15 s before serving, no seed); samples keep the logged counts
   (`ictr_source` served) or the recomputed ones (log); meta `item_ctr` compares them (the online /
   offline check). `sim.verify` (so `make drill`) checks the run's events were counted exactly
-  once. Known limit: the counts are not validated (forged impressions / clicks raise an item's
-  pCTR, and a higher pCTR lowers its GSP price).
+  once. Size (measured): ~43 B per field; at ~87 page views/s a 5-minute bucket holds ~4,200
+  fields (~190 KB), an hourly one ~5,500 (~230 KB); at most 46 live hashes, under 14 MB with
+  every item in each. Known limit: the counts are not validated (forged impressions / clicks
+  raise an item's pCTR, and a higher pCTR lowers its GSP price).
 - Runs (stack, model server and api up; one at a time on an idle machine): `make collect`, then
   `make samples` and `make train-pctr`, `make bundle` (the release), `make bundle
   BUNDLE_FLAGS="--sasrec artifacts/models/sasrec/trials/8.pt"` (a bad release: the BCE trial),
@@ -539,6 +542,13 @@ interpreter at exit: `ORT_DISABLE_TELEMETRY=1` (Makefile, model-server image, `m
   traffic, `make samples` gets `SAMPLES_FLAGS="--complete-through <the traffic's end + 30 min,
   UTC>"`: the simulator has stopped, so nothing can arrive later and this reads what a run 30
   minutes later would (the default, the newest event, leaves the last 30 minutes not final).
+- The committed `pctr.md`: `make samples` of the M4 runs' day, `make train-pctr PCTR_FLAGS="--days
+  2026-11-08 --until 2026-11-08T15:00:00Z --label m4-runs"` (counts recomputed: those records
+  logged none); then `make seed`, `COLLECT_SECONDS=1800 make collect` (+ `sim.verify --run
+  artifacts/sim/collect`), `make samples` (the whole day again), `make train-pctr
+  PCTR_FLAGS="--days 2026-11-08 --since <the collect's start> --label collect"` (counts logged);
+  m4-runs once more (the same numbers from the new samples; the last run is the shipped model),
+  `make pctr-report`.
 
 ## Shopping assistant (M6)
 

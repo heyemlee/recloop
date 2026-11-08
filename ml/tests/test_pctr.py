@@ -198,6 +198,16 @@ def test_ctr_columns_help_and_serving_agrees(tmp_path, monkeypatch):
     more = counts.copy()
     more[:, 3] += 30
     assert (served.predict(x, pos, sp, more) > served.predict(x, pos, sp, counts)).all()
+    # Every row had counts in both windows; --since keeps the samples served from then on.
+    assert ev["counts_coverage"]["all"] == {"hour": 1.0, "day": 1.0} and ev["since"] is None
+    t = pd.to_datetime(df.t_impression, utc=True)
+    cut = t.iloc[len(df) // 2]
+    pctr.main(["--label", "late", "--since", cut.tz_localize(None).isoformat()])
+    late = json.loads((tmp_path / "model" / "eval" / "late.json").read_text())
+    assert late["rows"] == int((t >= cut).sum()) and late["since"] == cut.isoformat()
+    assert json.loads((tmp_path / "model" / "model.json").read_text())["training"]["since"] == (
+        cut.isoformat()
+    )
 
 
 def test_ctr_columns_are_finite_at_the_edges():

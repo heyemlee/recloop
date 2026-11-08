@@ -1,9 +1,10 @@
 """pCTR with and without the item CTR columns (design §9.2 step 3) -> docs/results/pctr.md.
 
 Inputs: the evaluations `make train-pctr` writes (artifacts/models/pctr/eval/<label>.json: both
-variants on the same time-ordered split, the paired user bootstrap of the differences, the sample
-job's online / offline check of the counts) and the shipped model (artifacts/models/pctr/
-model.json). One section per evaluation, in name order.
+variants on the same time-ordered split, the paired user bootstrap of the differences), the
+shipped model (artifacts/models/pctr/model.json) and the sample job's online / offline check of
+the counts (artifacts/samples/meta/<day>.json, `item_ctr`). One section per evaluation, in the
+order of their samples' first serving time.
 
 Usage: python -m analysis.pctr_report
 """
@@ -16,6 +17,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 MODEL_DIR = ROOT / "artifacts" / "models" / "pctr"
+META_DIR = ROOT / "artifacts" / "samples" / "meta"
 OUT = ROOT / "docs" / "results" / "pctr.md"
 
 
@@ -91,23 +93,51 @@ def _check_lines(checks: dict) -> list[str]:
     for day, c in sorted(checks.items()):
         if not c:
             continue
-        if not c["logged"]:
-            out.append(
-                f"- {day}: no served record of these samples logged counts (served before the "
-                f"api did, or the api had no current table); all {c['recomputed_only']:,} "
-                "eligible impressions use the recomputed counts."
+        line = f"- {day}: of {c['eligible']:,} eligible impressions (home feed, with features), "
+        if c["logged"]:
+            share = c["equal"] / c["logged"]
+            diffs = ", ".join(
+                f"{f} {v}" for f, v in zip(c["fields"], c["max_abs_diff"], strict=True)
             )
-            continue
-        share = c["equal"] / c["logged"]
-        out.append(
-            f"- {day}: {c['logged']:,} eligible impressions had their counts logged at serving; "
-            f"{c['equal']:,} ({share:.2%}) equal the counts the sample job recomputed from the log, "
-            f"{c['differ']:,} differ ({c['logged_below_log']:,} logged below the log, "
-            f"{c['logged_above_log']:,} above; largest differences per field "
-            f"{', '.join(f'{f} {v}' for f, v in zip(c['fields'], c['max_abs_diff'], strict=True))}); "
-            f"{c['recomputed_only']:,} use recomputed counts only."
-        )
+            line += (
+                f"{c['logged']:,} had their counts logged at serving: {c['equal']:,} "
+                f"({share:.2%}) equal the counts the sample job recomputed from the log, "
+                f"{c['differ']:,} differ ({c['logged_below_log']:,} logged below the log, "
+                f"{c['logged_above_log']:,} above; largest differences per field {diffs})"
+            )
+        else:
+            line += "none had its counts logged at serving"
+        if c["recomputed_only"]:
+            line += (
+                f"{'; ' if c['logged'] else ': '}{c['recomputed_only']:,} were served before the "
+                "api logged counts and use the recomputed ones (E = the newest 5-minute boundary "
+                "at least 15 s before serving; no seed, as those records name none)"
+            )
+        out.append(line + ".")
     return out
+
+
+def _summary(evals: list[dict]) -> list[str]:
+    rows = []
+    for ev in evals:
+        comp = (ev.get("comparison") or {}).get("all")
+        src = ev.get("counts_source") or {}
+        counts = " + ".join(
+            f"{'logged' if k == 'served' else 'recomputed'}" for k in sorted(src, reverse=True)
+        )
+        rows.append(
+            [
+                ev["label"],
+                f"{ev['rows']:,}",
+                counts or "none",
+                f"{_signed(comp['auc']['diff'])} {_ci(comp['auc'])}" if comp else "",
+                f"{_signed(comp['logloss']['diff'], 5)} {_ci(comp['logloss'], 5)}" if comp else "",
+            ]
+        )
+    return _table(
+        ["Evaluation", "Samples", "Counts", "AUC, with − without", "Log loss, with − without"],
+        rows,
+    )
 
 
 def _section(ev: dict) -> list[str]:
@@ -117,14 +147,14 @@ def _section(ev: dict) -> list[str]:
     split = ev["split"]
     test = split["test"]
     src = ev.get("counts_source") or {}
+    served = _window(ev.get("since"), ev.get("until"))
     lines.append(
         f"{ev['rows']:,} training samples ({ev['positives']:,} clicked) of {ev['users']:,} users, "
-        f"{ev['sponsored_rows']:,} of them sponsored slots, from {', '.join(ev['days'])}. In time "
-        f"order: the first 64 % fit, the next 16 % choose the settings, the last 20 % "
-        f"({test[1] - test[0]:,} samples, {test[2][:16].replace('T', ' ')} to "
-        f"{test[3][:16].replace('T', ' ')} UTC) judge."
+        f"{ev['sponsored_rows']:,} of them sponsored slots, from {', '.join(ev['days'])}{served}. "
+        f"In time order: the first 64 % fit, the next 16 % choose the settings, the last 20 % "
+        f"({test[1] - test[0]:,} samples, {_time(test[2])} to {_time(test[3])} UTC) judge."
         if len(test) == 4
-        else f"{ev['rows']:,} training samples from {', '.join(ev['days'])}."
+        else f"{ev['rows']:,} training samples from {', '.join(ev['days'])}{served}."
     )
     if src:
         lines.append(
@@ -134,6 +164,14 @@ def _section(ev: dict) -> list[str]:
                 for k, n in sorted(src.items(), reverse=True)
             )
             + "."
+        )
+    cov = ev.get("counts_coverage") or {}
+    if cov.get("all") and cov.get("test"):
+        a, t = cov["all"], cov["test"]
+        lines.append(
+            f"Of the impressions (weighted), {a['hour']:.1%} were of an item with at least one "
+            f"impression in its hour window and {a['day']:.1%} in its day window (last 20 %: "
+            f"{t['hour']:.1%} and {t['day']:.1%}); the others' columns sit at the prior."
         )
     lines.append("")
     if "ctr" not in v:
@@ -205,15 +243,22 @@ def _section(ev: dict) -> list[str]:
         ],
     )
     lines.append("")
-    checks = _check_lines(ev.get("item_ctr_checks") or {})
-    if checks:
-        lines += [
-            "Online against offline (the sample job's check of the logged counts):",
-            "",
-            *checks,
-            "",
-        ]
     return lines
+
+
+def _time(iso: str) -> str:
+    return iso[:16].replace("T", " ")
+
+
+def _window(since: str | None, until: str | None) -> str:
+    """The samples' serving times when the training run limited them (pctr --since / --until)."""
+    if since and until:
+        return f" served from {_time(since)} to {_time(until)} UTC"
+    if since:
+        return f" served from {_time(since)} UTC on"
+    if until:
+        return f" served before {_time(until)} UTC"
+    return ""
 
 
 def _auc_word(c: dict) -> str:
@@ -226,7 +271,13 @@ def _loss_word(c: dict) -> str:
     return "lower" if hi < 0 else "higher" if lo > 0 else "not significantly different"
 
 
-def render(evals: list[dict], model: dict | None) -> str:
+def render(evals: list[dict], model: dict | None, checks: dict | None = None) -> str:
+    """checks: the sample job's online / offline check per day (meta `item_ctr`); without them,
+    the copies the evaluations took when they were trained."""
+    if checks is None:
+        checks = {}
+        for ev in evals:
+            checks.update({d: c for d, c in (ev.get("item_ctr_checks") or {}).items() if c})
     lines = [
         "# pCTR: the item CTR columns",
         "",
@@ -264,13 +315,35 @@ def render(evals: list[dict], model: dict | None) -> str:
                 if "ctr" in model
                 else ""
             )
-            + f", trained on {', '.join(model['training']['days'])}."
+            + f", trained on the samples of {', '.join(model['training']['days'])}"
+            + _window(model["training"].get("since"), model["training"].get("until"))
+            + " (the last `make train-pctr`)."
         )
         lines.append("")
     if not evals:
         lines += ["No evaluation yet: run `make train-pctr`.", ""]
+    elif any(ev.get("comparison") for ev in evals):
+        lines += [
+            "Each evaluation on the last 20 % of its samples in time, differences with 95% "
+            "intervals (paired user bootstrap):",
+            "",
+            *_summary(evals),
+            "",
+        ]
     for ev in evals:
         lines += _section(ev)
+    check = _check_lines(checks)
+    if check:
+        lines += [
+            "## Online against offline",
+            "",
+            "The sample job recomputes every eligible impression's counts from the log, for the E "
+            "and the seed its served record logged, and compares them with the counts the api "
+            "logged (its latest run per day):",
+            "",
+            *check,
+            "",
+        ]
     lines += [
         "## Known limitations",
         "",
@@ -282,7 +355,9 @@ def render(evals: list[dict], model: dict | None) -> str:
         "- Raw CTR, not normalised by position: an item shown mostly near the top has a higher "
         "CTR than the same item shown lower.",
         "- The simulated traffic on this machine spans less than a day, so the day window holds "
-        "every event since the start (or the seed); only the hour window slides within it.",
+        "only the complete hours since the traffic started (or since the last seed, rounded up "
+        "to the hour): it is empty for the first one to two hours and never slides; only the "
+        "hour window does.",
         "- The simulator's users click by text relevance to their test-period items: an item's "
         "CTR says how many of them find it relevant. The size of the gain is the simulator's.",
         "",
@@ -290,15 +365,25 @@ def render(evals: list[dict], model: dict | None) -> str:
     return "\n".join(lines)
 
 
-def load(model_dir: Path = MODEL_DIR) -> tuple[list[dict], dict | None]:
+def load(
+    model_dir: Path = MODEL_DIR, meta_dir: Path = META_DIR
+) -> tuple[list[dict], dict | None, dict]:
+    """The evaluations (in the order of their samples' first serving time, then by name), the
+    shipped model and the sample job's online / offline check of each day it ran for."""
     evals = [json.loads(p.read_text()) for p in sorted((model_dir / "eval").glob("*.json"))]
+    evals.sort(key=lambda e: (e["split"]["train"][2:3] or [""], e["label"]))
     path = model_dir / "model.json"
-    return evals, json.loads(path.read_text()) if path.exists() else None
+    checks = {}
+    for p in sorted(meta_dir.glob("*.json")):
+        c = json.loads(p.read_text()).get("item_ctr")
+        if c:
+            checks[p.stem] = c
+    return evals, json.loads(path.read_text()) if path.exists() else None, checks
 
 
 def main() -> None:
-    evals, model = load()
-    OUT.write_text(render(evals, model))
+    evals, model, checks = load()
+    OUT.write_text(render(evals, model, checks))
     print(f"pctr     {len(evals)} evaluation(s) -> {OUT.relative_to(ROOT)}")
 
 

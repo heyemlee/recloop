@@ -318,7 +318,7 @@ samples: spark-image ## Training samples of DAY (UTC, default today): export eve
 test-samples: spark-image ## The sample job's tests, in its container (2 CPUs)
 	$(SPARK_RUN) -m pytest -q -p no:cacheprovider ml/tests/test_samples.py
 
-train-pctr: ## Logistic-regression pCTR on the samples (artifacts/samples/train), with and without the item CTR columns -> artifacts/models/pctr (PCTR_FLAGS: --days, --label)
+train-pctr: ## Logistic-regression pCTR on the samples (artifacts/samples/train), with and without the item CTR columns -> artifacts/models/pctr (PCTR_FLAGS: --days, --since, --label)
 	$(PY) -m ml.models.pctr $(PCTR_FLAGS)
 
 pctr-report: ## docs/results/pctr.md from artifacts/models/pctr/eval (the pCTR with and without the item CTR columns)
