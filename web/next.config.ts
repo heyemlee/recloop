@@ -3,8 +3,10 @@ import type { NextConfig } from "next";
 // The browser talks to the Go api through this app (/api/v1/* -> RECLOOP_API_URL/v1/*), so
 // events sent with navigator.sendBeacon stay same-origin and no CORS setup is needed. Only the
 // public /v1 routes are proxied: /internal/* (the shopping assistant's ads endpoint) and
-// /metrics stay off the browser's reach.
+// /metrics stay off the browser's reach. The conversation (/api/v1/chat, server-sent events)
+// goes to the shopping assistant's own service (agent/server.py), which calls the api itself.
 const apiUrl = process.env.RECLOOP_API_URL ?? "http://127.0.0.1:18080";
+const agentUrl = process.env.RECLOOP_AGENT_URL ?? "http://127.0.0.1:18083";
 
 const nextConfig: NextConfig = {
   cacheComponents: true,
@@ -20,7 +22,11 @@ const nextConfig: NextConfig = {
     },
   },
   async rewrites() {
-    return [{ source: "/api/v1/:path*", destination: `${apiUrl}/v1/:path*` }];
+    // In order: the first match wins.
+    return [
+      { source: "/api/v1/chat", destination: `${agentUrl}/v1/chat` },
+      { source: "/api/v1/:path*", destination: `${apiUrl}/v1/:path*` },
+    ];
   },
 };
 

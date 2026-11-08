@@ -36,6 +36,8 @@ const (
 	MaxPerBrand     = 2
 	DefaultLimit    = 20
 	MaxLimit        = 50
+	// MaxChatSeeds bounds surface=chat's seed_items (the sources look at that many items).
+	MaxChatSeeds = recall.HistoryWindow
 	// renderReserve is kept back from the page-store stage for encoding the response.
 	renderReserve = 2 * time.Millisecond
 )
@@ -137,6 +139,7 @@ type servedItem struct {
 type servedPayload struct {
 	Surface        string                           `json:"surface"`
 	Seed           *int32                           `json:"seed_item,omitempty"`
+	SeedItems      []int32                          `json:"seed_items,omitempty"` // surface=chat
 	Offset         int                              `json:"offset"`
 	ModelVer       string                           `json:"model_ver"`
 	SourceVersions map[string]string                `json:"source_versions,omitempty"`
@@ -214,6 +217,7 @@ type request struct {
 	budget   resilience.Budget
 	surface  string
 	seed     int32
+	seeds    []int32 // surface=chat: the assistant's seed items, most relevant first
 	uid      int64
 	now      time.Time
 	degraded []string
@@ -310,7 +314,7 @@ func (s *Server) recommendations(w http.ResponseWriter, r *http.Request) {
 	}
 	specs, ok := s.Sources[surface]
 	if !ok {
-		writeError(w, http.StatusBadRequest, "surface must be home or item")
+		writeError(w, http.StatusBadRequest, "surface must be home, item or chat")
 		return
 	}
 	seed := int32(-1)
@@ -322,8 +326,15 @@ func (s *Server) recommendations(w http.ResponseWriter, r *http.Request) {
 		}
 		seed = int32(id)
 	}
+	var seeds []int32
+	if surface == recall.SurfaceChat {
+		if seeds, err = parseSeeds(q.Get("seed_items"), s.Catalog.Has); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 
-	req := &request{s: s, ctx: r.Context(), surface: surface, seed: seed, uid: uid, now: s.Now(), degraded: []string{}}
+	req := &request{s: s, ctx: r.Context(), surface: surface, seed: seed, seeds: seeds, uid: uid, now: s.Now(), degraded: []string{}}
 	if !s.Naive {
 		var cancel context.CancelFunc
 		req.ctx, cancel, req.budget = resilience.Start(r.Context(), s.Plan, time.Now)
@@ -399,11 +410,13 @@ func (s *Server) recommend(q *request, specs []mixer.Spec, limit int, debugOn bo
 	}
 
 	// Candidate cache (design §4.5): recall + ranking output, keyed by the history version.
+	// Chat requests skip it: their seed items are not part of the key.
 	variant := assign["recall"].Variant + "." + assign["rank"].Variant
 	key := cache.CandidateKey(q.uid, q.surface, q.seed, variant, b.Version, uc.HV)
 	cacheResult := CacheOff
+	useCache := s.Cands != nil && q.surface != recall.SurfaceChat
 	var cands *cache.Candidates
-	if s.Cands != nil {
+	if useCache {
 		cacheResult = CacheSkip
 		if userOK || q.surface == recall.SurfaceItem {
 			t = time.Now()
@@ -437,13 +450,13 @@ func (s *Server) recommend(q *request, specs []mixer.Spec, limit int, debugOn bo
 	var results []mixer.Result
 	var rk rendered
 	complete := true
-	q.history = recall.Recent(uc.History, recall.HistoryWindow)
+	q.history = recall.Recent(chatHistory(uc.History, q.seeds), recall.HistoryWindow)
 	ranks := q.surface == recall.SurfaceHome && b.Ranking != nil && s.Rank != nil
 	if cands == nil {
 		// ② recall, concurrently, each source under min(its timeout, the stage budget).
 		t = time.Now()
 		rctx, span := q.span("recall")
-		rreq := recall.Request{UserID: q.uid, Surface: q.surface, History: uc.History, Seed: q.seed, Bundle: b}
+		rreq := recall.Request{UserID: q.uid, Surface: q.surface, History: chatHistory(uc.History, q.seeds), Seed: q.seed, Bundle: b}
 		if s.Bundles != nil {
 			rreq.PinVersion = b.Version // the model server serves exactly this version
 		}
@@ -525,6 +538,11 @@ func (s *Server) recommend(q *request, specs []mixer.Spec, limit int, debugOn bo
 	// ④ filters and re-ranking, every request (seen, bought and stock change quickly).
 	t = time.Now()
 	ex := mixer.Exclusions{Bought: uc.Bought, Seen: uc.Seen, Seed: q.seed, Known: s.Catalog.Has, InStock: s.Catalog.InStock}
+	if q.surface == recall.SurfaceChat {
+		// The assistant ranks items the shopper asked for: having seen one today is no reason
+		// to leave it out (the feed filters them to stay fresh).
+		ex.Seen = nil
+	}
 	filtered, fstats := mixer.Filter(cands.Items, ex)
 	diverse, promoted := mixer.Diversify(filtered, s.Catalog.Brand, DiversityWindow, MaxPerBrand)
 	list, backfill := mixer.Backfill(diverse, b.Pop, PageDepth, ex)
@@ -552,9 +570,7 @@ func (s *Server) recommend(q *request, specs []mixer.Spec, limit int, debugOn bo
 	}
 
 	// Page (for the cursor) and, after a fresh and complete recall, the candidate cache entry:
-	// one Redis round trip.
-	t = time.Now()
-	_, span = q.span("page_store")
+	// one Redis round trip. The assistant reads one list: chat results are not paged.
 	page := &cache.Page{
 		RequestID: requestID, UserID: q.uid, Surface: q.surface, Seed: q.seed, ModelVer: b.Version,
 		Exp: assign, ConfigVersion: configVersion, Degraded: q.degraded, HV: uc.HV, Items: list, CreatedAt: q.now,
@@ -562,27 +578,32 @@ func (s *Server) recommend(q *request, specs []mixer.Spec, limit int, debugOn bo
 	if ad != nil {
 		page.Sponsored = ad.Slots
 	}
-	storeCands := s.Cands != nil && cacheResult != CacheHit && complete && (userOK || q.surface == recall.SurfaceItem)
-	status, err = q.redis(q.budget.For(plan.Tail, renderReserve), func(c context.Context) error {
-		pipe := s.Redis.Pipeline()
-		if err := s.Pages.PutCmd(c, pipe, page); err != nil {
+	pageable := false
+	if q.surface != recall.SurfaceChat {
+		t = time.Now()
+		_, span = q.span("page_store")
+		storeCands := useCache && cacheResult != CacheHit && complete && (userOK || q.surface == recall.SurfaceItem)
+		status, err = q.redis(q.budget.For(plan.Tail, renderReserve), func(c context.Context) error {
+			pipe := s.Redis.Pipeline()
+			if err := s.Pages.PutCmd(c, pipe, page); err != nil {
+				return err
+			}
+			if storeCands {
+				s.Cands.SetCmd(c, pipe, key, cands)
+			}
+			_, err := pipe.Exec(c)
 			return err
+		})
+		span.End()
+		q.stage("page_store", t)
+		pageable = status == mixer.StatusOK
+		if !pageable {
+			if s.Naive {
+				return nil, errFatal{"page_store", err}
+			}
+			q.degrade("pages_" + status)
+			s.warn("pages_"+status, "storing the page failed; no next page", "err", err)
 		}
-		if storeCands {
-			s.Cands.SetCmd(c, pipe, key, cands)
-		}
-		_, err := pipe.Exec(c)
-		return err
-	})
-	span.End()
-	q.stage("page_store", t)
-	pageable := status == mixer.StatusOK
-	if !pageable {
-		if s.Naive {
-			return nil, errFatal{"page_store", err}
-		}
-		q.degrade("pages_" + status)
-		s.warn("pages_"+status, "storing the page failed; no next page", "err", err)
 	}
 
 	// ⑦ response and served log (asynchronous, never blocks).
@@ -597,6 +618,7 @@ func (s *Server) recommend(q *request, specs []mixer.Spec, limit int, debugOn bo
 		served.PCTRModel = ad.pctrModel
 	}
 	served.SourceVersions = cands.Versions
+	served.SeedItems = q.seeds
 	served.BackfillCount = backfill
 	served.Filters = &fstats
 	served.Cache = cacheResult
@@ -614,7 +636,7 @@ func (s *Server) recommend(q *request, specs []mixer.Spec, limit int, debugOn bo
 	)
 
 	if debugOn {
-		window := recall.Recent(uc.History, recall.HistoryWindow)
+		window := recall.Recent(chatHistory(uc.History, q.seeds), recall.HistoryWindow)
 		hist := make([]historyEntry, 0, len(window))
 		for i := len(window) - 1; i >= 0; i-- {
 			e := historyEntry{ItemID: window[i]}
@@ -647,6 +669,42 @@ func (s *Server) recommend(q *request, specs []mixer.Spec, limit int, debugOn bo
 		}
 	}
 	return &recResult{RecResponse: resp, cache: cacheResult}, nil
+}
+
+// parseSeeds reads surface=chat's seed_items: comma-separated catalog item ids, most relevant
+// first, at most MaxChatSeeds.
+func parseSeeds(v string, known func(int32) bool) ([]int32, error) {
+	if v == "" {
+		return nil, nil
+	}
+	parts := strings.Split(v, ",")
+	if len(parts) > MaxChatSeeds {
+		return nil, errors.New("seed_items lists more than " + strconv.Itoa(MaxChatSeeds) + " items")
+	}
+	out := make([]int32, 0, len(parts))
+	for _, p := range parts {
+		id, err := strconv.ParseInt(strings.TrimSpace(p), 10, 32)
+		if err != nil || !known(int32(id)) {
+			return nil, errors.New("seed_items must be catalog item ids")
+		}
+		out = append(out, int32(id))
+	}
+	return out, nil
+}
+
+// chatHistory is what the sources see on the chat surface: the user's history (oldest first)
+// followed by the seed items, the most relevant seed last, i.e. as the most recent item (it
+// weighs most in ItemCF and SASRec). Other surfaces have no seeds: the history as it is.
+func chatHistory(history, seeds []int32) []int32 {
+	if len(seeds) == 0 {
+		return history
+	}
+	out := make([]int32, 0, len(history)+len(seeds))
+	out = append(out, history...)
+	for i := len(seeds) - 1; i >= 0; i-- {
+		out = append(out, seeds[i])
+	}
+	return out
 }
 
 // weights merges the surface defaults with the recall-layer variant's "rrf_weights".
