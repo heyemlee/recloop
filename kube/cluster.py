@@ -302,6 +302,19 @@ def containers_resources(ns: str | None = None) -> list[dict]:
     out = []
     for p in kubectl_json(*args, ns=ns)["items"]:
         owner = (p["metadata"].get("ownerReferences") or [{}])[0].get("name", "")
+        labels = p["metadata"].get("labels", {})
+        # The workload as a reader knows it: CloudNativePG's cluster, the Redis instance (both
+        # are app.kubernetes.io/name=redis), else the chart's name label, else the owner.
+        workload = (
+            labels.get("cnpg.io/cluster")
+            or (
+                labels.get("app.kubernetes.io/instance")
+                if labels.get("app.kubernetes.io/name") == "redis"
+                else None
+            )
+            or labels.get("app.kubernetes.io/name")
+            or owner
+        )
         for kind in ("initContainers", "containers"):
             for c in p["spec"].get(kind, []):
                 out.append(
@@ -309,6 +322,7 @@ def containers_resources(ns: str | None = None) -> list[dict]:
                         "namespace": p["metadata"]["namespace"],
                         "pod": p["metadata"]["name"],
                         "owner": owner,
+                        "workload": workload,
                         "container": c["name"],
                         "init": kind == "initContainers",
                         "image": c["image"],

@@ -290,6 +290,18 @@ def broken_bundle(seed: int = 20261108) -> str:
     return f"/bundles/{BROKEN}"
 
 
+def new_pod_log(since: float) -> str:
+    """The last lines the newest model-server pod's crashed container wrote (its previous run;
+    the current one may still be starting)."""
+    pods = k8s.kubectl_json("get", "pods", "-l", "app.kubernetes.io/name=model-server")["items"]
+    new = [p for p in pods if (k8s.ts(p["metadata"]["creationTimestamp"]) or 0) >= since]
+    if not new:
+        return ""
+    name = max(new, key=lambda p: p["metadata"]["creationTimestamp"])["metadata"]["name"]
+    out = kubectl("logs", name, "--previous", "--tail=4", check=False, timeout=30)
+    return (out or kubectl("logs", name, "--tail=4", check=False, timeout=30))[-800:]
+
+
 def wait_condition(deploy: str, cond: str, reason: str | None, timeout: float) -> float | None:
     """Seconds until the Deployment's condition `cond` is False with `reason` (None: True)."""
     t0 = time.time()
@@ -309,6 +321,7 @@ def wait_condition(deploy: str, cond: str, reason: str | None, timeout: float) -
 def run_rollout(variant: str, rep: int, args, out: Path) -> dict:
     deploy = "deployment/model-server"
     state = reset()
+    broken_log = ""
     duration = {"gated": args.rollout_seconds, "no-probe": args.rollout_seconds,
                 "broken": args.rollout_seconds + 120}[variant]  # fmt: skip
     tag = f"rollout-{variant}-{rep}"
@@ -345,6 +358,7 @@ def run_rollout(variant: str, rep: int, args, out: Path) -> dict:
             act(f"new pod template: --bundle {path} (item ids shuffled)")
             stalled = wait_condition(deploy, "Progressing", "ProgressDeadlineExceeded", 300)
             act(f"rollout reported failed (ProgressDeadlineExceeded) after {stalled or 0:.0f} s")
+            broken_log = new_pod_log(load.started)  # before the undo removes the pod
             kubectl("rollout", "undo", deploy)
             act("kubectl rollout undo deployment/model-server")
             k8s.rollout_status(deploy, timeout="5m")
@@ -358,9 +372,7 @@ def run_rollout(variant: str, rep: int, args, out: Path) -> dict:
         if p["component"] == "model-server" and p["created"] and p["created"] >= load.started:
             loads[p["name"]] = bundle_load_seconds(p["name"])
             if variant == "broken":
-                p["log_tail"] = kubectl("logs", p["name"], "--tail=3", check=False, timeout=30)[
-                    -600:
-                ]
+                p["log_tail"] = broken_log
     if variant == "no-probe":  # back to the chart's probes (one more, unmeasured, rollout)
         kubectl("rollout", "undo", deploy)
         k8s.rollout_status(deploy, timeout="5m")
@@ -441,6 +453,8 @@ def run_keda_billing(rep: int, args, out: Path) -> dict:
         ads.close()
     return {
         "experiment": "keda", "variant": "billing", "rep": rep, "rate": args.keda_rate,
+        "slow_seconds": args.slow_seconds, "pg_latency_ms": args.pg_latency_ms,
+        "scaledobject": k8s.kubectl_json("get", "scaledobject", "billing")["spec"],
         "started": load.started, "load_ended": load.started + args.keda_seconds, "ended": t1,
         "actions": actions, "k6": k6res, "watch": watch.result(),
         "campaigns": ids, "server": server_side(load.started, t1), "keda_metric": keda_metric(
@@ -477,6 +491,7 @@ def run_keda_aggregator(variant: str, rep: int, args, out: Path) -> dict:
             keda_max("aggregator", spec["maxReplicaCount"])
     return {
         "experiment": "keda", "variant": variant, "rep": rep, "rate": args.keda_rate,
+        "pause_seconds": args.pause_seconds, "scaledobject": spec,
         "max_replicas": 1 if cap else spec["maxReplicaCount"], "started": load.started,
         "load_ended": load.started + args.keda_seconds, "ended": t1, "actions": actions,
         "k6": k6res, "watch": watch.result(), "keda_metric": keda_metric("aggregator", load.started, t1),

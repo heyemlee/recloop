@@ -197,11 +197,23 @@ def rollout_summary(runs: list[dict]) -> list[str]:
         nd = sum(s["during"]["degraded"] for s in noprobe)
         nn = sum(s["during"]["requests"] for s in noprobe)
         ne = sum(s["whole"]["errors"] for s in noprobe)
+        gm = sum(ms_degraded(r) for r in runs if r["variant"] == "gated")
+        nm = sum(ms_degraded(r) for r in runs if r["variant"] == "no-probe")
         out.append(
             f"  The same rollout without the readiness probe (pods get traffic as soon as they "
-            f"start): {pct(nd, nn)} of the requests during the rollouts degraded, {ne} failed."
+            f"start): {pct(nd, nn)} of the requests during the rollouts degraded, {ne} failed; "
+            f"answers degraded for the model server (`sasrec_*`): {nm:,.0f} without the probe, "
+            f"{gm:,.0f} with it."
         )
     return out
+
+
+MS_REASONS = ("sasrec_", "model_version_mismatch")
+
+
+def ms_degraded(r: dict) -> float:
+    """Answers degraded because of the model server (SASRec recall), over the whole run."""
+    return sum(v for k, v in r["server"]["degraded_reasons"].items() if k.startswith(MS_REASONS))
 
 
 def secs1(x) -> str:
@@ -505,11 +517,17 @@ def keda_summary(runs: list[dict]) -> list[str]:
     a = [keda_stats(r) for r in rs if r["variant"] == "aggregator"]
     c = [keda_stats(r) for r in rs if r["variant"] == "aggregator-capped"]
     if a:
+        pause = next((r.get("pause_seconds") for r in rs if r.get("pause_seconds")), "?")
+        scaled = max((s["max_replicas"] or 1) for s in a) > 1
         line = (
-            f"  The aggregator after a {rs[0].get('pause_seconds', 90)} s outage "
+            f"  The aggregator after a {pause} s outage "
             f"(backlog {rng([s['lag_at_end_of_fault'] for s in a], lambda x: f'{x:,.0f}')} records): "
-            f"drained in {rng([s['drained_after'] for s in a], secs)} with KEDA "
-            f"({rng([s['max_replicas'] for s in a], str)} pods)"
+            f"drained in {rng([s['drained_after'] for s in a], secs)} "
+            + (
+                f"with KEDA ({rng([s['max_replicas'] for s in a], str)} pods)"
+                if scaled
+                else "by its one pod, before KEDA added any"
+            )
         )
         if c:
             line += f", {rng([s['drained_after'] for s in c], secs)} capped at one pod"
@@ -523,21 +541,33 @@ def keda_section(runs: list[dict]) -> list[str]:
     if not rs:
         return out + ["Not run yet: `make deploy-keda`.", ""]
     r0 = rs[0]
+    so = r0.get("scaledobject") or {}
+    trig = (so.get("triggers") or [{}])[0].get("metadata", {})
+    lag = int(trig.get("lagThreshold", 0)) or None
+    slow = next((r.get("slow_seconds") for r in rs if r.get("slow_seconds")), None)
+    pause = next((r.get("pause_seconds") for r in rs if r.get("pause_seconds")), None)
     out += [
         "Both consumers are StatefulSets (pods `billing-0`, `billing-1`, ...: unique and stable "
         "static group member ids) with a KEDA ScaledObject: Kafka scaler on the group's lag over "
-        "`events`' 6 partitions, a pod per 5,000 records of lag, between 1 and 3 pods, polled "
-        "every 5 s; down after 60 s below target, one pod per 30 s. The lag below is the "
-        "broker's (`rpk group describe`) every 5 s, k6 at "
+        f"`events`' 6 partitions, a pod per {f'{lag:,}' if lag else '?'} records of lag, between "
+        f"{so.get('minReplicaCount', 1)} and {so.get('maxReplicaCount', '?')} pods, polled every "
+        f"{so.get('pollingInterval', 5)} s; down after 60 s below target, one pod per 30 s. The lag "
+        "below is the broker's (`rpk group describe`) every 5 s, k6 at "
         f"{r0['rate']} page views/s throughout.",
         "",
         "- **billing**: six live campaigns (large budgets) put sponsored slots on every home page, "
         "so billing has clicks to charge; 60 s in, every reply PostgreSQL sends billing is "
-        "200 ms late for 120 s (pg-proxy). A batch of 1,000 records that holds a click then "
-        "takes over a second, and the topic receives more than that per second.",
-        "- **aggregator**: 30 s in the aggregator is paused at 0 pods (KEDA's paused-replicas) for "
-        "90 s, then resumed; **aggregator-capped**: the same with the ScaledObject's "
+        f"{next((r.get('pg_latency_ms') for r in rs if r.get('pg_latency_ms')), 200)} ms late for "
+        f"{slow or '?'} s (pg-proxy). A batch of 1,000 records that holds a click then takes over "
+        "a second, and the topic receives more than that per second.",
+        f"- **aggregator**: 30 s in the aggregator is paused at 0 pods (KEDA's paused-replicas) for "
+        f"{pause or '?'} s, then resumed; **aggregator-capped**: the same with the ScaledObject's "
         "maxReplicaCount at 1, the drain of one pod.",
+        "",
+        "Scaling in has a cost here: a removed pod is a static member, which does not leave the "
+        "group (by design: a restarted pod takes its partitions back at once), so its partitions "
+        "wait for its 15 s session to time out before the others get them. The lag threshold sits "
+        "above what that stall builds up at this rate, so it does not trigger a scale-up.",
         "",
     ]
     rows = []
@@ -608,8 +638,12 @@ def drill_section(d: dict | None) -> list[str]:
     ]
     out += table(["t (s)", "action"], [[f"{c['t']:.1f}", c["action"]] for c in d["chaos"]], "rl")
     if billing_pods:
-        out += ["", f"Billing pods during the run (KEDA kept between 1 and 3): "
-                f"{len(billing_pods)} incarnations, names {', '.join(sorted({p['name'] for p in billing_pods}))}."]  # fmt: skip
+        samples = kube.get("watch", {}).get("samples", [])
+        most = max((x["ready"].get("billing", 0) for x in samples), default=1)
+        names = ", ".join(sorted({p["name"] for p in billing_pods}))
+        out += ["", f"Billing pods during the run: {len(billing_pods)} incarnations ({names}); at "
+                f"most {most} ready at once" + (" (KEDA did not add pods at this rate)." if most <= 1 else
+                " (KEDA added pods when the lag grew).")]  # fmt: skip
     out += ["", "The ledger against the truth (`sim/billing_verify.py`):", ""]
     out += table(
         ["check", "expected", "actual", ""],
@@ -649,7 +683,7 @@ def setup_section(meta: dict | None, runs: list[dict]) -> list[str]:
     charts = [p for p in env["pins"] if p[0] == "chart"]
     nodeimg = next((p[1] for p in env["pins"] if p[0] == "node"), "?")
     out += [
-        f"- Machine: {mach.get('chip', '?')}, {mach.get('memory_gb', '?')} GB, "
+        f"- Machine: {mach.get('chip', '?')}, {mach.get('memory_gib', '?')} GiB, "
         f"{mach.get('os', '?')}. One kind node ({env['tools'].get('kind', '?')}, "
         f"`{nodeimg.split('@')[0]}`, Kubernetes {node['kubelet']}) in Docker Desktop's VM: "
         f"{node['allocatable']['cpu']} CPUs, {node['allocatable']['memory']} allocatable.",
@@ -676,11 +710,7 @@ def setup_section(meta: dict | None, runs: list[dict]) -> list[str]:
     for c in env["containers"]:
         if c["namespace"] != "recloop" or c["init"]:
             continue
-        key = (
-            c["owner"].rsplit("-", 1)[0] if c["owner"].count("-") else c["owner"],
-            c["container"],
-        )
-        comp = c["pod"].rsplit("-", 2)[0] if "-" in c["pod"] else c["pod"]
+        comp = c.get("workload") or c["owner"]
         key = (comp, c["container"])
         if key in seen:
             continue

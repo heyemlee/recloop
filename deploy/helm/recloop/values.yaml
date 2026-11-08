@@ -95,16 +95,23 @@ aggregator:
   replicas: 1
   env:
     GOMEMLIMIT: 220MiB
+  # Measured on the cluster (2026-11-08): ~0.12 core at 300 page views/s (~2,500 events/s),
+  # ~0.26 at 800/s. A quarter core is twice the first: the steady state fits, a backlog
+  # (outage, burst) is what KEDA's extra pods are for. With a whole core one pod drained a
+  # 114,000-record backlog in under 5 s, before KEDA's next poll.
   resources:
     requests: {cpu: 100m, memory: 128Mi}
-    limits: {cpu: "1", memory: 256Mi}
+    limits: {cpu: 250m, memory: 256Mi}
   keda:
     enabled: true
     minReplicas: 1
     # events has 6 partitions; 3 keeps the run within the node's memory.
     maxReplicas: 3
     # Target lag per replica (records not yet committed by the group, summed over partitions).
-    lagThreshold: 5000
+    # Above the stall a scale-in causes: a removed static member keeps its partitions until its
+    # 15 s session times out (~12,500 records at 300 page views/s with 3 pods), and at 5,000
+    # KEDA scaled straight back up once.
+    lagThreshold: 20000
     pollingInterval: 5
     scaleDownStabilizationSeconds: 60
 
@@ -124,7 +131,7 @@ billing:
     enabled: true
     minReplicas: 1
     maxReplicas: 3
-    lagThreshold: 5000
+    lagThreshold: 20000  # as the aggregator's
     pollingInterval: 5
     scaleDownStabilizationSeconds: 60
 

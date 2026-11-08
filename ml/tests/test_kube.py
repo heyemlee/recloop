@@ -351,7 +351,7 @@ def results_doc():
            "node": {"kubelet": "v1.36.4", "allocatable": {"cpu": "8", "memory": "12000000Ki"}},
            "pins": [["chart", "keda", "2.21.0"], ["node", "kindest/node:v1.36.4@sha256:abc", ""]],
            "tools": {"kind": "v0.33.0"}, "k6": "k6 v2.3.0", "images": {"GO_TAG": "abc"},
-           "containers": [{"namespace": "recloop", "pod": "api-5d9c-x2", "owner": "api-5d9c", "container": "api",
+           "containers": [{"namespace": "recloop", "pod": "api-5d9c-x2", "owner": "api-5d9c", "workload": "api", "container": "api",
                            "init": False, "image": "i", "requests": {"cpu": "500m", "memory": "256Mi"},
                            "limits": {"cpu": "500m", "memory": "512Mi"}}]}  # fmt: skip
     runs = [rollout_run("gated"), rollout_run("no-probe"), rollout_run("broken"), hpa_run(),
