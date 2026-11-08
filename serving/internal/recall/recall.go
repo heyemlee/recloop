@@ -7,10 +7,12 @@ import (
 	"sort"
 )
 
-// Surfaces.
+// Surfaces. Chat is the shopping assistant's personalisation signal (design §10.2): the home
+// feed's sources over the user's history followed by the assistant's seed items.
 const (
 	SurfaceHome = "home"
 	SurfaceItem = "item"
+	SurfaceChat = "chat"
 )
 
 // Candidate is one retrieved item. Via is the history (or seed) item that contributed most,

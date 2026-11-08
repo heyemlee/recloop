@@ -19,6 +19,9 @@ export function Header() {
           <span className="text-lg font-semibold tracking-tight">RecLoop</span>
           <span className="hidden text-sm text-muted-foreground sm:inline">office supplies</span>
         </Link>
+        <Link href="/chat" className="text-sm text-muted-foreground hover:text-foreground">
+          Assistant
+        </Link>
         <Link href="/advertiser" className="text-sm text-muted-foreground hover:text-foreground">
           Advertiser
         </Link>

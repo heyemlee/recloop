@@ -350,10 +350,17 @@ func run(log *slog.Logger) error {
 				{Source: recall.ItemCF{B: b}, Timeout: 10 * time.Millisecond, K: 100},
 				{Source: recall.Text{S: st, Version: TextModel}, Timeout: envMillis("TEXT_TIMEOUT_MS", 35), MinTimeout: 5 * time.Millisecond, K: 50, Breaker: pgBreaker},
 			},
+			// The shopping assistant's signal: the home sources over history + seed items.
+			recall.SurfaceChat: {
+				{Source: recall.SASRec{Client: ms}, Timeout: envMillis("SASREC_TIMEOUT_MS", 35), MinTimeout: 5 * time.Millisecond, K: 200, Breaker: msBreaker},
+				{Source: recall.ItemCF{B: b}, Timeout: 10 * time.Millisecond, K: 200},
+				{Source: recall.Pop{B: b}, Timeout: 10 * time.Millisecond, K: 200},
+			},
 		},
 		Weights: map[string]map[string]float64{
 			recall.SurfaceHome: {"sasrec": 1.0, "itemcf": 1.0, "pop": 0.3},
 			recall.SurfaceItem: {"itemcf": 1.0, "text": 1.0},
+			recall.SurfaceChat: {"sasrec": 1.0, "itemcf": 1.0, "pop": 0.3},
 		},
 		Plan:      plan(),
 		Naive:     naive,
