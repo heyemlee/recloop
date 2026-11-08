@@ -54,6 +54,44 @@ def test_every_container_has_requests_and_limits(chart):
     assert pods == (7 if chart == "recloop" else 5)
 
 
+THIRD_PARTY = {"kube-prometheus-stack": "monitoring", "metrics-server": "kube-system", "keda": "keda",
+               "cloudnative-pg": "cnpg-system", "redpanda": "redpanda"}  # fmt: skip
+
+
+def chart_file(name: str) -> Path | None:
+    for line in (ROOT / "deploy" / "kind" / "versions.lock").read_text().splitlines():
+        f = line.split()
+        if f[:2] == ["chart", name]:
+            p = ROOT / ".cache" / "charts" / f"{name}-{f[2]}.tgz"
+            return p if p.exists() else None
+    return None
+
+
+@pytest.mark.skipif(not HELM.exists(), reason="no pinned helm (make kind-tools)")
+@pytest.mark.parametrize("name", sorted(THIRD_PARTY))
+def test_third_party_containers_have_requests_and_limits(name):
+    yaml = pytest.importorskip("yaml")
+    chart = chart_file(name)
+    if chart is None:
+        pytest.skip("chart not downloaded (deploy/kind/cluster.sh charts)")
+    env = {"HELM_CACHE_HOME": str(ROOT / ".cache/helm/cache"),
+           "HELM_CONFIG_HOME": str(ROOT / ".cache/helm/config"),
+           "HELM_DATA_HOME": str(ROOT / ".cache/helm/data"), "PATH": "/usr/bin:/bin"}  # fmt: skip
+    out = subprocess.run(
+        [str(HELM), "template", name, str(chart), "-n", THIRD_PARTY[name], "--kube-version", "1.36.4",
+         "-f", str(ROOT / "deploy" / "kind" / "values" / f"{name}.yaml")],
+        capture_output=True, text=True, check=True, env=env,
+    ).stdout  # fmt: skip
+    for d in yaml.safe_load_all(out):
+        if not d or d["kind"] not in ("Deployment", "StatefulSet", "DaemonSet", "Job"):
+            continue
+        spec = d["spec"]["template"]["spec"]
+        for c in spec.get("containers", []) + spec.get("initContainers", []):
+            for part in ("requests", "limits"):
+                got = (c.get("resources") or {}).get(part, {})
+                assert {"cpu", "memory"} <= set(got), (d["metadata"]["name"], c["name"], part)
+
+
 @pytest.mark.skipif(not HELM.exists(), reason="no pinned helm (make kind-tools)")
 def test_chart_wiring():
     yaml = pytest.importorskip("yaml")

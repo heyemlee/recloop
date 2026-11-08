@@ -49,11 +49,15 @@ spec:
           securityContext:
             {{- include "recloop.containerSecurity" . | nindent 12 }}
           volumeMounts:
-            # Next.js writes its cache under .next/cache.
+            # Next.js writes its cache under .next/cache; the root file system is read-only.
             - name: cache
               mountPath: /app/.next/cache
+            - name: tmp
+              mountPath: /tmp
       volumes:
         - name: cache
+          emptyDir: {}
+        - name: tmp
           emptyDir: {}
 ---
 apiVersion: v1

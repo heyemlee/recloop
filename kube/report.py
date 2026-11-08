@@ -338,6 +338,14 @@ def hpa_stats(r: dict) -> dict:
         "cpu_one_pod": series_mean(cpu, step_at, first_ready or step_end),
         "cpu_scaled": series_mean(cpu, (last_ready or step_end) + SETTLE_S, step_end),
         "throttled_one_pod": series_mean(thr, step_at, first_ready or step_end),
+        # What the HPA saw (its currentMetrics: % of the CPU request) before the first new pod.
+        "hpa_cpu_one_pod": med(
+            [
+                x.get("metric", {}).get("api")
+                for x in samples
+                if step_at <= x["t"] < (first_ready or step_end)
+            ]
+        ),
         "dropped": r["k6"]["dropped_iterations"],
         "errors": r["k6"]["errors"],
     }
@@ -393,12 +401,13 @@ def hpa_section(runs: list[dict]) -> list[str]:
             pct(s["scaled"]["degraded"], s["scaled"]["requests"]),
             "–" if s["cpu_one_pod"] is None else f"{s['cpu_one_pod']:.2f}",
             "–" if s["throttled_one_pod"] is None else f"{100 * s['throttled_one_pod']:.0f} %",
+            "–" if s["hpa_cpu_one_pod"] is None else f"{s['hpa_cpu_one_pod']:.0f} %",
             s["errors"], s["dropped"],
         ])  # fmt: skip
     out += table(
         ["run", "scale-up asked", "first new pod ready", "pods", "P99 base", "P99 one pod",
          "worst window", "P99 scaled out", "worst window", "degraded one pod",
-         "degraded scaled out", "api CPU one pod (cores)", "throttled periods", "failed",
+         "degraded scaled out", "api CPU one pod (cores)", "throttled periods", "HPA's CPU one pod", "failed",
          "dropped iterations"],
         rows,
     )  # fmt: skip

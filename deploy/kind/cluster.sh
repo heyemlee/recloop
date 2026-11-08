@@ -268,7 +268,7 @@ cmd_status() {
   "${KUBECTL[@]}" top pods -A 2>/dev/null || true
 }
 
-# RECLOOP_SET_FILES: the files the chart takes with --set-file (as cmd_deploy passes them).
+# The files the recloop chart takes with --set-file (cmd_deploy and cmd_lint pass them).
 recloop_files() {
   echo --set-file logSink.config=deploy/connect/log-sink.yaml \
     --set-file grafana.dashboard=deploy/grafana/dashboards/recloop.json

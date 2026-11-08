@@ -100,6 +100,17 @@ config:
     # recloop-infra chart creates `events` (6 partitions, 7 days).
     auto_create_topics_enabled: false
 
+# The chart's own hook Job (applies the cluster config above after install / upgrade); merged
+# by container name, as above.
+post_install_job:
+  podTemplate:
+    spec:
+      containers:
+        - name: post-install
+          resources:
+            requests: {cpu: 100m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+
 console:
   enabled: false
 

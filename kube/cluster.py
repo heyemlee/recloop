@@ -236,11 +236,19 @@ class Watch:
             terminating = bool(p["metadata"].get("deletionTimestamp"))
             if ready and not terminating:
                 sample["ready"][comp] = sample["ready"].get(comp, 0) + 1
+        # The api's HPA and the ones KEDA made for its ScaledObjects (keda-hpa-<name>): what
+        # they want and what they see (CPU utilisation in %, or KEDA's lag per replica).
         hpas = kubectl_json("get", "hpa")["items"]
-        sample["desired"] = {
-            h["spec"]["scaleTargetRef"]["name"]: h.get("status", {}).get("desiredReplicas")
-            for h in hpas
-        }
+        sample["desired"], sample["metric"] = {}, {}
+        for h in hpas:
+            target = h["spec"]["scaleTargetRef"]["name"]
+            st = h.get("status", {})
+            sample["desired"][target] = st.get("desiredReplicas")
+            cur = (st.get("currentMetrics") or [{}])[0]
+            value = cur.get("resource", {}).get("current", {}).get("averageUtilization")
+            if value is None:
+                value = cur.get("external", {}).get("current", {}).get("averageValue")
+            sample["metric"][target] = value
         self.samples.append(sample)
 
     def result(self) -> dict:
