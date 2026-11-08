@@ -32,6 +32,9 @@ type Direct struct {
 	// OnStock is called with the stock left after new purchases (to update the catalog).
 	OnStock func(item, stock int32)
 	Now     func() time.Time
+	// FreqKey maps the impression of a sponsored slot to its frequency-cap counter (the
+	// aggregator's rule, aggregator.FreqKeys); nil counts no frequency caps.
+	FreqKey func(Event) string
 }
 
 // Publish writes the events to PostgreSQL in one transaction, then applies every event to
@@ -62,7 +65,7 @@ func (s *Direct) Publish(ctx context.Context, evs []Event) (Result, error) {
 	// Redis is updated for duplicates too: if an earlier attempt stored the event but failed
 	// before (or while) updating Redis, the retry completes it; the dedup marker prevents a
 	// second application.
-	if _, err := s.State.ApplyBatch(ctx, Changes(evs), s.Now()); err != nil {
+	if _, err := s.State.ApplyBatch(ctx, Changes(evs, s.FreqKey), s.Now()); err != nil {
 		return out, err
 	}
 	return out, nil
@@ -81,15 +84,20 @@ func (p PGServed) WriteServed(ctx context.Context, evs []Event) error {
 }
 
 // Changes are the user-state effects of a batch of events, in order (served events and other
-// types without an effect are left out).
-func Changes(evs []Event) []userstate.Change {
+// types without an effect are left out). freqKey, if set, names the frequency-cap counter a
+// sponsored impression adds to ("" for none).
+func Changes(evs []Event, freqKey func(Event) string) []userstate.Change {
 	out := make([]userstate.Change, 0, len(evs))
 	for _, ev := range evs {
 		kind := KindOf(ev.Type)
 		if kind == "" {
 			continue
 		}
-		out = append(out, userstate.Change{EventID: ev.ID.String(), UserID: ev.UserID, ItemID: ev.ItemID, Kind: kind, At: ev.Time})
+		c := userstate.Change{EventID: ev.ID.String(), UserID: ev.UserID, ItemID: ev.ItemID, Kind: kind, At: ev.Time}
+		if freqKey != nil && kind == userstate.KindImpression && ev.AdToken != "" {
+			c.FreqKey = freqKey(ev)
+		}
+		out = append(out, c)
 	}
 	return out
 }

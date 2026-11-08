@@ -115,4 +115,66 @@ var (
 	ConsumerLag = reg(prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "recloop_consumer_lag", Help: "Records not yet committed by a consumer group.",
 	}, []string{"group", "topic"}))
+	// FreqCapTokens: ad_tokens of sponsored impressions the aggregator counted towards a
+	// frequency cap, or rejected (did not verify or named another impression).
+	FreqCapTokens = reg(prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "recloop_freq_cap_tokens_total", Help: "Sponsored impressions counted towards a frequency cap, or rejected.",
+	}, []string{"result"}))
+)
+
+// ---------------------------------------------------------------- ads and billing
+
+var (
+	// AdRequests by surface and outcome: filled (at least one sponsored slot), empty (no
+	// eligible ad), not_allowed (the degradation chain rules ads out), stale (no fresh campaign
+	// snapshot), timeout / error / skipped (the ads stage's Redis read).
+	AdRequests = reg(prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "recloop_ad_requests_total", Help: "Ad requests by surface and outcome.",
+	}, []string{"surface", "outcome"}))
+	// AdSlots served, by surface and position.
+	AdSlots = reg(prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "recloop_ad_slots_total", Help: "Sponsored slots served by surface and position.",
+	}, []string{"surface", "position"}))
+	// AdGates: campaigns held back by a serving gate (budget, freq_cap, pacing).
+	AdGates = reg(prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "recloop_ad_gate_total", Help: "Campaigns held back on a request, by gate.",
+	}, []string{"gate"}))
+
+	// BillingClicks by outcome (charged, duplicate_impression, duplicate_event, expired,
+	// mismatch, invalid, unknown_campaign).
+	BillingClicks = reg(prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "recloop_billing_clicks_total", Help: "Sponsored clicks billing processed, by outcome.",
+	}, []string{"outcome"}))
+	// BillingCents of new charges: billed, or unbilled (price - billed: the budget had run out,
+	// the overdelivery the platform absorbs, §9.4).
+	BillingCents = reg(prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "recloop_billing_cents_total", Help: "Cents of new charges: billed, or unbilled because the budget ran out.",
+	}, []string{"kind"}))
+	// BillingHandle: one click's processing time (verification and the charge transaction).
+	BillingHandle = reg(prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name: "recloop_billing_handle_seconds", Help: "Time to process one sponsored click.",
+		Buckets: []float64{.001, .002, .005, .01, .025, .05, .1, .25, .5, 1, 2, 5, 10, 30},
+	}))
+
+	// ReconcileRuns by result (ok, error).
+	ReconcileRuns = reg(prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "recloop_reconcile_runs_total", Help: "Reconciliation passes by result.",
+	}, []string{"result"}))
+	// ReconcileDays: campaign-days of the last pass by state: match, redis_behind (repaired),
+	// redis_ahead (must not happen), row_mismatch (budget row != ledger: must not happen).
+	ReconcileDays = reg(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "recloop_reconcile_campaign_days", Help: "Campaign-days of the last reconciliation pass by state.",
+	}, []string{"state"}))
+	// ReconcileRepairedCents: spend the reconciler added to Redis counters that had lost it.
+	ReconcileRepairedCents = reg(prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "recloop_reconcile_repaired_cents_total", Help: "Cents added to Redis spend counters by reconciliation.",
+	}))
+	// SpendCents of today (UTC) in the last pass: ledger (ad_charges) and redis.
+	SpendCents = reg(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "recloop_spend_cents", Help: "Today's ad spend by source, at the last reconciliation pass.",
+	}, []string{"source"}))
+	// ReconcileLastSuccess: unix time of the last pass without an error.
+	ReconcileLastSuccess = reg(prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "recloop_reconcile_last_success_timestamp_seconds", Help: "Unix time of the last successful reconciliation pass.",
+	}))
 )

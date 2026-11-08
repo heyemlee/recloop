@@ -13,6 +13,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/twmb/franz-go/pkg/kgo"
 
+	"github.com/heyemlee/recloop/serving/internal/adtoken"
 	"github.com/heyemlee/recloop/serving/internal/events"
 	"github.com/heyemlee/recloop/serving/internal/userstate"
 )
@@ -94,5 +95,62 @@ func TestStoreFailureIsReturnedForRetry(t *testing.T) {
 	served, _ := events.Served(1, uuid.Must(uuid.NewV7()), []byte(`{}`))
 	if err := a.Handle(context.Background(), []*kgo.Record{record(t, served)}); err != nil || f.calls != 1 {
 		t.Fatalf("served-only batch: err %v, calls %d", err, f.calls)
+	}
+}
+
+// Sponsored impressions count towards the campaign's frequency cap of the serving day when
+// their token verifies and names the impression; expired tokens count (the impression
+// happened), forged or misplaced ones do not, and a redelivered record counts once.
+func TestSponsoredImpressionsCountTowardsTheCap(t *testing.T) {
+	a, state, _ := newAggregator(t)
+	keys, err := adtoken.ParseKeys("k1:aggregator-test-key-0123456789abcdef01234")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.FreqKey = FreqKeys(keys)
+	served := time.Now().Add(-time.Minute)
+	imp := func(pos int, item int32, token func(adtoken.Claims) string) events.Event {
+		ev := clientEvent(events.TypeImpression, 5, item)
+		rid := uuid.Must(uuid.NewV7())
+		ev.RequestID = uuid.NullUUID{UUID: rid, Valid: true}
+		ev.ImpressionID = events.ImpressionID(rid, pos)
+		ev.AdToken = token(adtoken.Claims{RequestID: rid, Position: pos, CampaignID: 9, ItemID: item, PriceCents: 12, UserID: 5})
+		return ev
+	}
+	sign := func(c adtoken.Claims) string {
+		tok, err := keys.Sign(c, served)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tok
+	}
+	ok := imp(3, 40, sign)
+	expired := imp(9, 41, func(c adtoken.Claims) string {
+		tok, _ := keys.Sign(c, served.Add(-2*adtoken.TTL))
+		return tok
+	})
+	misplaced := imp(3, 42, func(c adtoken.Claims) string { c.Position = 9; return sign(c) })
+	forged := imp(3, 43, func(c adtoken.Claims) string { return sign(c) + "x" })
+	recs := []*kgo.Record{record(t, ok), record(t, ok), record(t, expired), record(t, misplaced), record(t, forged)}
+	if _, err := a.HandleRecords(context.Background(), recs); err != nil {
+		t.Fatal(err)
+	}
+	day := events.Day(served)
+	n, err := state.Frequency(context.Background(), []string{userstate.FreqKey(5, 9, day)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// ok once (redelivered) + expired (served two TTLs earlier, possibly the day before).
+	want := int64(1)
+	if events.Day(served.Add(-2*adtoken.TTL)).Equal(day) {
+		want = 2
+	}
+	if n[0] != want {
+		t.Fatalf("frequency %d, want %d", n[0], want)
+	}
+	// Every impression still marks its item as seen.
+	uc, _ := state.Read(context.Background(), 5, time.Now())
+	if !uc.Seen[40] || !uc.Seen[41] || !uc.Seen[42] || !uc.Seen[43] {
+		t.Fatalf("seen %v", uc.Seen)
 	}
 }

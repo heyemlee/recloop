@@ -68,6 +68,20 @@ export function DebugPanel({ resp }: { resp: RecResponse }) {
               {d.filters.seed > 0 && `, current item ${d.filters.seed}`} · brand-cap promotions{" "}
               {d.diversity_promotions} · backfill {d.backfill}
             </div>
+            {d.ads && (
+              <div data-testid="debug-ads" className="mt-2 text-muted-foreground">
+                ads: <span className="text-foreground">{d.ads.outcome}</span> · {d.ads.stats.campaigns} active campaigns,{" "}
+                {d.ads.stats.in_flight} in flight, {d.ads.stats.candidates} candidates · held back: budget{" "}
+                {d.ads.stats.budget}, frequency cap {d.ads.stats.freq_cap}, pacing {d.ads.stats.pacing}, no item{" "}
+                {d.ads.stats.no_item} · margin {d.ads.policy.safety_margin_clicks} clicks
+                {d.ads.policy.pacing && " · paced"}
+                {(d.ads.slots ?? []).map((s) => (
+                  <span key={s.pos} className="ml-2 font-mono">
+                    #{s.pos}: campaign {s.campaign_id} item {s.item_id} {s.price}¢
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
           <div>
             <div className="mb-1 text-muted-foreground">

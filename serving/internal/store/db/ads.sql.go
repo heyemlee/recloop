@@ -28,6 +28,45 @@ func (q *Queries) AddSpend(ctx context.Context, arg AddSpendParams) error {
 	return err
 }
 
+const chargesOfDay = `-- name: ChargesOfDay :many
+SELECT click_event_id, billed_cents
+FROM ad_charges
+WHERE campaign_id = $1 AND day = $2 AND billed_cents > 0
+ORDER BY click_event_id
+`
+
+type ChargesOfDayParams struct {
+	CampaignID int64
+	Day        pgtype.Date
+}
+
+type ChargesOfDayRow struct {
+	ClickEventID pgtype.UUID
+	BilledCents  int32
+}
+
+// The charges of one campaign-day that moved money, each with its click event (the key of
+// its Redis dedup marker).
+func (q *Queries) ChargesOfDay(ctx context.Context, arg ChargesOfDayParams) ([]ChargesOfDayRow, error) {
+	rows, err := q.db.Query(ctx, chargesOfDay, arg.CampaignID, arg.Day)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ChargesOfDayRow
+	for rows.Next() {
+		var i ChargesOfDayRow
+		if err := rows.Scan(&i.ClickEventID, &i.BilledCents); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const claimClick = `-- name: ClaimClick :one
 
 INSERT INTO ad_clicks (
@@ -387,6 +426,61 @@ func (q *Queries) LockBudgetDay(ctx context.Context, arg LockBudgetDayParams) (L
 	var i LockBudgetDayRow
 	err := row.Scan(&i.BudgetCents, &i.SpentCents)
 	return i, err
+}
+
+const reconcileDays = `-- name: ReconcileDays :many
+
+SELECT b.campaign_id, b.day, b.budget_cents, b.spent_cents,
+       COALESCE(l.charges, 0)::int AS charges,
+       COALESCE(l.billed_cents, 0)::bigint AS ledger_cents
+FROM campaign_budget_daily AS b
+LEFT JOIN (
+  SELECT campaign_id, day, count(*) AS charges, sum(billed_cents) AS billed_cents
+  FROM ad_charges
+  WHERE day = ANY($1::date[])
+  GROUP BY campaign_id, day
+) AS l ON l.campaign_id = b.campaign_id AND l.day = b.day
+WHERE b.day = ANY($1::date[])
+ORDER BY b.campaign_id, b.day
+`
+
+type ReconcileDaysRow struct {
+	CampaignID  int64
+	Day         pgtype.Date
+	BudgetCents int32
+	SpentCents  int32
+	Charges     int32
+	LedgerCents int64
+}
+
+// ---------------------------------------------------------------- reconciliation (§9.4)
+// Every budget row of the given days with its spend recomputed from the ledger. One statement,
+// one snapshot: the row and its charges are written by the same transaction, so they agree.
+func (q *Queries) ReconcileDays(ctx context.Context, days []pgtype.Date) ([]ReconcileDaysRow, error) {
+	rows, err := q.db.Query(ctx, reconcileDays, days)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ReconcileDaysRow
+	for rows.Next() {
+		var i ReconcileDaysRow
+		if err := rows.Scan(
+			&i.CampaignID,
+			&i.Day,
+			&i.BudgetCents,
+			&i.SpentCents,
+			&i.Charges,
+			&i.LedgerCents,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const reportBudgetDays = `-- name: ReportBudgetDays :many

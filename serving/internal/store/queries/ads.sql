@@ -159,3 +159,29 @@ WHERE i.type = 'impression'
         'campaign_id', sqlc.arg(campaign_id)::bigint))
 GROUP BY s.event_day
 ORDER BY s.event_day;
+
+-- ---------------------------------------------------------------- reconciliation (§9.4)
+
+-- Every budget row of the given days with its spend recomputed from the ledger. One statement,
+-- one snapshot: the row and its charges are written by the same transaction, so they agree.
+-- name: ReconcileDays :many
+SELECT b.campaign_id, b.day, b.budget_cents, b.spent_cents,
+       COALESCE(l.charges, 0)::int AS charges,
+       COALESCE(l.billed_cents, 0)::bigint AS ledger_cents
+FROM campaign_budget_daily AS b
+LEFT JOIN (
+  SELECT campaign_id, day, count(*) AS charges, sum(billed_cents) AS billed_cents
+  FROM ad_charges
+  WHERE day = ANY(sqlc.arg(days)::date[])
+  GROUP BY campaign_id, day
+) AS l ON l.campaign_id = b.campaign_id AND l.day = b.day
+WHERE b.day = ANY(sqlc.arg(days)::date[])
+ORDER BY b.campaign_id, b.day;
+
+-- The charges of one campaign-day that moved money, each with its click event (the key of
+-- its Redis dedup marker).
+-- name: ChargesOfDay :many
+SELECT click_event_id, billed_cents
+FROM ad_charges
+WHERE campaign_id = $1 AND day = $2 AND billed_cents > 0
+ORDER BY click_event_id;

@@ -15,9 +15,11 @@ RETURNING event_id;
 -- name: StockOf :many
 SELECT item_id, stock FROM items WHERE item_id = ANY(sqlc.arg(item_ids)::int[]);
 
--- Client events of one day in event_id (= UUIDv7 time) order, for rebuilding Redis.
+-- Client events of one day in event_id (= UUIDv7 time) order, for rebuilding Redis. The
+-- ad_token of a sponsored impression (kept in the payload) rebuilds its frequency-cap counter.
 -- name: ReplayEvents :many
-SELECT event_id, type, user_id, item_id
+SELECT event_id, type, user_id, item_id, impression_id, server_ts,
+       COALESCE(payload ->> 'ad_token', '')::text AS ad_token
 FROM events_raw
 WHERE event_day = sqlc.arg(event_day)
   AND type IN ('impression', 'click', 'add_to_cart', 'purchase')
