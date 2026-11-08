@@ -19,6 +19,12 @@ def database_url() -> str:
     return os.environ.get("DATABASE_URL", DEFAULT_DATABASE_URL)
 
 
+def interactions_parquet() -> Path:
+    """The dataset users' reviews with their split, as `make data` writes them (read-only)."""
+    default = ROOT / "data" / "processed" / "interactions.parquet"
+    return Path(os.environ.get("RECLOOP_INTERACTIONS", default))
+
+
 def text_model_dir() -> Path:
     """bge-small-en-v1.5 as downloaded by `make data` (ml.data.download pins and checksums it)."""
     return Path(os.environ.get("RECLOOP_TEXT_MODEL", ROOT / "data" / "hf" / "bge-small-en-v1.5"))

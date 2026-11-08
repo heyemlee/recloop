@@ -8,6 +8,7 @@ dependencies = [
     "anthropic==2.3.0",       # 2.x sends API version 2026-10-21; released 2026-10-23
     "numpy==2.5.4",           # same as ml/
     "psycopg[binary]==3.3.8", # same as ml/
+    "pyarrow==26.0.1",        # same as ml/; reads the dataset users' purchases (history.py)
     "pydantic>=2.9",
 ]
 

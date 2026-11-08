@@ -4,7 +4,8 @@ The shopping assistant (docs/design.md §10). A language model turns the shopper
 constraints (validated, one retry), may judge device compatibility from quoted listing text,
 and writes one-line reasons; the code searches the catalog (BM25 + pgvector, RRF, SQL filters
 on price, stock and category), checks every constraint on the item rows, and renders the reply
-from those rows.
+from those rows. "Last time" means what the store's feed counts as bought: orders plus the
+dataset users' training-period reviews (`history.py`).
 
 `eval/` holds the 150-case evaluation set, the no-LLM baseline and the harness that writes
 `docs/results/agent.md` (`make agent-eval`). Language-model runs are opt-in and paid

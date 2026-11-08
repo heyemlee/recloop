@@ -2,14 +2,15 @@
 
   * search_items(query, filters): hybrid search with SQL filters (`Catalog.search`).
   * get_item_details(ids): current rows of the items table.
-  * get_purchase_history(user_id): the user's orders, most recent first.
+  * get_purchase_history(user_id): the user's purchases, most recent first (orders by default;
+    in the store also the dataset users' training period, see history.py).
 
 The trace is what the evaluation scores as tool-call correctness: the expected calls follow from
 the gold constraints (history only when the request refers to an earlier purchase, the filters
 equal to the gold constraints, no repeated or extra calls).
 
-`get_recommendations` (surface=chat) and the sponsored slot come with the Go api changes after
-M2 and M3 are merged.
+`get_recommendations` (surface=chat) and the sponsored slot come after M3's online part (ads in
+the mixer, /internal/ads/select) is merged.
 """
 
 from __future__ import annotations
@@ -35,7 +36,8 @@ class ToolCall:
 @dataclass
 class Tools:
     catalog: Catalog
-    # Where get_purchase_history reads from: the orders table by default; the evaluation passes
+    # Where get_purchase_history reads from: the orders table by default; the store passes
+    # history.StorePurchases (orders plus the dataset users' training period), the evaluation
     # each case's own purchase list.
     purchases: PurchaseSource | None = None
     search_mode: str = "hybrid"

@@ -81,6 +81,7 @@ testdata/                   bucket_vectors.json, shared by the Go and Python buc
 agent/                      Python 3.12 uv project (own .venv): the shopping assistant (design §10)
   agent, parsing, schema    one turn; LLM / rule parsing into ShoppingRequest (Pydantic)
   catalog, tools, text      search_items (BM25 + pgvector, RRF, SQL filters), details, history
+  history                   purchase history: orders + the dataset users' training period
   constraints, compat       code checks of every constraint; device matching with evidence
   llm, prompts, render      Claude Messages API adapter, prompts, replies rendered from rows
   eval/                     cases.jsonl (150, generated), harness, metrics, judge, report
@@ -266,7 +267,8 @@ interpreter at exit: `ORT_DISABLE_TELEMETRY=1` (Makefile, model-server image, `m
 - One turn (`agent/agent.py`): parse -> `get_purchase_history` (only when the request refers to
   an earlier purchase) -> `search_items` -> `get_item_details` -> code checks -> device
   matching -> reasons -> reply rendered from the item rows (titles, prices). The model never
-  picks or orders items; `surface=chat` recommendations and the sponsored slot come later.
+  picks or orders items; `surface=chat` recommendations and the sponsored slot come after M3's
+  online part is merged.
 - Parsing: `ShoppingRequest` (category key from `agent/taxonomy.py`, budget in cents, brands,
   excluded brands, genuine-only, device, last-purchase relation, search text). A reply that
   fails validation goes back once with the error; a second failure ends the turn.
@@ -277,10 +279,16 @@ interpreter at exit: `ORT_DISABLE_TELEMETRY=1` (Makefile, model-server image, `m
   written, or a bare number in a list opened by the series prefix or a family word); the model
   judges the rest only when the code confirmed fewer than 3, and its "compatible" needs a quote
   that is in the named field and contains the model number. Otherwise: "not confirmed".
-- Search: BM25 in-process on `agent/text.py` tokens (`WF-2760` = `WF2760` = 'wf2760'), exact
-  pgvector KNN of the bge query embedding (with bge's query instruction), RRF k = 60, 30 results.
+- Search: BM25 in-process on `agent/text.py` tokens (`WF-2760` = `WF2760` = 'wf2760'; there is
+  no tsvector column, PostgreSQL's `english` parser splits model numbers), exact pgvector KNN of
+  the bge query embedding (with bge's query instruction), RRF k = 60, 30 results.
   The query encoder is bge-small-en-v1.5 at ml/'s library versions, its files checked against
   `ml/data/download.py`; `RECLOOP_TEXT_MODEL` points at another copy of the model directory.
+- Purchase history (`agent/history.py`): in the store it is what the feed counts as bought,
+  `orders` plus the dataset users' training-period interactions (the items `make seed` puts in
+  `u:{uid}:bought`), read once from `data/processed/interactions.parquet`
+  (`RECLOOP_INTERACTIONS`). A store-facing agent passes `StorePurchases` as `purchases`; without
+  it the agent reads `orders` only, and the evaluation passes each case's own list.
 - Database access is a read-only session (`SET SESSION CHARACTERISTICS AS TRANSACTION READ
   ONLY`) on `items` and `orders`.
 - Claude (`agent/llm.py`, anthropic 2.3.0): structured outputs, effort low, cached system
