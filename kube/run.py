@@ -14,7 +14,7 @@
     keda      billing     PostgreSQL 200 ms slower for billing (pg-proxy) for 2 minutes, with
                           sponsored campaigns live: billing's lag, replicas
               aggregator  the aggregator paused (KEDA paused-replicas 0) for 90 s, then resumed:
-                          the backlog's drain with KEDA, and with KEDA capped at one replica
+                          the backlog's drain (--capped: also with KEDA capped at one replica)
 
 Every run starts from the same state: the consumers have caught up, both Redis instances are
 reseeded (ml.data.seed_redis), the autoscaled workloads are back at one replica, the model
@@ -558,11 +558,11 @@ def plan(args) -> list[tuple]:
         out += [("hpa", "step", r) for r in reps]
     if "keda" in args.only:
         for r in reps:
-            out += [
-                ("keda", "billing", r),
-                ("keda", "aggregator", r),
-                ("keda", "aggregator-capped", r),
-            ]
+            out += [("keda", "billing", r), ("keda", "aggregator", r)]
+            # The aggregator drained its backlog before KEDA's first poll in the smoke runs
+            # (2026-11-08): the capped comparison only on request.
+            if args.capped:
+                out.append(("keda", "aggregator-capped", r))
     return out
 
 
@@ -585,6 +585,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--pause-seconds", type=int, default=90)
     p.add_argument("--settle-seconds", type=int, default=240)
     p.add_argument("--smoke", action="store_true", help="one short run of each kind")
+    p.add_argument("--capped", action="store_true", help="also the aggregator capped at 1 pod")
     args = p.parse_args(argv)
     if args.smoke:
         short = {"repeats": 1, "rollout_seconds": 90, "hpa_hold": 120, "keda_seconds": 180,
