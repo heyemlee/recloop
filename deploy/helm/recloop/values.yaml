@@ -50,9 +50,9 @@ api:
     BREAKER_WINDOW: time:10s:20:10
     ACCESS_LOG: "0"
     GOMEMLIMIT: 440MiB
-    # GOMAXPROCS stays Go's default under the limit (2). GOMAXPROCS=1 was tried on 2026-11-08:
-    # one thread made a pod's requests queue behind each other (user-state and page budgets
-    # missed, the HPA run degraded more, not less).
+    # GOMAXPROCS stays Go's default under the limit (2). GOMAXPROCS=1 was tried once on
+    # 2026-11-08 and did not help (more user-state and page budgets missed; the machine was
+    # getting busier during that run, so it is no verdict).
   # requests = limits for CPU: a pod gets exactly half a core, busy or not, so the latency at a
   # given rate per pod is reproducible and the HPA's utilisation (usage / request) means
   # "share of the pod's core". Half a core so that one pod saturates at a rate the load
