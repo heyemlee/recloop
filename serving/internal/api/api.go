@@ -21,6 +21,7 @@ import (
 	"github.com/heyemlee/recloop/serving/internal/experiment"
 	"github.com/heyemlee/recloop/serving/internal/metrics"
 	"github.com/heyemlee/recloop/serving/internal/mixer"
+	"github.com/heyemlee/recloop/serving/internal/ranking"
 	"github.com/heyemlee/recloop/serving/internal/resilience"
 	"github.com/heyemlee/recloop/serving/internal/userstate"
 )
@@ -28,7 +29,18 @@ import (
 // Server holds the api's dependencies.
 type Server struct {
 	Catalog *catalog.Catalog
+	// Bundle is the bundle the api started with. Bundles, if set, holds every version it
+	// serves (active, canary, the previous one for a rollback; design §6) and Bundle is then
+	// only its first active version.
 	Bundle  *bundle.Bundle
+	Bundles *bundle.Registry
+	// Rank calls the model server's Rank for bundles with ranking models (M4); nil: RRF only
+	// and FixedPCTR. DefaultRanker orders the list when the rank variant does not say
+	// ("rrf" when empty).
+	Rank          *ranking.Client
+	DefaultRanker string
+	// Release runs the model release steps of the admin api (nil: no admin endpoints).
+	Release Releaser
 	Users   userstate.Store
 	Pages   cache.Pages
 	Cands   *cache.CandidateCache // nil: candidate cache off
@@ -85,6 +97,7 @@ func (s *Server) Handler() http.Handler {
 	// Internal: for the shopping assistant's service, not the browser (the web app proxies
 	// /api/v1/* only).
 	mux.HandleFunc("POST /internal/ads/select", s.selectChatAds)
+	s.adminRoutes(mux)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
@@ -154,7 +167,7 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 		mode = "naive"
 	}
 	writeJSON(w, status, map[string]any{
-		"bundle": s.Bundle.Version, "dependencies": deps, "mode": mode, "candidate_cache": s.Cands != nil,
+		"bundle": s.active().Version, "dependencies": deps, "mode": mode, "candidate_cache": s.Cands != nil,
 	})
 }
 

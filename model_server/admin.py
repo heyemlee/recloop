@@ -12,6 +12,14 @@ Admin HTTP (MODEL_SERVER_ADMIN_PORT, default 18082):
     GET  /fault     current fault settings
     PUT  /fault     {"delay_ms": 200, "probability": 0.3}; {"delay_ms": 0} turns it off
     GET  /healthz
+    Bundles (M4, design §6; the api's release endpoints drive these):
+    GET    /bundles               the loaded versions, the default, loads in progress or failed
+    POST   /bundles               {"version": "...", "wait": true}: load <bundles root>/<version>
+                                  in the background and validate it; 202 while loading, 200 when
+                                  ready, 422 when it failed validation
+    GET    /bundles/<version>     {"state": "ready" | "loading" | "failed: ..." | "absent"}
+    PUT    /bundles/default       {"version": "..."}: the version requests without a pin get
+    DELETE /bundles/<version>     unload (not the default)
 """
 
 from __future__ import annotations
@@ -46,7 +54,14 @@ DEADLINE_ABORTS = Counter(
     "Calls given up because the caller's deadline had passed, by where it was noticed.",
     ["where"],
 )
-INFLIGHT = Gauge("recloop_ms_inflight", "Retrieve calls being handled.")
+INFLIGHT = Gauge("recloop_ms_inflight", "Retrieve and Rank calls being handled.")
+CALLS = Counter("recloop_ms_calls_total", "Calls by method and gRPC status code.", ["method", "code"])
+RANK_SECONDS = Histogram(
+    "recloop_ms_rank_seconds",
+    "Rank latency inside the model server by stage (features, scores, ads, total).",
+    ["stage"],
+    buckets=BUCKETS,
+)
 
 
 @dataclass
@@ -93,7 +108,7 @@ class Faults:
             return s.delay_ms / 1000.0 if self._rng.random() < s.probability else 0.0
 
 
-def _handler(faults: Faults):
+def _handler(faults: Faults, registry=None):
     class Handler(BaseHTTPRequestHandler):
         def _send(self, code: int, body: bytes, ctype: str = "application/json") -> None:
             self.send_response(code)
@@ -102,33 +117,73 @@ def _handler(faults: Faults):
             self.end_headers()
             self.wfile.write(body)
 
+        def _json(self, code: int, obj) -> None:
+            self._send(code, json.dumps(obj).encode())
+
+        def _body(self) -> dict:
+            n = int(self.headers.get("Content-Length", "0"))
+            body = json.loads(self.rfile.read(n) or b"{}")
+            if not isinstance(body, dict):
+                raise ValueError("the body must be a JSON object")
+            return body
+
         def do_GET(self):  # noqa: N802 (http.server method name)
             if self.path == "/metrics":
                 self._send(200, generate_latest(), CONTENT_TYPE_LATEST)
             elif self.path == "/fault":
-                self._send(200, json.dumps(asdict(faults.get())).encode())
+                self._json(200, asdict(faults.get()))
             elif self.path == "/healthz":
                 self._send(200, b'{"status": "ok"}')
+            elif registry is not None and self.path == "/bundles":
+                self._json(200, registry.status())
+            elif registry is not None and self.path.startswith("/bundles/"):
+                v = self.path.removeprefix("/bundles/")
+                self._json(200, {"version": v, "state": registry.state(v)})
             else:
-                self._send(404, b'{"error": "not found"}')
+                self._json(404, {"error": "not found"})
 
         def do_PUT(self):  # noqa: N802
-            if self.path != "/fault":
-                self._send(404, b'{"error": "not found"}')
+            try:
+                body = self._body()
+                if self.path == "/fault":
+                    s = faults.set(float(body.get("delay_ms", 0)), float(body.get("probability", 0)))
+                    log.warning("fault injection set: delay %.0f ms, probability %.2f", s.delay_ms, s.probability)
+                    self._json(200, asdict(s))
+                elif registry is not None and self.path == "/bundles/default":
+                    registry.set_default(str(body["version"]))
+                    self._json(200, {"default": registry.default.version})
+                else:
+                    self._json(404, {"error": "not found"})
+            except KeyError as e:
+                self._json(404, {"error": f"not loaded: {e}"})
+            except (ValueError, TypeError) as e:
+                self._json(400, {"error": str(e)})
+
+        def do_POST(self):  # noqa: N802
+            if registry is None or self.path != "/bundles":
+                self.do_PUT()  # POST /fault, as before
                 return
             try:
-                n = int(self.headers.get("Content-Length", "0"))
-                body = json.loads(self.rfile.read(n) or b"{}")
-                s = faults.set(float(body.get("delay_ms", 0)), float(body.get("probability", 0)))
-            except (ValueError, TypeError) as e:
-                self._send(400, json.dumps({"error": str(e)}).encode())
+                body = self._body()
+                state = registry.load(str(body["version"]), wait=bool(body.get("wait", False)))
+            except (KeyError, ValueError, TypeError) as e:
+                self._json(400, {"error": str(e)})
                 return
-            log.warning(
-                "fault injection set: delay %.0f ms, probability %.2f", s.delay_ms, s.probability
-            )
-            self._send(200, json.dumps(asdict(s)).encode())
+            code = 200 if state == "ready" else 202 if state == "loading" else 422
+            self._json(code, {"version": body["version"], "state": state})
 
-        do_POST = do_PUT  # noqa: N815
+        def do_DELETE(self):  # noqa: N802
+            if registry is None or not self.path.startswith("/bundles/"):
+                self._json(404, {"error": "not found"})
+                return
+            v = self.path.removeprefix("/bundles/")
+            try:
+                registry.unload(v)
+                self._json(200, {"version": v, "state": "absent"})
+            except KeyError:
+                self._json(404, {"error": f"{v} is not loaded"})
+            except ValueError as e:
+                self._json(409, {"error": str(e)})
 
         def log_message(self, *_args) -> None:  # keep the server log quiet
             return
@@ -136,9 +191,9 @@ def _handler(faults: Faults):
     return Handler
 
 
-def serve_admin(faults: Faults, host: str, port: int) -> ThreadingHTTPServer:
+def serve_admin(faults: Faults, host: str, port: int, registry=None) -> ThreadingHTTPServer:
     """Start the admin HTTP server in a daemon thread; returns it (server_address has the port)."""
-    httpd = ThreadingHTTPServer((host, port), _handler(faults))
+    httpd = ThreadingHTTPServer((host, port), _handler(faults, registry))
     threading.Thread(target=httpd.serve_forever, name="admin-http", daemon=True).start()
     return httpd
 

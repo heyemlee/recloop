@@ -36,10 +36,60 @@ class Scored(_message.Message):
     score: float
     def __init__(self, item_id: _Optional[int] = ..., score: _Optional[float] = ...) -> None: ...
 
+class SourceHit(_message.Message):
+    __slots__ = ("source", "rank", "score")
+    SOURCE_FIELD_NUMBER: _ClassVar[int]
+    RANK_FIELD_NUMBER: _ClassVar[int]
+    SCORE_FIELD_NUMBER: _ClassVar[int]
+    source: str
+    rank: int
+    score: float
+    def __init__(self, source: _Optional[str] = ..., rank: _Optional[int] = ..., score: _Optional[float] = ...) -> None: ...
+
+class Candidate(_message.Message):
+    __slots__ = ("item_id", "hits")
+    ITEM_ID_FIELD_NUMBER: _ClassVar[int]
+    HITS_FIELD_NUMBER: _ClassVar[int]
+    item_id: int
+    hits: _containers.RepeatedCompositeFieldContainer[SourceHit]
+    def __init__(self, item_id: _Optional[int] = ..., hits: _Optional[_Iterable[_Union[SourceHit, _Mapping]]] = ...) -> None: ...
+
+class AdCandidate(_message.Message):
+    __slots__ = ("item_id", "relevance")
+    ITEM_ID_FIELD_NUMBER: _ClassVar[int]
+    RELEVANCE_FIELD_NUMBER: _ClassVar[int]
+    item_id: int
+    relevance: float
+    def __init__(self, item_id: _Optional[int] = ..., relevance: _Optional[float] = ...) -> None: ...
+
 class RankRequest(_message.Message):
-    __slots__ = ()
-    def __init__(self) -> None: ...
+    __slots__ = ("history", "candidates", "ads", "pin_version")
+    HISTORY_FIELD_NUMBER: _ClassVar[int]
+    CANDIDATES_FIELD_NUMBER: _ClassVar[int]
+    ADS_FIELD_NUMBER: _ClassVar[int]
+    PIN_VERSION_FIELD_NUMBER: _ClassVar[int]
+    history: _containers.RepeatedScalarFieldContainer[int]
+    candidates: _containers.RepeatedCompositeFieldContainer[Candidate]
+    ads: _containers.RepeatedCompositeFieldContainer[AdCandidate]
+    pin_version: str
+    def __init__(self, history: _Optional[_Iterable[int]] = ..., candidates: _Optional[_Iterable[_Union[Candidate, _Mapping]]] = ..., ads: _Optional[_Iterable[_Union[AdCandidate, _Mapping]]] = ..., pin_version: _Optional[str] = ...) -> None: ...
 
 class RankResponse(_message.Message):
-    __slots__ = ()
-    def __init__(self) -> None: ...
+    __slots__ = ("model_version", "feature_names", "features", "scores", "ad_features", "ad_pctr", "ranker", "pctr_model")
+    MODEL_VERSION_FIELD_NUMBER: _ClassVar[int]
+    FEATURE_NAMES_FIELD_NUMBER: _ClassVar[int]
+    FEATURES_FIELD_NUMBER: _ClassVar[int]
+    SCORES_FIELD_NUMBER: _ClassVar[int]
+    AD_FEATURES_FIELD_NUMBER: _ClassVar[int]
+    AD_PCTR_FIELD_NUMBER: _ClassVar[int]
+    RANKER_FIELD_NUMBER: _ClassVar[int]
+    PCTR_MODEL_FIELD_NUMBER: _ClassVar[int]
+    model_version: str
+    feature_names: _containers.RepeatedScalarFieldContainer[str]
+    features: _containers.RepeatedScalarFieldContainer[float]
+    scores: _containers.RepeatedScalarFieldContainer[float]
+    ad_features: _containers.RepeatedScalarFieldContainer[float]
+    ad_pctr: _containers.RepeatedScalarFieldContainer[float]
+    ranker: str
+    pctr_model: str
+    def __init__(self, model_version: _Optional[str] = ..., feature_names: _Optional[_Iterable[str]] = ..., features: _Optional[_Iterable[float]] = ..., scores: _Optional[_Iterable[float]] = ..., ad_features: _Optional[_Iterable[float]] = ..., ad_pctr: _Optional[_Iterable[float]] = ..., ranker: _Optional[str] = ..., pctr_model: _Optional[str] = ...) -> None: ...

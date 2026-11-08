@@ -20,12 +20,16 @@ type Pop struct{ B *bundle.Bundle }
 func (Pop) Name() string { return "pop" }
 
 func (p Pop) Recall(_ context.Context, req Request) (Output, error) {
-	n := min(req.K, len(p.B.Pop))
+	b := p.B
+	if req.Bundle != nil {
+		b = req.Bundle
+	}
+	n := min(req.K, len(b.Pop))
 	out := make([]Candidate, n)
 	for i := 0; i < n; i++ {
-		out[i] = Candidate{ItemID: p.B.Pop[i], Score: float64(p.B.PopCounts[i]), Via: -1}
+		out[i] = Candidate{ItemID: b.Pop[i], Score: float64(b.PopCounts[i]), Via: -1}
 	}
-	return Output{Items: out, Version: p.B.Version}, nil
+	return Output{Items: out, Version: b.Version}, nil
 }
 
 // ---------------------------------------------------------------- ItemCF
@@ -43,6 +47,9 @@ func (c ItemCF) Recall(ctx context.Context, req Request) (Output, error) {
 	seeds := Recent(req.History, HistoryWindow)
 	if req.Surface == SurfaceItem {
 		seeds = []int32{req.Seed}
+	}
+	if req.Bundle != nil {
+		c.B = req.Bundle
 	}
 	return Output{Items: c.Score(seeds, req.K), Version: c.B.Version}, ctx.Err()
 }
@@ -95,7 +102,9 @@ func (s SASRec) Recall(ctx context.Context, req Request) (Output, error) {
 	if len(history) == 0 {
 		return Output{}, nil // cold start: nothing to encode
 	}
-	resp, err := s.Client.Retrieve(ctx, &pb.RetrieveRequest{History: history, K: int32(req.K)})
+	resp, err := s.Client.Retrieve(ctx, &pb.RetrieveRequest{
+		History: history, K: int32(req.K), AdItemIds: req.AdItems, PinVersion: req.PinVersion,
+	})
 	if err != nil {
 		return Output{}, err
 	}
@@ -103,7 +112,14 @@ func (s SASRec) Recall(ctx context.Context, req Request) (Output, error) {
 	for i, o := range resp.Organic {
 		out[i] = Candidate{ItemID: o.ItemId, Score: float64(o.Score), Via: -1}
 	}
-	return Output{Items: out, Version: resp.ModelVersion}, nil
+	var adScores map[int32]float32
+	if len(resp.Ads) > 0 {
+		adScores = make(map[int32]float32, len(resp.Ads))
+		for _, a := range resp.Ads {
+			adScores[a.ItemId] = a.Score
+		}
+	}
+	return Output{Items: out, Version: resp.ModelVersion, AdScores: adScores}, nil
 }
 
 // ---------------------------------------------------------------- text

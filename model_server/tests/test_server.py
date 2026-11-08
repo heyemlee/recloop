@@ -137,7 +137,7 @@ def test_grpc_errors(stub):
     assert e.value.code() == grpc.StatusCode.INVALID_ARGUMENT
     with pytest.raises(grpc.RpcError) as e:
         s.Rank(pb.RankRequest(), timeout=5)
-    assert e.value.code() == grpc.StatusCode.UNIMPLEMENTED
+    assert e.value.code() == grpc.StatusCode.FAILED_PRECONDITION  # a bundle without ranking files
     health = health_pb2_grpc.HealthStub(channel)
     resp = health.Check(health_pb2.HealthCheckRequest(service=SERVICE_NAME), timeout=5)
     assert resp.status == health_pb2.HealthCheckResponse.SERVING

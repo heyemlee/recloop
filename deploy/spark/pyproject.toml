@@ -1,0 +1,21 @@
+[project]
+name = "recloop-spark"
+version = "0.1.0"
+description = "RecLoop M4: the environment of the training-sample job (ml/samples), PySpark in local mode"
+requires-python = ">=3.12,<3.13"
+# Only what ml/samples/job.py and its test import. pyarrow and pandas are the versions of
+# ml/uv.lock, so the export (on the host, ml environment) and the job read the same files.
+dependencies = [
+    "pandas==3.1.1",
+    "pyarrow==26.0.1",
+    "pyspark>=4.2.1,<4.3",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==9.2.0",
+]
+
+[tool.uv]
+# Not an installable package: the image runs `python -m ml.samples.job` from the mounted repo.
+package = false

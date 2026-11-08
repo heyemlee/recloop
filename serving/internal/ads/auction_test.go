@@ -127,7 +127,7 @@ func TestQuantizePCTR(t *testing.T) {
 
 func TestFixedPCTR(t *testing.T) {
 	got, err := ads.FixedPCTR(0.02).PredictCTR(context.Background(), ads.PCTRRequest{ItemIDs: []int32{1, 2, 3}})
-	if err != nil || len(got) != 3 || got[2] != 0.02 {
+	if err != nil || len(got.CTR) != 3 || got.CTR[2] != 0.02 || got.Model != ads.PCTRFixed || got.Features != nil {
 		t.Fatalf("%v %v", got, err)
 	}
 	if _, err := ads.FixedPCTR(1.5).PredictCTR(context.Background(), ads.PCTRRequest{}); err == nil {

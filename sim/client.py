@@ -65,6 +65,13 @@ class Api:
         except json.JSONDecodeError:
             return status, None
 
+    def put_json(self, path: str, doc) -> tuple[int, dict | None]:
+        status, data, _ = self._request("PUT", path, json.dumps(doc).encode())
+        try:
+            return status, json.loads(data) if data else None
+        except json.JSONDecodeError:
+            return status, None
+
     def delete(self, path: str) -> int:
         status, _, _ = self._request("DELETE", path)
         return status

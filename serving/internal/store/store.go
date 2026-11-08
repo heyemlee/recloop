@@ -118,10 +118,30 @@ func (s *Store) RegisterActiveModel(ctx context.Context, version, uri string, ma
 		if err := q.RetireOtherModelVersions(ctx, version); err != nil {
 			return err
 		}
-		return q.UpsertActiveModelVersion(ctx, db.UpsertActiveModelVersionParams{
+		if err := q.UpsertActiveModelVersion(ctx, db.UpsertActiveModelVersionParams{
 			Version: version, ArtifactUri: uri, Manifest: manifest,
+		}); err != nil {
+			return err
+		}
+		// The record of releases (M4) starts with the version the api came up with.
+		return q.InsertModelVersionEvent(ctx, db.InsertModelVersionEventParams{
+			Version: version, ToStatus: "active", Actor: "api-startup", Note: "no active version yet: the startup bundle " + uri,
 		})
 	})
+}
+
+// ActiveModel is the version model_versions marks active ("" if there is none).
+func (s *Store) ActiveModel(ctx context.Context) (string, error) {
+	all, err := s.ModelVersions(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, v := range all {
+		if v.Status == "active" {
+			return v.Version, nil
+		}
+	}
+	return "", nil
 }
 
 // ---------------------------------------------------------------- text similarity

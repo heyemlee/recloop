@@ -7,6 +7,7 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "faiss-cpu>=1.9",
     "fire>=0.7",              # MiniOneRec's calc.py
+    "lightgbm>=4.7",          # M4: LambdaRank ranker (built without OpenMP, see [tool.uv])
     "numpy>=2.1",
     "onnx>=1.17",
     "onnxruntime>=1.20",
@@ -15,6 +16,7 @@ dependencies = [
     "psycopg[binary]>=3.2",
     "pyarrow>=18",
     "redis>=5.2",
+    "scikit-learn>=1.9",      # M4: logistic-regression pCTR
     "scipy>=1.14",
     "sentence-transformers>=3.3",
     "torch>=2.5",             # imported (unused) by MiniOneRec's amazon18_data_process.py; SASRec in M1
@@ -31,6 +33,11 @@ dev = [
 [tool.uv]
 # Not an installable package: modules run from the repo root as `python -m ml.<pkg>.<module>`.
 package = false
+# LightGBM's macOS wheel links Homebrew's libomp, a third OpenMP runtime next to torch's and
+# faiss's (those two already crash in one process). Built from source without OpenMP instead:
+# single-threaded training is enough for 3,459 items, and it can share a process with torch.
+no-binary-package = ["lightgbm"]
+config-settings-package = { lightgbm = { "cmake.define.USE_OPENMP" = "OFF" } }
 
 [tool.pytest.ini_options]
 # rootdir is ml/; ".." puts the repo root on sys.path so `import ml...` works.

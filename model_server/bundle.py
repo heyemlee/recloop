@@ -5,6 +5,9 @@ mapping and the encoder agree on the item count and the vector dimension, and th
 queries (validation histories with the training-time model's top-20) come back the same through
 the ONNX encoder and the FAISS index. The user encoder and the item index always come from the
 same bundle, and every response carries the bundle's version.
+
+M4 bundles also carry the ranking part (model_server/ranking.py: feature tables, the ONNX
+ranker, the pCTR model), checked against its own golden data at load.
 """
 
 from __future__ import annotations
@@ -18,6 +21,8 @@ from typing import Protocol
 
 import faiss
 import numpy as np
+
+from model_server import ranking as ranking_mod
 
 FORMAT = 1
 
@@ -41,6 +46,8 @@ class Bundle:
     index: faiss.Index
     item_ids: np.ndarray  # FAISS row -> item_id
     manifest: dict = field(default_factory=dict, repr=False)
+    item_vectors: np.ndarray | None = field(default=None, repr=False)  # (num_items, dim), row = item_id
+    ranking: ranking_mod.Ranking | None = field(default=None, repr=False)
 
     def window(self, history: Sequence[int]) -> list[int]:
         """The encoder's input: the last `history_len` known item ids, oldest first."""
@@ -61,6 +68,14 @@ class Bundle:
         scores, rows = self.index.search(user, min(k, self.num_items))
         keep = rows[0] >= 0
         return self.item_ids[rows[0][keep]], scores[0][keep]
+
+    def relevance(self, user: np.ndarray, items: Sequence[int]) -> tuple[np.ndarray, np.ndarray]:
+        """Inner products of a (1, dim) user vector with the given items (unknown ids dropped):
+        the SASRec relevance of ad items, which are scored, not retrieved (design §9.2)."""
+        ids = np.asarray([i for i in items if 0 <= i < self.num_items], dtype=np.int64)
+        if self.item_vectors is None or len(ids) == 0:
+            return ids, np.empty(0, dtype=np.float32)
+        return ids, (self.item_vectors[ids] @ user[0]).astype(np.float32)
 
     def retrieve(self, history: Sequence[int], k: int) -> tuple[np.ndarray, np.ndarray]:
         """Top-k item ids and inner-product scores for one history; empty without history."""
@@ -115,6 +130,13 @@ def load(path: Path, check_golden: bool = True) -> Bundle:
     if index.d != dim:
         raise BundleError(f"{real}: index dimension {index.d}, manifest {dim}")
 
+    vectors = np.load(real / "item_vectors.npy").astype(np.float32)
+    if vectors.shape != (num_items, dim):
+        raise BundleError(f"{real}: item_vectors.npy is {vectors.shape}, expected ({num_items}, {dim})")
+    try:
+        rank = ranking_mod.load(real, manifest, check_golden=check_golden)
+    except (ranking_mod.RankingError, KeyError, OSError, ValueError) as e:
+        raise BundleError(f"{real}: ranking: {e}") from e
     bundle = Bundle(
         version=manifest["version"],
         path=real,
@@ -125,6 +147,8 @@ def load(path: Path, check_golden: bool = True) -> Bundle:
         index=index,
         item_ids=item_ids,
         manifest=manifest,
+        item_vectors=vectors,
+        ranking=rank,
     )
     probe = bundle.encode([[0]])
     if probe.shape != (1, dim) or not np.isfinite(probe).all():

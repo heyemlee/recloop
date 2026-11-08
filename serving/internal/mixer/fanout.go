@@ -44,12 +44,13 @@ const (
 
 // Result of one source.
 type Result struct {
-	Source  string
-	Items   []recall.Candidate
-	Version string
-	Status  string
-	Err     error
-	Took    time.Duration
+	Source   string
+	Items    []recall.Candidate
+	Version  string
+	AdScores map[int32]float32 // SASRec's relevance of the request's ad items
+	Status   string
+	Err      error
+	Took     time.Duration
 }
 
 // OK reports whether the source answered.
@@ -124,7 +125,7 @@ func FanOut(ctx context.Context, specs []Spec, req recall.Request, limit time.Du
 			} else {
 				err = call()
 			}
-			res := Result{Source: name, Items: out.Items, Version: out.Version, Status: StatusOK, Took: time.Since(t0)}
+			res := Result{Source: name, Items: out.Items, Version: out.Version, AdScores: out.AdScores, Status: StatusOK, Took: time.Since(t0)}
 			switch {
 			case err == nil:
 			case errors.Is(err, resilience.ErrOpen):
@@ -182,7 +183,7 @@ func FanOutNaive(ctx context.Context, specs []Spec, req recall.Request) []Result
 			r.K = sp.K
 			t0 := time.Now()
 			out, err := sp.Source.Recall(ctx, r)
-			res := Result{Source: sp.Source.Name(), Items: out.Items, Version: out.Version, Status: StatusOK, Took: time.Since(t0)}
+			res := Result{Source: sp.Source.Name(), Items: out.Items, Version: out.Version, AdScores: out.AdScores, Status: StatusOK, Took: time.Since(t0)}
 			if err != nil {
 				res.Status, res.Err, res.Items = StatusError, err, nil
 			}

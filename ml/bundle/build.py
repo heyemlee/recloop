@@ -15,23 +15,37 @@ Writes artifacts/bundles/{version}/ and points artifacts/bundles/current at it:
   pop.json               items ordered by training interactions, with counts (api, in process)
   golden.json            validation histories with the PyTorch model's top-20: the model server
                          re-runs them on load and refuses a bundle that disagrees
+  features.json          M4: the item tables of the ranking features (popularity, price bucket,
+                         category codes), from which the model server computes them
+  ranker.onnx            M4: the LightGBM ranker as an ONNX tree ensemble (raw scores); the
+  ranker.txt             LightGBM model it came from (`make train-ranker`)
+  rank_golden.json       M4: validation queries (history, candidates with their sources' ranks
+                         and scores) with the features and scores Python computed for them
+  pctr.json              M4, when `make train-pctr` has run: the logistic-regression pCTR and
+                         golden rows
 
 The builder checks its own output before publishing it: the ONNX encoder must reproduce the
-PyTorch user vectors, and the golden histories run through ONNX + FAISS (in a process without
-PyTorch, ml.bundle.faiss_index) must return the PyTorch top-20.
-Full activation, canary and rollback come in M4; until then `current` is the active bundle.
+PyTorch user vectors, the golden histories run through ONNX + FAISS (in a process without
+PyTorch, ml.bundle.faiss_index) must return the PyTorch top-20, and the ONNX ranker must give
+LightGBM's scores on every validation candidate.
 
-Needs `make train` and `make eval` first (the SASRec checkpoint, and offline.json for the tuned
-ItemCF parameters and the offline metrics recorded in the manifest).
+A new bundle is published next to the others; `current` moves to it only when there is none
+yet or with --current. Releasing it (canary, activation, rollback) goes through the api's
+release endpoints (design §6), which serve whatever version model_versions says is active.
 
-Usage: python -m ml.bundle.build
+Needs `make train`, `make train-ranker` and `make eval` first (the SASRec checkpoint, the
+ranker, and offline.json for the tuned ItemCF parameters and the offline metrics).
+
+Usage: python -m ml.bundle.build [--current] [--no-ranker] [--no-pctr]
 """
 
 from __future__ import annotations
 
+import argparse
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -47,10 +61,16 @@ import torch
 from ml import paths
 from ml.data import download
 from ml.eval.splits import HISTORY_LEN, NUM_ITEMS, Split, load_split, train_sequences
-from ml.models import train_sasrec
+from ml.models import pctr as pctr_mod
+from ml.models import train_ranker, train_sasrec
 from ml.models.itemcf import ItemCF, ItemCFParams
 from ml.models.pop import Pop
+from ml.models.ranker import LambdaRank
+from ml.models.rrf import RRF
 from ml.models.sasrec import SASRec, encode_histories
+from ml.ranking import candidates as cand_mod
+from ml.ranking import features as feat
+from ml.ranking import onnx_trees
 
 BUNDLES = paths.ARTIFACTS / "bundles"
 CURRENT = BUNDLES / "current"
@@ -60,6 +80,8 @@ GOLDEN_QUERIES = 256
 GOLDEN_TOP = 20
 GOLDEN_SEED = 20261106
 ONNX_TOLERANCE = 1e-4
+RANK_GOLDEN_QUERIES = 32
+RANKER_TOLERANCE = 1e-4
 FORMAT = 1
 
 
@@ -176,6 +198,88 @@ def itemcf_table(model: ItemCF, golden_rows: int = 64) -> dict:
     }
 
 
+def _nan_to_none(values) -> list:
+    return [None if math.isnan(v) else round(float(v), 7) for v in values]
+
+
+def ranker_files(stage: Path, ranker: LambdaRank, valid: Split) -> dict:
+    """ranker.onnx + ranker.txt, checked against LightGBM on every validation candidate, and
+    the golden queries the model server replays: features from the hits, then scores."""
+    c = ranker.rrf.candidates(valid)
+    x = feat.compute(c, valid.history, ranker.tables)
+    rows = x[c.valid()]
+    model = onnx_trees.booster_to_onnx(ranker.booster, len(feat.FEATURES))
+    (stage / "ranker.onnx").write_bytes(model.SerializeToString())
+    ranker.booster.save_model(str(stage / "ranker.txt"))
+    want = ranker.booster.predict(rows, raw_score=True)
+    got = onnx_trees.onnx_scores(model.SerializeToString(), rows)
+    worst = float(np.abs(got - want).max())
+    if worst > RANKER_TOLERANCE:
+        raise SystemExit(f"ONNX ranker differs from LightGBM: max |diff| {worst:.2e}")
+
+    rng = np.random.default_rng(GOLDEN_SEED + 2)
+    picks = np.sort(rng.choice(len(valid), size=RANK_GOLDEN_QUERIES, replace=False))
+    queries = []
+    for i in picks:
+        row = c.row(int(i))
+        # Scores travel as float32 (proto); the expected features are computed from those.
+        hits = [[[src, rk, float(np.float32(sc))] for src, rk, sc in h] for h in row["hits"]]
+        one = cand_mod.Candidates(
+            items=c.items[i : i + 1],
+            rrf=c.rrf[i : i + 1],
+            ranks={s: c.ranks[s][i : i + 1] for s in c.ranks},
+            scores={s: c.scores[s][i : i + 1].astype(np.float32).astype(np.float64) for s in c.scores},
+        )
+        xf = feat.compute(one, [valid.history[i]], ranker.tables)[0][c.valid()[i]]
+        queries.append(
+            {
+                "valid_row": int(i),
+                "history": [int(h) for h in valid.history[i]],
+                "items": row["items"],
+                "hits": hits,
+                "features": [_nan_to_none(r) for r in xf],
+                "scores": [round(float(v), 6) for v in ranker.booster.predict(xf, raw_score=True)],
+            }
+        )
+    _write_json(
+        stage / "rank_golden.json",
+        {"features": list(feat.FEATURES), "feature_tolerance": 1e-5, "score_tolerance": 1e-3, "queries": queries},
+    )
+    return {"onnx_max_abs_diff": worst, "checked_rows": int(len(rows)), "golden_queries": len(queries)}
+
+
+def pctr_file(stage: Path, valid_x: np.ndarray) -> dict | None:
+    """pctr.json (the model of `make train-pctr`) with golden rows at several positions."""
+    path = pctr_mod.OUT / "model.json"
+    if not path.exists():
+        return None
+    m = json.loads(path.read_text())
+    if tuple(m["features"]) != feat.FEATURES or tuple(m["columns"]) != pctr_mod.COLUMNS:
+        raise SystemExit(f"{path}: other features than the ranker's; run `make train-pctr` again")
+    rng = np.random.default_rng(GOLDEN_SEED + 3)
+    rows = valid_x[rng.choice(len(valid_x), size=48, replace=False)]
+    pos = np.tile(np.asarray([1, 3, 9, 15, 25, 40], dtype=np.int64), 8)
+    sponsored = np.tile(np.asarray([0, 1], dtype=np.int64), 24)
+    p = pctr_mod.predict_json(m, rows, pos, sponsored)
+    m["golden"] = {
+        "tolerance": 1e-6,
+        "rows": [
+            {"features": _nan_to_none(r), "pos": int(q), "sponsored": int(sp), "pctr": float(v)}
+            for r, q, sp, v in zip(rows, pos, sponsored, p, strict=True)
+        ],
+    }
+    _write_json(stage / "pctr.json", m)
+    return {
+        "file": "pctr.json",
+        "model": m["model"],
+        "reference_position": m["reference_position"],
+        "C": m["C"],
+        "days": m["training"]["days"],
+        "rows": m["training"]["rows"],
+        "held_out": {k: m["training"]["held_out"][k] for k in ("auc", "logloss", "logloss_constant", "observed_ctr", "predicted_ctr")},
+    }
+
+
 def _git_commit() -> dict:
     try:
         head = subprocess.run(
@@ -201,17 +305,25 @@ def _write_json(path: Path, obj) -> None:
     path.write_text(json.dumps(obj, separators=(",", ":")) + "\n")
 
 
-def build() -> Path:
+def build(set_current: bool = False, with_ranker: bool = True, with_pctr: bool = True, sasrec_path: Path | None = None) -> Path:
     if not train_sasrec.CHECKPOINT.exists():
         raise SystemExit("no SASRec checkpoint: run `make train` first")
     if not OFFLINE_JSON.exists():
         raise SystemExit("no artifacts/eval/offline.json: run `make eval` first")
     offline = json.loads(OFFLINE_JSON.read_text())
 
-    sasrec = SASRec.load(train_sasrec.CHECKPOINT)
+    checkpoint = Path(sasrec_path) if sasrec_path else train_sasrec.CHECKPOINT
+    sasrec = SASRec.load(checkpoint)
     sequences = train_sequences(load_split("train"))
     pop = Pop().fit(sequences, NUM_ITEMS)
     itemcf = ItemCF(ItemCFParams(**offline["itemcf_params"])).fit(sequences, NUM_ITEMS)
+    tables = feat.ItemTables.build(pop.counts)
+    ranker = None
+    if with_ranker:
+        if not (train_ranker.OUT / "model.txt").exists():
+            raise SystemExit("no ranker: run `make train-ranker` first (or --no-ranker)")
+        rrf = RRF({"sasrec": sasrec, "itemcf": itemcf, "pop": pop}, cand_mod.CONTROL_WEIGHTS)
+        ranker, ranker_tuning = LambdaRank.load(train_ranker.OUT, rrf, tables)
 
     BUNDLES.mkdir(parents=True, exist_ok=True)
     stage = BUNDLES / f".staging-{os.getpid()}"
@@ -219,7 +331,7 @@ def build() -> Path:
     stage.mkdir()
 
     # Model files
-    shutil.copyfile(train_sasrec.CHECKPOINT, stage / "sasrec.pt")
+    shutil.copyfile(checkpoint, stage / "sasrec.pt")
     export_encoder(sasrec, stage / "sasrec_encoder.onnx")
     onnx_diff = check_encoder(
         sasrec, stage / "sasrec_encoder.onnx", load_split("valid").history_matrix()
@@ -236,6 +348,28 @@ def build() -> Path:
     golden = golden_queries(sasrec)
     _write_json(stage / "golden.json", golden)
     index = build_index(stage)
+    _write_json(stage / "features.json", tables.to_json())
+    ranking = {"features": list(feat.FEATURES), "file": "features.json"}
+    if ranker is not None:
+        valid = load_split("valid")
+        checks = ranker_files(stage, ranker, valid)
+        test = offline["models"].get("LambdaRank")
+        ranking["ranker"] = {
+            "model": "lightgbm",
+            "file": "ranker.onnx",
+            "lightgbm_file": "ranker.txt",
+            "params": ranker_tuning["params"],
+            "rounds": ranker_tuning["rounds"],
+            "cv": ranker_tuning["trials"][ranker_tuning["selected"]]["cv"],
+            "test": _test_summary(test),
+            "golden_file": "rank_golden.json",
+            **checks,
+        }
+    pctr_info = None
+    if with_pctr:
+        c = (ranker.rrf if ranker is not None else RRF({"sasrec": sasrec, "itemcf": itemcf, "pop": pop}, cand_mod.CONTROL_WEIGHTS)).candidates(load_split("valid"))
+        vx = feat.compute(c, load_split("valid").history, tables)[c.valid()]
+        pctr_info = pctr_file(stage, vx)
 
     files = {
         p.name: {"sha256": sha256_file(p), "bytes": p.stat().st_size}
@@ -276,9 +410,11 @@ def build() -> Path:
         "models": {
             "sasrec": {
                 "config": asdict(sasrec.cfg),
+                "checkpoint": str(checkpoint.relative_to(paths.ROOT)) if checkpoint.is_relative_to(paths.ROOT) else str(checkpoint),
                 "best_epoch": sasrec.log.best_epoch,
                 "valid": sasrec.log.best_valid,
-                "test": _test_summary(models.get("SASRec")),
+                # make eval's test numbers are the selected checkpoint's
+                "test": _test_summary(models.get("SASRec")) if checkpoint == train_sasrec.CHECKPOINT else None,
             },
             "itemcf": {
                 "params": offline["itemcf_params"],
@@ -292,18 +428,22 @@ def build() -> Path:
             "recall": index["golden_recall"],
             "max_score_diff": index["golden_max_score_diff"],
         },
+        "ranking": ranking,
         "files": files,
     }
+    if pctr_info is not None:
+        manifest["pctr"] = pctr_info
     (stage / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
     final = BUNDLES / version
     if final.exists():
         shutil.rmtree(final)
     stage.rename(final)
-    tmp_link = BUNDLES / f".current-{os.getpid()}"
-    tmp_link.unlink(missing_ok=True)
-    tmp_link.symlink_to(version)
-    tmp_link.replace(CURRENT)  # atomic switch of the symlink
+    if set_current or not CURRENT.exists():
+        tmp_link = BUNDLES / f".current-{os.getpid()}"
+        tmp_link.unlink(missing_ok=True)
+        tmp_link.symlink_to(version)
+        tmp_link.replace(CURRENT)  # atomic switch of the symlink
     return final
 
 
@@ -314,8 +454,14 @@ def _test_summary(model_results: dict | None) -> dict | None:
     return {k: round(item[k]["value"], 6) for k in ("HR@10", "NDCG@10")}
 
 
-def main() -> None:
-    final = build()
+def main(argv: list[str] | None = None) -> None:
+    p = argparse.ArgumentParser(description="Build a model bundle")
+    p.add_argument("--current", action="store_true", help="point artifacts/bundles/current at it")
+    p.add_argument("--no-ranker", action="store_true", help="feature tables only, no LightGBM ranker")
+    p.add_argument("--no-pctr", action="store_true", help="leave the pCTR model out")
+    p.add_argument("--sasrec", type=Path, help="another SASRec checkpoint (e.g. a weaker trial, for the release drill)")
+    args = p.parse_args(argv)
+    final = build(args.current, with_ranker=not args.no_ranker, with_pctr=not args.no_pctr, sasrec_path=args.sasrec)
     manifest = json.loads((final / "manifest.json").read_text())
     print(f"bundle   {manifest['version']}  ({len(manifest['files'])} files)")
     print(f"encoder  ONNX vs PyTorch max |diff| {manifest['encoder']['onnx_max_abs_diff']:.1e}")
@@ -324,7 +470,15 @@ def main() -> None:
         f"golden   {g['queries']} validation histories, top-{g['top']} through ONNX + FAISS: "
         f"recall {g['recall']:.4f}, max score diff {g['max_score_diff']:.1e}"
     )
-    print(f"current  -> {os.readlink(CURRENT)}")
+    r = manifest["ranking"].get("ranker")
+    if r:
+        print(
+            f"ranker   {r['rounds']} trees as ONNX, max |diff| to LightGBM {r['onnx_max_abs_diff']:.1e} "
+            f"over {r['checked_rows']:,} validation candidates; {r['golden_queries']} golden queries"
+        )
+    pc = manifest.get("pctr")
+    print(f"pctr     {pc['model'] + ' from ' + ', '.join(pc['days']) if pc else 'none (FixedPCTR stays)'}")
+    print(f"current  -> {os.readlink(CURRENT)}" + ("" if os.readlink(CURRENT) == final.name else f" (this bundle: {final.name}; release it through the api)"))
 
 
 if __name__ == "__main__":

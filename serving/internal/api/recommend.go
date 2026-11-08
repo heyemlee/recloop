@@ -15,11 +15,13 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/heyemlee/recloop/serving/internal/bundle"
 	"github.com/heyemlee/recloop/serving/internal/cache"
 	"github.com/heyemlee/recloop/serving/internal/events"
 	"github.com/heyemlee/recloop/serving/internal/experiment"
 	"github.com/heyemlee/recloop/serving/internal/metrics"
 	"github.com/heyemlee/recloop/serving/internal/mixer"
+	"github.com/heyemlee/recloop/serving/internal/ranking"
 	"github.com/heyemlee/recloop/serving/internal/recall"
 	"github.com/heyemlee/recloop/serving/internal/resilience"
 	"github.com/heyemlee/recloop/serving/internal/tracing"
@@ -126,6 +128,10 @@ type servedItem struct {
 	Price      int32          `json:"price,omitempty"`
 	PCTRPPM    int64          `json:"pctr_ppm,omitempty"`
 	AdToken    string         `json:"ad_token,omitempty"`
+	// M4: the ranker's features of this item at serving time (payload "features" names them;
+	// null = missing) and its LightGBM score, logged for both rank variants.
+	F    ranking.Features `json:"f,omitempty"`
+	LGBM *float64         `json:"lgbm,omitempty"`
 }
 
 type servedPayload struct {
@@ -143,6 +149,62 @@ type servedPayload struct {
 	HV             int64                            `json:"hv"`
 	Items          []servedItem                     `json:"items"`
 	Ads            *adResult                        `json:"ads,omitempty"` // the ads stage (first page only)
+	// M4: what ordered the organic list ("rrf" or "lightgbm"), the names of the items' feature
+	// columns, and the pCTR model of the sponsored slots ("fixed", "logreg").
+	Ranker    string   `json:"ranker,omitempty"`
+	Features  []string `json:"features,omitempty"`
+	PCTRModel string   `json:"pctr_model,omitempty"`
+}
+
+// rankParams are the rank layer's experiment parameters: which order the organic list takes,
+// and (the canary of a release, design §6) which bundle version serves the request.
+type rankParams struct {
+	Ranker     string `json:"ranker"`
+	PinVersion string `json:"pin_version"`
+}
+
+func (s *Server) rankParams(a experiment.Assignment) rankParams {
+	p := rankParams{Ranker: s.DefaultRanker}
+	if p.Ranker == "" {
+		p.Ranker = ranking.RRF
+	}
+	if len(a.Params) == 0 {
+		return p
+	}
+	var v rankParams
+	if err := json.Unmarshal(a.Params, &v); err != nil {
+		s.warn("bad_rank_params", "bad rank experiment params", "exp_id", a.ExpID, "err", err)
+		return p
+	}
+	if v.Ranker == ranking.RRF || v.Ranker == ranking.LightGBM {
+		p.Ranker = v.Ranker
+	}
+	p.PinVersion = v.PinVersion
+	return p
+}
+
+// bundleFor is the version serving a request: the rank variant's pinned version if it is
+// loaded, else the active one. Read once per request, so a release switch never mixes versions
+// inside one response.
+func (s *Server) bundleFor(p rankParams) *bundle.Bundle {
+	if s.Bundles == nil {
+		return s.Bundle
+	}
+	if p.PinVersion != "" {
+		if b := s.Bundles.Get(p.PinVersion); b != nil {
+			return b
+		}
+		s.warn("pin_missing", "pinned bundle not loaded; serving the active one", "version", p.PinVersion)
+	}
+	return s.Bundles.Active()
+}
+
+// rendered is what the first page's served event adds about the ranking stage.
+type rendered struct {
+	features map[int32][]float32
+	lgbm     map[int32]float32
+	names    []string
+	ranker   string
 }
 
 // request is the state of one recommendation request as it moves through the stages.
@@ -156,6 +218,11 @@ type request struct {
 	now      time.Time
 	degraded []string
 	stages   map[string]float64
+	// M4: the bundle version serving the request, the recall window, and SASRec's relevance of
+	// the eligible ad items (from Retrieve; empty when the candidates came from the cache).
+	bundle    *bundle.Bundle
+	history   []int32
+	relevance map[int32]float32
 }
 
 // errFatal ends a naive-mode request with 503: without degradation a failed dependency is a
@@ -305,6 +372,9 @@ func (s *Server) recommend(q *request, specs []mixer.Spec, limit int, debugOn bo
 	}
 	assign := cfg.Assign(experiment.UserUnit(q.uid))
 	weights := s.weights(q.surface, assign["recall"])
+	rp := s.rankParams(assign["rank"])
+	q.bundle = s.bundleFor(rp)
+	b := q.bundle
 
 	// ① user context: history, hv, bought, seen. Without it: no history (popularity), no
 	// seen / bought filters, no ads (design §5.1).
@@ -330,7 +400,7 @@ func (s *Server) recommend(q *request, specs []mixer.Spec, limit int, debugOn bo
 
 	// Candidate cache (design §4.5): recall + ranking output, keyed by the history version.
 	variant := assign["recall"].Variant + "." + assign["rank"].Variant
-	key := cache.CandidateKey(q.uid, q.surface, q.seed, variant, s.Bundle.Version, uc.HV)
+	key := cache.CandidateKey(q.uid, q.surface, q.seed, variant, b.Version, uc.HV)
 	cacheResult := CacheOff
 	var cands *cache.Candidates
 	if s.Cands != nil {
@@ -365,12 +435,21 @@ func (s *Server) recommend(q *request, specs []mixer.Spec, limit int, debugOn bo
 	}
 
 	var results []mixer.Result
+	var rk rendered
 	complete := true
+	q.history = recall.Recent(uc.History, recall.HistoryWindow)
+	ranks := q.surface == recall.SurfaceHome && b.Ranking != nil && s.Rank != nil
 	if cands == nil {
 		// ② recall, concurrently, each source under min(its timeout, the stage budget).
 		t = time.Now()
 		rctx, span := q.span("recall")
-		rreq := recall.Request{UserID: q.uid, Surface: q.surface, History: uc.History, Seed: q.seed}
+		rreq := recall.Request{UserID: q.uid, Surface: q.surface, History: uc.History, Seed: q.seed, Bundle: b}
+		if s.Bundles != nil {
+			rreq.PinVersion = b.Version // the model server serves exactly this version
+		}
+		if ranks && userOK {
+			rreq.AdItems = s.eligibleAdItems(q, uc) // scored by the same Retrieve call
+		}
 		if s.Naive {
 			results = mixer.FanOutNaive(rctx, specs, rreq)
 		} else {
@@ -391,19 +470,56 @@ func (s *Server) recommend(q *request, specs []mixer.Spec, limit int, debugOn bo
 				versions[res.Source] = res.Version
 			}
 		}
-		if v := versions["sasrec"]; v != "" && v != s.Bundle.Version {
+		for _, res := range results {
+			if res.Source == "sasrec" && res.AdScores != nil {
+				q.relevance = res.AdScores
+			}
+		}
+		if v := versions["sasrec"]; v != "" && v != b.Version {
 			// The model server serves another bundle than the api's ItemCF / Pop tables.
 			q.degrade("model_version_mismatch")
 			complete = false
 		}
-		// ⑤ ranking: weighted RRF in process (v1).
+		// ⑤ ranking: weighted RRF in process (v1). With an M4 bundle the model server's Rank
+		// adds every candidate's features and LightGBM score; the rank variant decides whether
+		// LightGBM's order replaces RRF's. A failed Rank call leaves RRF's order (§5.1).
 		t = time.Now()
 		fused := mixer.RRF(results, weights)
 		if len(fused) > cache.CandidateDepth {
 			fused = fused[:cache.CandidateDepth]
 		}
+		rk.ranker = ranking.RRF
+		if ranks && len(fused) > 0 {
+			org, status, err := s.rankOrganic(q, fused)
+			switch {
+			case status != mixer.StatusOK && s.Naive:
+				return nil, errFatal{"rank", err}
+			case status != mixer.StatusOK:
+				q.degrade("rank_" + status)
+				s.warn("rank_"+status, "ranking failed: RRF order", "err", err)
+				complete = false
+			default:
+				rk.names = org.Names
+				rk.features = make(map[int32][]float32, len(fused))
+				rk.lgbm = make(map[int32]float32, len(org.Scores))
+				for i, f := range fused {
+					rk.features[f.ItemID] = org.Features[i]
+					if org.Scores != nil {
+						rk.lgbm[f.ItemID] = org.Scores[i]
+					}
+				}
+				if rp.Ranker == ranking.LightGBM && org.Scores != nil {
+					fused = ranking.Reorder(fused, org.Scores)
+					rk.ranker = ranking.LightGBM
+				}
+			}
+		}
 		cands = &cache.Candidates{Items: fused, Versions: versions}
 		q.stage("rank", t)
+	} else if rp.Ranker == ranking.LightGBM && ranks {
+		rk.ranker = ranking.LightGBM // the cached list was ordered by this variant's ranker
+	} else {
+		rk.ranker = ranking.RRF
 	}
 
 	// ④ filters and re-ranking, every request (seen, bought and stock change quickly).
@@ -411,7 +527,7 @@ func (s *Server) recommend(q *request, specs []mixer.Spec, limit int, debugOn bo
 	ex := mixer.Exclusions{Bought: uc.Bought, Seen: uc.Seen, Seed: q.seed, Known: s.Catalog.Has, InStock: s.Catalog.InStock}
 	filtered, fstats := mixer.Filter(cands.Items, ex)
 	diverse, promoted := mixer.Diversify(filtered, s.Catalog.Brand, DiversityWindow, MaxPerBrand)
-	list, backfill := mixer.Backfill(diverse, s.Bundle.Pop, PageDepth, ex)
+	list, backfill := mixer.Backfill(diverse, b.Pop, PageDepth, ex)
 	if len(list) > PageDepth {
 		list = list[:PageDepth]
 	}
@@ -440,7 +556,7 @@ func (s *Server) recommend(q *request, specs []mixer.Spec, limit int, debugOn bo
 	t = time.Now()
 	_, span = q.span("page_store")
 	page := &cache.Page{
-		RequestID: requestID, UserID: q.uid, Surface: q.surface, Seed: q.seed, ModelVer: s.Bundle.Version,
+		RequestID: requestID, UserID: q.uid, Surface: q.surface, Seed: q.seed, ModelVer: b.Version,
 		Exp: assign, ConfigVersion: configVersion, Degraded: q.degraded, HV: uc.HV, Items: list, CreatedAt: q.now,
 	}
 	if ad != nil {
@@ -472,6 +588,14 @@ func (s *Server) recommend(q *request, specs []mixer.Spec, limit int, debugOn bo
 	// ⑦ response and served log (asynchronous, never blocks).
 	t = time.Now()
 	resp, served := s.render(requestID, q.surface, q.seed, assign, configVersion, q.degraded, list, page.Sponsored, 0, limit, pageable, uc.HV)
+	resp.ModelVersion, served.ModelVer = b.Version, b.Version
+	if q.surface == recall.SurfaceHome && b.Ranking != nil {
+		served.Ranker = rk.ranker
+	}
+	addRanking(&served, rk, page.Sponsored)
+	if ad != nil {
+		served.PCTRModel = ad.pctrModel
+	}
 	served.SourceVersions = cands.Versions
 	served.BackfillCount = backfill
 	served.Filters = &fstats
@@ -554,11 +678,11 @@ func (s *Server) render(
 ) (RecResponse, servedPayload) {
 	end := min(offset+limit, len(list))
 	resp := RecResponse{
-		RequestID: requestID.String(), ModelVersion: s.Bundle.Version, Surface: surface,
+		RequestID: requestID.String(), ModelVersion: s.active().Version, Surface: surface,
 		Degraded: degraded, Experiments: assign, ConfigVersion: configVersion, Items: []RecItem{},
 	}
 	served := servedPayload{
-		Surface: surface, Offset: offset, ModelVer: s.Bundle.Version, Exp: assign,
+		Surface: surface, Offset: offset, ModelVer: s.active().Version, Exp: assign,
 		ConfigVersion: configVersion, Degraded: degraded, HV: hv, Items: []servedItem{},
 	}
 	if seed >= 0 {

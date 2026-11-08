@@ -5,6 +5,8 @@ package recall
 import (
 	"context"
 	"sort"
+
+	"github.com/heyemlee/recloop/serving/internal/bundle"
 )
 
 // Surfaces.
@@ -28,12 +30,22 @@ type Request struct {
 	History []int32 // oldest first
 	Seed    int32   // the current item on the item surface; -1 otherwise
 	K       int
+	// Bundle is the version serving this request (M4: a canary pins its own); nil: the
+	// source's own. PinVersion, when set, is sent to the model server so its encoder and index
+	// are that same version.
+	Bundle     *bundle.Bundle
+	PinVersion string
+	// AdItems are the ad items eligible so far; SASRec scores them with the same user vector
+	// (design §9.2 step 3).
+	AdItems []int32
 }
 
 // Output of one source: candidates best first, and the model version that produced them.
 type Output struct {
 	Items   []Candidate
 	Version string
+	// AdScores: SASRec relevance of the request's AdItems (SASRec only).
+	AdScores map[int32]float32
 }
 
 // Source retrieves candidates; it must return promptly once ctx is done.

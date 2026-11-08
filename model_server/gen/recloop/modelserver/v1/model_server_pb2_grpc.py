@@ -51,14 +51,15 @@ class ModelServerServicer:
 
     def Retrieve(self, request, context):
         """Encodes the history into a user vector and returns the top-k organic candidates from the
-        item index; also scores the eligible ad items (M3).
+        item index; the same user vector also scores the eligible ad items (relevance, §9.2).
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
     def Rank(self, request, context):
-        """M3: pCTR for ad candidates; M4: LightGBM ranking of organic candidates. Not implemented yet.
+        """Describes and scores candidates with the bundle's ranking models (M4): the ranker's
+        features and LightGBM score of every organic candidate, and the pCTR of every ad candidate.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
