@@ -86,3 +86,6 @@ def test_brand_dictionary_drops_noise():
     assert parser.parse("colored pencils").request.brands == []
     assert parser.parse("Solo stapler").request.brands == []  # one item only
     assert parser.parse("Pilot pens").request.brands == ["Pilot"]
+    # The most common spelling of a brand, whichever listing comes first.
+    parser = RuleParser.from_catalog([".Pilot", "Pilot", "Pilot", "PILOT"])
+    assert parser.parse("Pilot pens").request.brands == ["Pilot"]

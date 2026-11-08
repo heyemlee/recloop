@@ -1,12 +1,17 @@
-"""The reply text, rendered from database rows and code verdicts (design §10.3 (4)).
+"""The reply, rendered from database rows and code verdicts (design §10.3 (4), (5)).
 
 Titles and prices come from `items` rows fetched in the same turn; the language model only
 contributes the one-line reasons (already vetted by `agent.agent`). Compatibility is stated as
-the code found it: confirmed with the quoted listing text, or explicitly not confirmed.
+the code found it: confirmed with the quoted listing text, or explicitly not confirmed. The
+sponsored item, if the ads module picked one, gets its label and its reason here, from code.
+
+`parts` is the reply in pieces (the chat page shows the items as cards); `reply` is the same
+reply as text.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from agent import taxonomy
@@ -19,6 +24,9 @@ if TYPE_CHECKING:
 
 TITLE_CHARS = 140
 FIELD_NAMES = {"title": "title", "description": "description", "features": "feature list"}
+# Added by this code to the ads module's item; the model never sees or writes it.
+SPONSORED_LABEL = "Sponsored"
+SPONSORED_REASON = "Placed by an advertiser; it passed the same checks as the options above."
 
 
 def clip(s: str, n: int) -> str:
@@ -89,41 +97,68 @@ def parse_failed() -> str:
     )
 
 
-def reply(r: AgentResult) -> str:
+@dataclass
+class ReplyParts:
+    """The lines around the items, and each item's compatibility line (None: no device asked)."""
+
+    intro: list[str]
+    compat: list[str | None] = field(default_factory=list)  # per shown item, in order
+    sponsored_compat: str | None = None
+    footer: list[str] = field(default_factory=list)
+
+
+def parts(r: AgentResult) -> ReplyParts:
+    if r.status == "parse_failed":
+        return ReplyParts([parse_failed()])
     e = r.effective
     assert e is not None
-    lines: list[str] = []
+    intro: list[str] = []
     ref = e.reference
     if ref is not None:
         if ref.item is not None:
-            lines.append(
+            intro.append(
                 f"Your last purchase of this kind: {clip(ref.item.title, 100)} ({ref.item.brand or 'no brand'})."
             )
         if ref.note:
-            lines.append(f"Note: {ref.note}.")
+            intro.append(f"Note: {ref.note}.")
     if r.status == "blocked":
-        lines.append(f"I can't show anything for this request: {e.blocked}.")
-        return "\n".join(lines)
+        intro.append(f"I can't show anything for this request: {e.blocked}.")
+        return ReplyParts(intro)
     if not r.shown:
-        lines.append(f"I couldn't find {summary(e)}.")
-        lines.append("Try a higher budget, another brand, or fewer requirements.")
-        return "\n".join(lines)
+        intro.append(f"I couldn't find {summary(e)}.")
+        intro.append("Try a higher budget, another brand, or fewer requirements.")
+        return ReplyParts(intro)
     n = len(r.shown)
     confirmed = sum(s.compat is not None and s.compat.status == "confirmed" for s in r.shown)
     if e.device is not None and confirmed == 0:
-        lines.append(
+        intro.append(
             f"No listing I found says it works with the {e.constraints.compatible_with}. The "
             f"closest {'match' if n == 1 else f'{n} matches'} ({summary(e)}); check compatibility before buying:"
         )
     else:
-        lines.append(f"{'Here is 1 option' if n == 1 else f'Here are {n} options'}: {summary(e)}.")
-    for i, s in enumerate(r.shown, start=1):
+        intro.append(f"{'Here is 1 option' if n == 1 else f'Here are {n} options'}: {summary(e)}.")
+    out = ReplyParts(intro, [_compat_line(e, s.compat) for s in r.shown])
+    if r.sponsored is not None:
+        out.sponsored_compat = _compat_line(e, r.sponsored.compat)
+    if r.dropped:
+        left = ", ".join(f"{k}: {v}" for k, v in sorted(r.dropped.items()))
+        out.footer.append(f"Left out after checking the listings ({left}).")
+    return out
+
+
+def reply(r: AgentResult) -> str:
+    p = parts(r)
+    lines = list(p.intro)
+    for i, (s, compat_line) in enumerate(zip(r.shown, p.compat, strict=False), start=1):
         lines.append(f"{i}. {clip(s.item.title, TITLE_CHARS)} — {price(s.item)}")
-        compat_line = _compat_line(e, s.compat)
         if compat_line:
             lines.append(f"   {compat_line}")
         lines.append(f"   {s.reason}")
-    if r.dropped:
-        left = ", ".join(f"{k}: {v}" for k, v in sorted(r.dropped.items()))
-        lines.append(f"Left out after checking the listings ({left}).")
+    sp = r.sponsored
+    if sp is not None and r.shown:
+        lines.append(f"{SPONSORED_LABEL}: {clip(sp.item.title, TITLE_CHARS)} — {price(sp.item)}")
+        if p.sponsored_compat:
+            lines.append(f"   {p.sponsored_compat}")
+        lines.append(f"   {sp.reason}")
+    lines.extend(p.footer)
     return "\n".join(lines)

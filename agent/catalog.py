@@ -329,14 +329,24 @@ class MemoryCatalog(Catalog):
         return sum(len(rows) for rows in self.orders.values())
 
 
-class PgCatalog(Catalog):
-    """The `items` and `orders` tables of the RecLoop database, read-only."""
+def _read_only(conn) -> None:
+    """Every statement on this session runs read-only, enforced by the server."""
+    conn.autocommit = True
+    conn.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
 
-    def __init__(self, conn, encoder: QueryEncoder):
-        # Every statement on this session runs read-only, enforced by the server.
-        conn.autocommit = True
-        conn.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
+
+class PgCatalog(Catalog):
+    """The `items` and `orders` tables of the RecLoop database, read-only.
+
+    On one connection (the evaluation, scripts) or on a pool (the chat service: each query
+    borrows a connection, so concurrent turns do not queue behind each other).
+    """
+
+    def __init__(self, conn, encoder: QueryEncoder, pool=None):
+        if pool is None:
+            _read_only(conn)
         self.conn = conn
+        self.pool = pool
         self.encoder = encoder
         self.index = BM25Index(self.all_items())
         self.last_stats = SearchStats()
@@ -346,6 +356,28 @@ class PgCatalog(Catalog):
         import psycopg
 
         return cls(psycopg.connect(url, connect_timeout=5), encoder)
+
+    @classmethod
+    def pooled(cls, url: str, encoder: QueryEncoder, size: int = 4) -> PgCatalog:
+        from psycopg_pool import ConnectionPool
+
+        pool = ConnectionPool(
+            url, min_size=1, max_size=size, configure=_read_only, kwargs={"connect_timeout": 5}
+        )
+        pool.wait(timeout=10)
+        return cls(None, encoder, pool=pool)
+
+    def close(self) -> None:
+        if self.pool is not None:
+            self.pool.close()
+        elif self.conn is not None:
+            self.conn.close()
+
+    def _rows(self, sql: str, params=None) -> list:
+        if self.pool is None:
+            return self.conn.execute(sql, params).fetchall()
+        with self.pool.connection() as conn:
+            return conn.execute(sql, params).fetchall()
 
     def _eligible(self, filters: SearchFilters) -> list[tuple[int, str | None]]:
         where, params = ["TRUE"], {}
@@ -362,35 +394,35 @@ class PgCatalog(Catalog):
                 where.append("NOT (categories && %(cat_exclude)s::text[])")
                 params["cat_exclude"] = list(cat.exclude)
         sql = f"SELECT item_id, brand FROM items WHERE {' AND '.join(where)} ORDER BY item_id"
-        return [(int(i), b) for i, b in self.conn.execute(sql, params).fetchall()]
+        return [(int(i), b) for i, b in self._rows(sql, params)]
 
     def _nearest(self, vector: np.ndarray, item_ids: Sequence[int], k: int) -> list[int]:
         literal = "[" + ",".join(f"{x:.7g}" for x in vector.tolist()) + "]"
-        rows = self.conn.execute(
+        rows = self._rows(
             "SELECT item_id FROM items WHERE item_id = ANY(%s) AND text_emb IS NOT NULL "
             "ORDER BY text_emb <=> %s::vector, item_id LIMIT %s",
             (list(item_ids), literal, k),
-        ).fetchall()
+        )
         return [int(r[0]) for r in rows]
 
     def items(self, item_ids: Sequence[int]) -> list[Item]:
-        rows = self.conn.execute(
+        rows = self._rows(
             f"SELECT {ITEM_COLUMNS} FROM items WHERE item_id = ANY(%s)", (list(item_ids),)
-        ).fetchall()
+        )
         by_id = {int(r[0]): Item.from_row(r) for r in rows}
         return [by_id[i] for i in item_ids if i in by_id]
 
     def all_items(self) -> list[Item]:
-        rows = self.conn.execute(f"SELECT {ITEM_COLUMNS} FROM items ORDER BY item_id").fetchall()
+        rows = self._rows(f"SELECT {ITEM_COLUMNS} FROM items ORDER BY item_id")
         return [Item.from_row(r) for r in rows]
 
     def purchases(self, user_id: int, limit: int) -> list[Purchase]:
-        rows = self.conn.execute(
+        rows = self._rows(
             "SELECT item_id, created_at FROM orders WHERE user_id = %s "
             "ORDER BY created_at DESC, order_id DESC LIMIT %s",
             (user_id, limit),
-        ).fetchall()
+        )
         return [Purchase(int(i), ts) for i, ts in rows]
 
     def order_count(self) -> int:
-        return int(self.conn.execute("SELECT count(*) FROM orders").fetchone()[0])
+        return int(self._rows("SELECT count(*) FROM orders")[0][0])

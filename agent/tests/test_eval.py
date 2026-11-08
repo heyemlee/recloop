@@ -156,3 +156,120 @@ def test_judge_agreement():
     assert out["pairs"] == 4 and out["agreement"] == pytest.approx(0.75)
     assert 0 < out["kappa"] < 1
     assert judge.agreement({}, h)["pairs"] == 0
+
+
+# --- paid runs: caps, the judge's grades, the report's chat and relevance sections ------------
+
+
+def test_parse_caps():
+    from agent.eval.run import parse_caps
+
+    models = ["claude-opus-5-5", "claude-haiku-5-5"]
+    assert parse_caps("12", models) == {"claude-opus-5-5": 12.0, "claude-haiku-5-5": 12.0}
+    assert parse_caps("claude-opus-5-5=12,claude-haiku-5-5=1", models)["claude-haiku-5-5"] == 1.0
+    with pytest.raises(ValueError):
+        parse_caps("claude-opus-5-5=12", models)  # no cap for haiku
+    with pytest.raises(ValueError):
+        parse_caps(None, models)
+
+
+def test_llm_run_stops_before_passing_its_cap(catalog, fake_llm):
+    import json as js
+
+    cases = [c for c in case_io.load() if c.template == "budget"][:4]
+    parse = js.dumps({"category": "gel_pens", "budget_max_cents": 1200, "search_text": "gel pens"})
+    explain = js.dumps({"reasons": []})
+    llm = fake_llm(parse=[parse] * 4, explain=[explain] * 4)  # $0.001 per call, 2 calls a case
+    spec = harness.llm_spec("fake-model", 1)
+    run = harness.run_agent(spec, cases, catalog, llm, max_cost_usd=0.005)
+    # Case 1 costs $0.002; case 2 could take the run to $0.006: not started.
+    assert run["partial"] and len(run["cases"]) == 1 and run["cost_usd"] <= 0.005
+
+
+class _Calls:
+    def __init__(self, grades):
+        self.grades, self.model, self.seen = grades, "fake-judge", []
+
+    def complete_json(self, purpose, system, user, schema):
+        import json as js
+
+        from agent.llm import LLMCall, LLMReply
+
+        ids = [p["item_id"] for p in js.loads(user)["products"]]
+        self.seen.append(ids)
+        out = {"grades": [{"item_id": i, "grade": self.grades.get(i, 1), "why": "x"} for i in ids]}
+        return LLMReply(js.dumps(out), LLMCall(purpose, self.model, cost_usd=0.01))
+
+
+def _run(agent, shown_by_case):
+    return {
+        "agent": agent,
+        "spec": {},
+        "cases": [
+            {
+                "case_id": cid,
+                "message": f"message {cid}",
+                "record": {"shown": [{"item_id": i} for i in ids]},
+            }
+            for cid, ids in shown_by_case.items()
+        ],
+    }
+
+
+def test_judge_grades_each_shown_item_once(catalog, tmp_path):
+    calls = _Calls({7: 2, 8: 0})
+    runs = [_run("baseline", {"a": [7, 8], "b": [9]}), _run("oracle", {"a": [8, 10], "b": [9]})]
+    path = tmp_path / "judge" / judge.GRADES_FILE
+    out = judge.grade_runs(judge.ClaudeJudge(calls), runs, catalog, path, max_cost_usd=1.0)
+    assert sorted(map(sorted, calls.seen)) == [[7, 8, 10], [9]]  # one call per case, shared items
+    assert out["cases"]["a"] == {"7": 2, "8": 0, "10": 1} and out["calls"] == 2
+    assert out["cost_usd"] == pytest.approx(0.02) and not out["partial"]
+    # Nothing new to grade: no calls; a new run's new item: one call.
+    judge.grade_runs(judge.ClaudeJudge(calls), runs, catalog, path, 1.0)
+    runs.append(_run("llm", {"b": [9, 11]}))
+    out = judge.grade_runs(judge.ClaudeJudge(calls), runs, catalog, path, 1.0)
+    assert calls.seen[-1] == [11] and out["calls"] == 3
+    # The report: grades shared by the agents that showed the item.
+    text = "\n".join(report.relevance_section(runs, path))
+    assert "| baseline | 3 | 100.0% | 1.00 | 33.3% | 33.3% |" in text
+    assert "| oracle | 3 | 100.0% | 0.67 | 0.0% | 33.3% |" in text
+
+
+def test_judge_stops_at_its_cap(catalog, tmp_path):
+    calls = _Calls({})
+    runs = [_run("baseline", {c: [7] for c in "abcdef"})]
+    path = tmp_path / "grades.json"
+    out = judge.grade_runs(judge.ClaudeJudge(calls), runs, catalog, path, max_cost_usd=0.035)
+    # $0.01 a call; stops before a call that could pass $0.035 (twice the dearest so far).
+    assert out["partial"] and out["calls"] == 2 and out["cost_usd"] <= 0.035
+
+
+def test_chat_section(tmp_path):
+    import json as js
+
+    reply = {"status": "ok", "items": 3, "sponsored": True, "personal": {"hits": 1, "moved": True},
+             "ads": {"called": True, "candidates": 4, "outcome": "filled"}, "degraded": [],
+             "tools": ["search_items", "get_item_details"], "client_reply_ms": 15.0,
+             "client_total_ms": 15.5, "server_ms": 14.0,
+             "timings_ms": {"parse": 0.1, "history": 0.0, "search": 10.0, "personalize": 2.0,
+                            "ads": 0.7, "total": 14.0},
+             "llm": {"calls": 0, "cost_usd": 0}}  # fmt: skip
+    meta = {"started": "2026-11-08T10:30:00+00:00", "git": "abc", "cases": 1, "repeats": 2,
+            "warmup": 30, "users": "2 users", "parser": "rules", "cpus": 12,
+            "load_start": [3.0], "load_end": [2.5], "quiet_start": False, "waited_s": 1200,
+            "compose_project": "recloop-m6", "other_containers": ["x-1"], "campaigns": "1 active."}  # fmt: skip
+    path = tmp_path / "latency.json"
+    path.write_text(js.dumps({"meta": meta, "replies": [reply, reply]}))
+    text = "\n".join(report.chat_section([], path))
+    assert (
+        "| search | search_items: BM25, bge query encoding, pgvector KNN, SQL filters | 10 ms | 10 ms |"
+        in text
+    )
+    assert (
+        "| history | get_purchase_history (when the message refers to it) (not called in this run) | – | – |"
+        in text
+    )
+    assert "**Indicative only**" in text and "`recloop-m6`): 1." in text and "x-1" not in text
+    assert "filled the slot in 2 (100.0% of the asks)" in text
+    assert "| claude-opus-5-5 | not run |" in text
+    assert "Not measured yet" in "\n".join(report.chat_section([], tmp_path / "missing.json"))

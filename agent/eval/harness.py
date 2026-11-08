@@ -89,8 +89,13 @@ def run_agent(
     rule_parser = RuleParser.from_catalog(it.brand for it in items)
     out_cases = []
     spent = 0.0
+    dearest = 0.0  # the most one case has cost so far
     partial = False
     for n, case in enumerate(cases, start=1):
+        # Stop before a case that could take the run past its cap (twice the dearest so far).
+        if max_cost_usd is not None and spent + 2 * dearest > max_cost_usd:
+            partial = True
+            break
         parser: Parser
         if spec.parser == "rules":
             parser = rule_parser
@@ -128,11 +133,9 @@ def run_agent(
             }
         )
         spent += score.cost_usd
+        dearest = max(dearest, score.cost_usd)
         if progress:
             progress(n, len(cases), spent)
-        if max_cost_usd is not None and spent > max_cost_usd:
-            partial = True
-            break
     return {
         "agent": spec.name,
         "spec": asdict(spec),

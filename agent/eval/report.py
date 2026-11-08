@@ -1,13 +1,16 @@
-"""docs/results/agent.md from the run files in artifacts/eval/agent/ (written by agent.eval.run).
+"""docs/results/agent.md from the run files in artifacts/eval/agent/ (written by agent.eval.run)
+and the chat path's measurement in artifacts/eval/agent/chat/ (agent.eval.chat_latency).
 
-Everything except the latency section is a function of the cases, the code and the items table:
-re-running on the same database gives the same numbers. Latency is wall time on this machine.
+Everything except the latency sections is a function of the cases, the code and the items
+table: re-running on the same database gives the same numbers. Latency is wall time on this
+machine.
 """
 
 from __future__ import annotations
 
 import json
 import math
+from collections import Counter
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -19,6 +22,23 @@ from agent.llm import PRICES_PER_MTOK
 
 ORDER = ["baseline", "oracle", "oracle-bm25", "oracle-vector", "oracle-noprefix"]
 PLANNED_MODELS = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
+CHAT = paths.RUNS / "chat" / "latency.json"
+MACHINE = "machine.json"
+JUDGE = (
+    paths.RUNS / "judge" / "grades.json"
+)  # load and other containers during the offline runs (agent.eval.run)
+CHAT_STAGES = [
+    ("parse", "parse the message"),
+    ("history", "get_purchase_history (when the message refers to it)"),
+    ("search", "search_items: BM25, bge query encoding, pgvector KNN, SQL filters"),
+    ("details", "get_item_details"),
+    ("check", "code checks of every constraint"),
+    ("compat", "device matching (code)"),
+    ("personalize", "get_recommendations: the api's chat surface (HTTP)"),
+    ("reasons", "reasons"),
+    ("ads", "the sponsored item: the api's /internal/ads/select (HTTP)"),
+    ("render", "reply rendering"),
+]
 TEMPLATES = [
     ("budget", "category + budget, ten phrasings (number words, ranges)"),
     ("brand", "category + brand"),
@@ -36,7 +56,9 @@ TEMPLATES = [
 
 
 def load_runs(directory: Path = paths.RUNS) -> list[dict[str, Any]]:
-    runs = [json.loads(p.read_text()) for p in sorted(directory.glob("*.json"))]
+    runs = [
+        json.loads(p.read_text()) for p in sorted(directory.glob("*.json")) if p.name != MACHINE
+    ]
 
     def key(r: dict) -> tuple:
         name = r["agent"]
@@ -316,19 +338,24 @@ def render(runs: list[dict[str, Any]]) -> str:
             "",
         ]
 
+    lines += relevance_section(runs)
     lines += [
-        "## Relevance (language-model judge)",
-        "",
-        "Not run yet. `agent/eval/judge.py` grades each shown item 0 / 1 / 2 with Claude Sonnet 5.5; "
-        "50 cases (fixed seed) go to a person for the same grades, and the report gets exact "
-        "agreement and Cohen's kappa.",
-        "",
         "## Latency (this machine, varies between runs)",
         "",
         "Wall time of a turn in the evaluation process: parsing, tools against the local PostgreSQL "
         "(Docker), checks, rendering; the query encoder (bge-small, CPU) is part of `search_items`.",
         "",
     ]
+    machine = paths.RUNS / MACHINE
+    if machine.exists():
+        mm = json.loads(machine.read_text())
+        other = mm["other_containers"]
+        lines += [
+            f"1-minute load average {mm['load_start']} at the start, {mm['load_end']} at the end; "
+            f"other Docker containers running (outside the compose project "
+            f"`{mm['compose_project']}`): {len(other)}.",
+            "",
+        ]
     lrows = []
     for r in runs:
         s = summarize(r["cases"])
@@ -337,8 +364,9 @@ def render(runs: list[dict[str, Any]]) -> str:
     lines += _table(
         ["agent", "P50", "P95", "parse P50", "search P50", "details P50", "compat P50"], lrows
     )
+    lines += [""]
+    lines += chat_section(runs)
     lines += [
-        "",
         "## Prices used for costs",
         "",
         "USD per million tokens (input / output / cache write / cache read), Claude API list prices "
@@ -349,6 +377,158 @@ def render(runs: list[dict[str, Any]]) -> str:
     lines += _table(["model", "input", "output", "cache write", "cache read"],
                     [[m, *(f"{p:.3g}" for p in ps)] for m, ps in PRICES_PER_MTOK.items()])  # fmt: skip
     return "\n".join(lines) + "\n"
+
+
+def relevance_section(runs: list[dict[str, Any]], path: Path = JUDGE) -> list[str]:
+    lines = ["## Relevance (language-model judge)", ""]
+    if not path.exists():
+        return lines + [
+            "Not run yet. `agent/eval/judge.py` grades each shown item 0 / 1 / 2 with Claude "
+            "Sonnet 5.5 (`agent.eval.run --judge`, part of `make agent-eval-llm`); 50 cases "
+            "(fixed seed) go to a person for the same grades, and the report gets exact "
+            "agreement and Cohen's kappa.",
+            "",
+        ]
+    g = json.loads(path.read_text())
+    rows = []
+    for r in runs:
+        pairs = [(c["case_id"], s["item_id"]) for c in r["cases"] for s in c["record"]["shown"]]
+        got = [g["cases"].get(cid, {}).get(str(i)) for cid, i in pairs]
+        got = [x for x in got if x is not None]
+        rows.append([r["agent"], str(len(pairs)), pct(ratio(len(got), len(pairs))),
+                     f"{sum(got) / len(got):.2f}" if got else "–",
+                     pct(ratio(sum(x == 2 for x in got), len(got))),
+                     pct(ratio(sum(x == 0 for x in got), len(got)))])  # fmt: skip
+    note = ", stopped at the cost cap" if g.get("partial") else ""
+    if g.get("errors"):
+        note += f", {g['errors']} unusable replies"
+    lines += [
+        f"Graded by {g['model']}: {g['calls']} calls, ${g['cost_usd']:.2f}{note}. Each (message, "
+        "item) pair is graded once and shared by every agent that showed the item: 2 = what was "
+        "asked for, 1 = acceptable, 0 = does not fit.",
+        "",
+    ]
+    lines += _table(["agent", "items shown", "graded", "mean grade", "graded 2", "graded 0"], rows)
+    return lines + [
+        "",
+        "Human check: not done yet (`judge.review_sample` writes 50 cases for a person, "
+        "`judge.agreement` gives exact agreement and Cohen's kappa).",
+        "",
+    ]
+
+
+def _llm_latency(case: dict) -> float:
+    return sum(c.get("latency_ms", 0.0) for c in case["record"]["llm_calls"])
+
+
+def chat_section(runs: list[dict[str, Any]], path: Path = CHAT) -> list[str]:
+    """The chat path through the running services (agent.eval.chat_latency), and its cost."""
+    lines = ["## Chat path (/v1/chat)", ""]
+    if not path.exists():
+        return lines + [
+            "Not measured yet: `make agent-latency`, with the stack, the model server, the api "
+            "and the agent service running.",
+            "",
+        ]
+    run = json.loads(path.read_text())
+    m, rs = run["meta"], run["replies"]
+    lines += [
+        f"Measured {m['started'][:16].replace('T', ' ')} UTC (commit `{m['git']}`): {len(rs)} replies "
+        f"({m['cases']} messages × {m['repeats']}), one at a time after {m['warmup']} warm-up "
+        f"replies, through the agent service's HTTP endpoint with the `{m['parser']}` parser. "
+        f"Senders: {m['users']}. The agent service, the Go api and the model server run on this "
+        f"machine ({m['cpus']} CPUs), the stack in Docker; 1-minute load average "
+        f"{m['load_start'][0]} at the start, {m['load_end'][0]} at the end.",
+        "",
+    ]
+    if "quiet_start" in m:
+        other = m["other_containers"]
+        busy = (
+            ""
+            if m["quiet_start"]
+            else (
+                f"**Indicative only**: the machine did not get quiet (1-minute load below 2) within "
+                f"{m['waited_s'] / 60:.0f} minutes of waiting, so the run started busy; it is to be "
+                "re-run in the next measurement window. "
+            )
+        )
+        # A count only: the names belong to whatever else runs on the machine, not to the report.
+        lines += [
+            busy + f"Other Docker containers running during the measurement (outside the stack's "
+            f"compose project `{m['compose_project']}`): {len(other)}.",
+            "",
+        ]
+    rows = []
+    for stage, what in CHAT_STAGES:
+        ran = [r for r in rs if stage in r["timings_ms"]]
+        if stage == "history":  # timed in every reply, called in some
+            ran = [r for r in ran if "get_purchase_history" in r.get("tools", [])]
+        xs = [r["timings_ms"][stage] for r in ran]
+        if xs:
+            share = "" if len(xs) == len(rs) else f" ({pct(len(xs) / len(rs), 0)} of replies)"
+            rows.append([stage, what + share, _ms(quantile(xs, 0.5)), _ms(quantile(xs, 0.95))])
+        elif stage == "history":
+            rows.append([stage, what + " (not called in this run)", "–", "–"])
+    for label, key in (("service total", None), ("client: reply event", "client_reply_ms"),
+                       ("client: end of stream", "client_total_ms")):  # fmt: skip
+        xs = [r["timings_ms"]["total"] if key is None else r[key] for r in rs]
+        rows.append([f"**{label}**", "", _ms(quantile(xs, 0.5)), _ms(quantile(xs, 0.95))])
+    lines += _table(["stage", "what", "P50", "P95"], rows)
+
+    statuses = Counter(r["status"] for r in rs)
+    personal = [r for r in rs if r["personal"] is not None]
+    moved = sum(r["personal"]["moved"] for r in personal)
+    asked = [r for r in rs if r["ads"] and r["ads"].get("called")]
+    no_cand = sum(1 for r in rs if r["ads"] and not r["ads"].get("called"))
+    filled = sum(r["sponsored"] for r in rs)
+    degraded = Counter(d for r in rs for d in r["degraded"])
+    lines += [
+        "",
+        "- Replies: "
+        + ", ".join(f"{k} {v}" for k, v in sorted(statuses.items(), key=lambda kv: -kv[1]))
+        + ".",
+        f"- Personalisation ran in {len(personal)} replies; it changed the items shown or their "
+        f"order in {moved} ({pct(ratio(moved, len(personal)))}).",
+        f"- The ads module was asked in {len(asked)} replies ({no_cand} had no checked item left "
+        f"to advertise) and filled the slot in {filled} ({pct(ratio(filled, len(asked)))} of the "
+        "asks); see the campaigns note below.",
+        "- Degraded: "
+        + (", ".join(f"{k} ×{v}" for k, v in sorted(degraded.items())) or "none")
+        + ".",
+        "",
+    ]
+    if m.get("campaigns"):
+        lines += [f"Campaigns during the run: {m['campaigns']}", ""]
+
+    lines += [
+        "Cost per reply. The rules parser calls no model; with a language model the reply also "
+        "waits for the parse, the compatibility judge (only when the code confirmed fewer items "
+        "than the reply shows) and the reasons:",
+        "",
+    ]
+    crow = [[f"`{m['parser']}` (measured above)", "0", "0", "0", "$0", "–"]]
+    for model in PLANNED_MODELS:
+        mine = [r for r in runs if r["spec"].get("model") == model]
+        if not mine:
+            crow.append([model, "not run", "", "", "", ""])
+            continue
+        cases = [c for r in mine for c in r["cases"]]
+        s = summarize(cases)
+        crow.append([f"{model} (offline evaluation, {len(mine)} runs)", f"{s['llm_calls']:.2f}",
+                     f"{s['in_tokens']:,.0f}", f"{s['out_tokens']:,.0f}", _usd(s["cost"]),
+                     _ms(quantile([_llm_latency(c) for c in cases], 0.5))])  # fmt: skip
+    lines += _table(["parser", "LLM calls / reply", "input tokens / reply",
+                     "output tokens / reply", "cost / reply", "model time P50"], crow)  # fmt: skip
+    if any(r[1] == "not run" for r in crow):
+        lines += [
+            "",
+            "Not run: the Claude rows need the user's `ANTHROPIC_API_KEY` in `.env`. The plan "
+            "(design §19, 2026-11-08): Opus 5.5 by default, Sonnet 5.5 and Haiku 5.5 to compare, "
+            "effort low; a smoke run capped at $1 (`make agent-eval-llm-smoke`), then the full run "
+            "capped at $60 in total and per run at Opus $12, Sonnet $6, Haiku $1 "
+            "(`make agent-eval-llm`), relevance graded by Sonnet 5.5.",
+        ]
+    return lines + [""]
 
 
 def main() -> None:

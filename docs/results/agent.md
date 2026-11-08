@@ -102,19 +102,61 @@ Relevance beyond the constraints (is it the right kind of gel pen?) needs graded
 
 ## Relevance (language-model judge)
 
-Not run yet. `agent/eval/judge.py` grades each shown item 0 / 1 / 2 with Claude Sonnet 5.5; 50 cases (fixed seed) go to a person for the same grades, and the report gets exact agreement and Cohen's kappa.
+Not run yet. `agent/eval/judge.py` grades each shown item 0 / 1 / 2 with Claude Sonnet 5.5 (`agent.eval.run --judge`, part of `make agent-eval-llm`); 50 cases (fixed seed) go to a person for the same grades, and the report gets exact agreement and Cohen's kappa.
 
 ## Latency (this machine, varies between runs)
 
 Wall time of a turn in the evaluation process: parsing, tools against the local PostgreSQL (Docker), checks, rendering; the query encoder (bge-small, CPU) is part of `search_items`.
 
+1-minute load average 2.46 at the start, 2.5 at the end; other Docker containers running (outside the compose project `recloop-m6`): 25.
+
 | agent | P50 | P95 | parse P50 | search P50 | details P50 | compat P50 |
 |---|---|---|---|---|---|---|
-| baseline | 10 ms | 13 ms | 0.1 ms | 9.1 ms | 0.7 ms | 0.0 ms |
-| oracle | 9.5 ms | 12 ms | 0.0 ms | 8.6 ms | 0.6 ms | 0.0 ms |
-| oracle-bm25 | 2.0 ms | 3.8 ms | 0.0 ms | 1.2 ms | 0.5 ms | 0.0 ms |
-| oracle-vector | 9.5 ms | 11 ms | 0.0 ms | 8.7 ms | 0.6 ms | 0.0 ms |
-| oracle-noprefix | 8.9 ms | 11 ms | 0.0 ms | 8.1 ms | 0.6 ms | 0.0 ms |
+| baseline | 10 ms | 14 ms | 0.1 ms | 9.3 ms | 0.7 ms | 0.0 ms |
+| oracle | 9.8 ms | 12 ms | 0.0 ms | 8.9 ms | 0.7 ms | 0.0 ms |
+| oracle-bm25 | 1.9 ms | 3.4 ms | 0.0 ms | 1.2 ms | 0.6 ms | 0.0 ms |
+| oracle-vector | 9.8 ms | 13 ms | 0.0 ms | 8.9 ms | 0.7 ms | 0.0 ms |
+| oracle-noprefix | 9.4 ms | 12 ms | 0.0 ms | 8.5 ms | 0.6 ms | 0.0 ms |
+
+## Chat path (/v1/chat)
+
+Measured 2026-11-08 10:21 UTC (commit `6f57df3`): 450 replies (150 messages × 3), one at a time after 30 warm-up replies, through the agent service's HTTP endpoint with the `rules` parser. Senders: 150 dataset users with >= 3 training-period interactions (seed 20261108). The agent service, the Go api and the model server run on this machine (12 CPUs), the stack in Docker; 1-minute load average 1.43 at the start, 2.29 at the end.
+
+Other Docker containers running during the measurement (outside the stack's compose project `recloop-m6`): 25.
+
+| stage | what | P50 | P95 |
+|---|---|---|---|
+| parse | parse the message | 0.1 ms | 0.2 ms |
+| history | get_purchase_history (when the message refers to it) (not called in this run) | – | – |
+| search | search_items: BM25, bge query encoding, pgvector KNN, SQL filters | 9.6 ms | 12 ms |
+| details | get_item_details | 0.7 ms | 1.0 ms |
+| check | code checks of every constraint | 0.1 ms | 0.2 ms |
+| compat | device matching (code) | 0.0 ms | 1.3 ms |
+| personalize | get_recommendations: the api's chat surface (HTTP) (95% of replies) | 2.0 ms | 2.6 ms |
+| reasons | reasons | 0.0 ms | 0.0 ms |
+| ads | the sponsored item: the api's /internal/ads/select (HTTP) (95% of replies) | 0.7 ms | 1.1 ms |
+| render | reply rendering | 0.0 ms | 0.0 ms |
+| **service total** |  | 14 ms | 18 ms |
+| **client: reply event** |  | 15 ms | 19 ms |
+| **client: end of stream** |  | 15 ms | 19 ms |
+
+- Replies: ok 429, no_results 21.
+- Personalisation ran in 429 replies; it changed the items shown or their order in 198 (46.2%).
+- The ads module was asked in 396 replies (33 had no checked item left to advertise) and filled the slot in 192 (48.5% of the asks); see the campaigns note below.
+- Degraded: none.
+
+Campaigns during the run: 6 active, 131 items in all, bids 20–60¢ per click, daily budgets 10–50 USD.
+
+Cost per reply. The rules parser calls no model; with a language model the reply also waits for the parse, the compatibility judge (only when the code confirmed fewer items than the reply shows) and the reasons:
+
+| parser | LLM calls / reply | input tokens / reply | output tokens / reply | cost / reply | model time P50 |
+|---|---|---|---|---|---|
+| `rules` (measured above) | 0 | 0 | 0 | $0 | – |
+| claude-opus-5-5 | not run |  |  |  |  |
+| claude-sonnet-5-5 | not run |  |  |  |  |
+| claude-haiku-5-5 | not run |  |  |  |  |
+
+Not run: the Claude rows need the user's `ANTHROPIC_API_KEY` in `.env`. The plan (design §19, 2026-11-08): Opus 5.5 by default, Sonnet 5.5 and Haiku 5.5 to compare, effort low; a smoke run capped at $1 (`make agent-eval-llm-smoke`), then the full run capped at $60 in total and per run at Opus $12, Sonnet $6, Haiku $1 (`make agent-eval-llm`), relevance graded by Sonnet 5.5.
 
 ## Prices used for costs
 

@@ -7,11 +7,19 @@
     check        every hard and structured constraint on every row (`agent.constraints`)
     compat       code match first; the model judges the rest only when the code confirmed fewer
                  items than the reply shows, and its verdicts need verified quotes
+    personalize  get_recommendations (the store's chat surface, seeded with the first checked
+                 items) re-orders the first `personal_window` checked items: RRF of the
+                 checked order and the recommendation rank, the latter weighted
+                 `personal_weight` (store only; the evaluation has no recommender)
     reasons      the model's one-liners, replaced by code-written ones when they mention a
                  price or claim an unconfirmed compatibility
+    ads          the sponsored item (design §10.3 (5)): the ads module's auction among the
+                 checked items (compatibility confirmed, if a device was named) that the reply
+                 does not show; at most one, labelled and explained by code (store only)
     reply        rendered from the rows (`agent.render`)
 
-The model never picks or reorders items: order is search rank, confirmed-compatible first.
+The model never picks or reorders items: order is search rank, confirmed-compatible first,
+then the personalisation step, which never adds an item and never removes one.
 """
 
 from __future__ import annotations
@@ -19,16 +27,18 @@ from __future__ import annotations
 import re
 import time
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from pydantic import ValidationError
 
 from agent import compat, constraints, prompts, render, taxonomy
-from agent.catalog import Catalog, Item, SearchFilters, SearchHit
+from agent.catalog import RRF_K, Catalog, Item, SearchFilters, SearchHit
 from agent.llm import LLM, LLMCall, LLMError
 from agent.parsing import ParseOutcome, Parser
 from agent.schema import CompatJudgements, ItemReasons
+from agent.store_api import MAX_AD_CANDIDATES, AdSelector, RecHit, Recommender, SponsoredSlot
 from agent.tools import PurchaseSource, ToolCall, Tools
 
 Status = Literal["ok", "no_results", "parse_failed", "blocked"]
@@ -44,6 +54,13 @@ class AgentConfig:
     search_limit: int = 30
     judge_limit: int = 8
     search_mode: str = "hybrid"
+    # Personalisation: seeds = the first checked items; the chat surface's list is this long;
+    # only the first `personal_window` checked items are re-ordered. With weight 0.1, the
+    # recommender's first pick can pass 6 places at the top of the list, its 50th pick 3.
+    personal_seeds: int = 5
+    personal_limit: int = 50
+    personal_window: int = 10
+    personal_weight: float = 0.1
 
 
 @dataclass
@@ -54,6 +71,24 @@ class Shown:
     reason: str
     reason_source: Literal["model", "code"]
     reason_note: str = ""  # why a model-written reason was replaced
+    personal: RecHit | None = None  # the item's place in the chat surface's list, if any
+
+
+@dataclass
+class Personalization:
+    request_id: str | None  # the recommendation request (its served event)
+    seeds: list[int]
+    hits: int  # re-ordered items that the chat surface also lists
+    moved: bool  # the shown items or their order differ from the checked order
+    ms: float
+
+
+@dataclass
+class Sponsored:
+    item: Item
+    slot: SponsoredSlot  # the ads module's impression_id, ad_token, campaign
+    compat: compat.Verdict | None
+    reason: str
 
 
 @dataclass
@@ -70,6 +105,10 @@ class AgentResult:
     trace: list[ToolCall] = field(default_factory=list)
     llm_calls: list[LLMCall] = field(default_factory=list)
     timings_ms: dict[str, float] = field(default_factory=dict)
+    personal: Personalization | None = None
+    sponsored: Sponsored | None = None
+    ads: dict[str, Any] | None = None  # what the ads call returned (None: not called)
+    degraded: list[str] = field(default_factory=list)  # recommendations_* / ads_* failures
 
     def record(self) -> dict[str, Any]:
         """JSON-serialisable summary (the evaluation stores one per case)."""
@@ -108,6 +147,23 @@ class AgentResult:
                 for s in self.shown
             ],
             "dropped": self.dropped,
+            "personal": None
+            if self.personal is None
+            else {
+                "request_id": self.personal.request_id,
+                "seeds": self.personal.seeds,
+                "hits": self.personal.hits,
+                "moved": self.personal.moved,
+            },
+            "sponsored": None
+            if self.sponsored is None
+            else {
+                "item_id": self.sponsored.item.item_id,
+                "campaign_id": self.sponsored.slot.campaign_id,
+                "impression_id": self.sponsored.slot.impression_id,
+            },
+            "ads": self.ads,
+            "degraded": self.degraded,
             "trace": [
                 {"name": t.name, "args": t.args, "result_ids": t.result_ids, "ms": round(t.ms, 3)}
                 for t in self.trace
@@ -125,16 +181,23 @@ class ShoppingAgent:
         llm: LLM | None = None,
         config: AgentConfig | None = None,
         purchases: PurchaseSource | None = None,
+        recommender: Recommender | None = None,
+        ads: AdSelector | None = None,
     ):
         self.catalog = catalog
         self.parser = parser
         self.llm = llm
         self.config = config or AgentConfig()
         self.purchases = purchases
+        self.recommender = recommender
+        self.ads = ads
 
-    def run(self, message: str, user_id: int) -> AgentResult:
+    def run(
+        self, message: str, user_id: int, on_stage: Callable[[str], None] | None = None
+    ) -> AgentResult:
+        """One turn. `on_stage(name)` is called as each stage starts (the chat stream's status)."""
         cfg = self.config
-        tools = Tools(self.catalog, self.purchases, cfg.search_mode)
+        tools = Tools(self.catalog, self.purchases, cfg.search_mode, self.recommender)
         timings: dict[str, float] = {}
         t_start = t = time.perf_counter()
 
@@ -144,6 +207,11 @@ class ShoppingAgent:
             timings[name] = (now - t) * 1000
             t = now
 
+        def stage(name: str) -> None:
+            if on_stage is not None:
+                on_stage(name)
+
+        stage("parse")
         parse = self.parser.parse(message)
         lap("parse")
         result = AgentResult(message, user_id, "ok", "", parse, trace=tools.trace)
@@ -157,6 +225,7 @@ class ShoppingAgent:
 
         request = parse.request
         wanted = request.constraints()
+        stage("search")
         history = tools.get_purchase_history(user_id) if wanted.last_purchase != "none" else []
         lap("history")
         eff = constraints.resolve(wanted, history)
@@ -180,6 +249,7 @@ class ShoppingAgent:
         items = tools.get_item_details([h.item_id for h in result.hits]) if result.hits else []
         lap("details")
 
+        stage("check")
         rank = {h.item_id: r for r, h in enumerate(result.hits, start=1)}
         kept: list[Item] = []
         dropped: Counter[str] = Counter()
@@ -205,18 +275,121 @@ class ShoppingAgent:
             kept.sort(key=lambda it: (verdicts[it.item_id].status != "confirmed", rank[it.item_id]))
         lap("compat")
 
+        personal: dict[int, RecHit] = {}
+        if self.recommender is not None and kept:
+            stage("personalize")
+            kept, personal, result.personal = self._personalize(
+                tools, user_id, kept, verdicts, result.degraded
+            )
+            lap("personalize")
+
         selected = kept[: cfg.max_results]
+        stage("reasons")
         reasons = self._reasons(message, eff, selected, verdicts, result.llm_calls)
         result.shown = [
-            Shown(it, rank[it.item_id], verdicts.get(it.item_id), *reasons[it.item_id])
+            Shown(
+                it,
+                rank[it.item_id],
+                verdicts.get(it.item_id),
+                *reasons[it.item_id],
+                personal=personal.get(it.item_id),
+            )
             for it in selected
         ]
         lap("reasons")
+        if self.ads is not None and result.shown:
+            stage("ads")
+            result.sponsored = self._sponsor(user_id, eff, kept, verdicts, result)
+            lap("ads")
         result.status = "ok" if result.shown else "no_results"
         result.reply = render.reply(result)
         lap("render")
         timings["total"] = (time.perf_counter() - t_start) * 1000
         return result
+
+    # --- store steps (personalisation, the sponsored item) --------------------------------
+
+    def _personalize(
+        self,
+        tools: Tools,
+        user_id: int,
+        kept: list[Item],
+        verdicts: dict[int, compat.Verdict],
+        degraded: list[str],
+    ) -> tuple[list[Item], dict[int, RecHit], Personalization]:
+        cfg = self.config
+        seeds = [it.item_id for it in kept[: cfg.personal_seeds]]
+        recs = tools.get_recommendations(user_id, seeds, cfg.personal_limit)
+        if recs.error:
+            degraded.append(f"recommendations_{recs.error}")
+        degraded.extend(f"recommendations:{d}" for d in recs.degraded)
+        listed = {h.item_id: h for h in recs.hits}
+        window = kept[: cfg.personal_window]
+
+        def key(entry: tuple[int, Item]) -> tuple[bool, float, int]:
+            pos, it = entry
+            score = 1.0 / (RRF_K + pos)
+            if it.item_id in listed:
+                score += cfg.personal_weight / (RRF_K + listed[it.item_id].rank)
+            # Confirmed-compatible items stay ahead of unconfirmed ones.
+            unconfirmed = bool(verdicts) and verdicts[it.item_id].status != "confirmed"
+            return (unconfirmed, -score, pos)
+
+        order = [it for _, it in sorted(enumerate(window, start=1), key=key)]
+        reordered = order + kept[cfg.personal_window :]
+        hits = {it.item_id: listed[it.item_id] for it in window if it.item_id in listed}
+        shown_before = [it.item_id for it in kept[: cfg.max_results]]
+        shown_after = [it.item_id for it in reordered[: cfg.max_results]]
+        info = Personalization(
+            recs.request_id, seeds, len(hits), shown_before != shown_after, recs.ms
+        )
+        return reordered, hits, info
+
+    def _sponsor(
+        self,
+        user_id: int,
+        eff: constraints.Effective,
+        kept: list[Item],
+        verdicts: dict[int, compat.Verdict],
+        result: AgentResult,
+    ) -> Sponsored | None:
+        """The ads module's pick among the checked items the reply does not show."""
+        assert self.ads is not None
+        shown = {s.item.item_id for s in result.shown}
+        # Every hard constraint was checked on `kept`; a named device must also be confirmed.
+        eligible = [
+            it
+            for it in kept
+            if it.item_id not in shown
+            and (eff.device is None or verdicts[it.item_id].status == "confirmed")
+        ][:MAX_AD_CANDIDATES]
+        if not eligible:
+            result.ads = {"called": False, "candidates": 0}
+            return None
+        sel = self.ads.select_ad(
+            user_id,
+            [it.item_id for it in eligible],
+            sorted(shown),
+            eff.constraints.budget_max_cents,
+        )
+        result.ads = {
+            "called": True,
+            "candidates": len(eligible),
+            "outcome": sel.outcome,
+            "request_id": sel.request_id,
+            "ms": round(sel.ms, 3),
+        }
+        if sel.error:
+            result.degraded.append(f"ads_{sel.error}")
+        result.degraded.extend(f"ads:{d}" for d in sel.degraded)
+        if sel.slot is None:
+            return None
+        item = next((it for it in eligible if it.item_id == sel.slot.item_id), None)
+        if item is None:
+            # Never show an item the code did not check, whatever the ads module says.
+            result.degraded.append("ads_not_a_candidate")
+            return None
+        return Sponsored(item, sel.slot, verdicts.get(item.item_id), render.SPONSORED_REASON)
 
     # --- language-model steps ---------------------------------------------------------------
 

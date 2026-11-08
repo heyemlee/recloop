@@ -13,6 +13,7 @@ earlier purchases; the evaluation shows where that matters.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -117,21 +118,22 @@ class RuleParser:
     def from_catalog(cls, brands: Iterable[str | None], min_items: int = 2) -> RuleParser:
         """A brand dictionary from the catalog's brand column, without the noise a rule writer
         would remove: brands on fewer than `min_items` items, and 'brands' that are ordinary
-        words or product names in this catalog ('Need', 'Colored Pencils')."""
+        words or product names in this catalog ('Need', 'Colored Pencils'). Each brand is kept in
+        its most common spelling ('Pilot', not the one listing's '.Pilot')."""
         counts: dict[str, int] = {}
-        spelling: dict[str, str] = {}
+        spellings: dict[str, Counter[str]] = {}
         for b in brands:
             n = text.norm_phrase(b or "")
             if n:
                 counts[n] = counts.get(n, 0) + 1
-                spelling.setdefault(n, b or "")
+                spellings.setdefault(n, Counter())[b or ""] += 1
         keep = []
         for n, c in counts.items():
             if c < min_items or len(n) < 2 or n in text.QUERY_STOPWORDS:
                 continue
             if taxonomy.match_alias(n) is not None:
                 continue
-            keep.append(spelling[n])
+            keep.append(min(spellings[n].items(), key=lambda kv: (-kv[1], kv[0]))[0])
         return cls(keep)
 
     def _find_brand(self, message: str) -> str | None:

@@ -4,13 +4,16 @@
   * get_item_details(ids): current rows of the items table.
   * get_purchase_history(user_id): the user's purchases, most recent first (orders by default;
     in the store also the dataset users' training period, see history.py).
+  * get_recommendations(user_id, seed_items, limit): the store's chat surface
+    (/v1/recommendations?surface=chat, no ads), the personalisation signal. Only the store's
+    assistant has a recommender; the evaluation's cases have no user state, so it is not called.
 
 The trace is what the evaluation scores as tool-call correctness: the expected calls follow from
 the gold constraints (history only when the request refers to an earlier purchase, the filters
 equal to the gold constraints, no repeated or extra calls).
 
-`get_recommendations` (surface=chat) and the sponsored slot come after M3's online part (ads in
-the mixer, /internal/ads/select) is merged.
+The sponsored item is not a tool: the agent's code asks the ads module for it after the checks
+(`agent.agent`, design §10.2).
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from agent.catalog import Catalog, Item, Purchase, SearchFilters, SearchHit
+from agent.store_api import Recommendations, Recommender
 
 PurchaseSource = Callable[[int, int], list[Purchase]]
 
@@ -41,6 +45,7 @@ class Tools:
     # each case's own purchase list.
     purchases: PurchaseSource | None = None
     search_mode: str = "hybrid"
+    recommender: Recommender | None = None
     trace: list[ToolCall] = field(default_factory=list)
 
     def _record(self, name: str, args: dict[str, Any], ids: list[int], t0: float) -> None:
@@ -68,3 +73,13 @@ class Tools:
         args = {"user_id": user_id, "limit": limit}
         self._record("get_purchase_history", args, [p.item_id for p, _ in out], t0)
         return out
+
+    def get_recommendations(
+        self, user_id: int, seed_items: Sequence[int], limit: int = 50
+    ) -> Recommendations:
+        assert self.recommender is not None
+        t0 = time.perf_counter()
+        recs = self.recommender.recommend(user_id, list(seed_items), limit)
+        args = {"user_id": user_id, "seed_items": list(seed_items), "limit": limit}
+        self._record("get_recommendations", args, [h.item_id for h in recs.hits], t0)
+        return recs
