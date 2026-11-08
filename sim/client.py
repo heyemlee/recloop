@@ -65,6 +65,10 @@ class Api:
         except json.JSONDecodeError:
             return status, None
 
+    def delete(self, path: str) -> int:
+        status, _, _ = self._request("DELETE", path)
+        return status
+
     def close(self) -> None:
         if self.conn is not None:
             self.conn.close()
