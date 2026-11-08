@@ -75,6 +75,7 @@ export type Debug = {
   diversity_promotions: number;
   backfill: number;
   offset: number;
+  ranker?: string;
   ads?: AdsDebug;
   took_ms: number;
 };

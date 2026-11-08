@@ -95,6 +95,7 @@ type Debug struct {
 	Cache      string             `json:"candidate_cache,omitempty"`
 	Stages     map[string]float64 `json:"stages_ms,omitempty"`
 	Mode       string             `json:"mode,omitempty"`
+	Ranker     string             `json:"ranker,omitempty"` // what ordered the organic list (M4)
 	Ads        *adDebug           `json:"ads,omitempty"`
 	TookMs     float64            `json:"took_ms"`
 }
@@ -662,7 +663,7 @@ func (s *Server) recommend(q *request, specs []mixer.Spec, limit int, debugOn bo
 		resp.Debug = &Debug{
 			UserID: q.uid, HV: uc.HV, History: hist, Sources: srcs, Weights: weights,
 			Candidates: len(cands.Items), Filters: fstats, Promoted: promoted, Backfill: backfill,
-			Cache: cacheResult, Stages: q.stages, Mode: mode,
+			Cache: cacheResult, Stages: q.stages, Mode: mode, Ranker: served.Ranker,
 		}
 		if ad != nil {
 			resp.Debug.Ads = &adDebug{adResult: *ad, Slots: ad.Slots}

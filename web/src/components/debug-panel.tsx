@@ -15,6 +15,7 @@ export function DebugPanel({ resp }: { resp: RecResponse }) {
         <Field label="request" value={resp.request_id} mono />
         <Field label="model_version" value={resp.model_version} mono testId="model-version" />
         <Field label="config_version" value={String(resp.config_version)} mono />
+        {d?.ranker && <Field label="ranker" value={d.ranker} mono testId="ranker" />}
         {d && <Field label="took" value={`${d.took_ms.toFixed(1)} ms`} />}
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-2">
