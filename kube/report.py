@@ -23,11 +23,10 @@ from analysis.billing_report import dollars, table
 ROOT = Path(__file__).resolve().parent.parent
 ART = ROOT / "artifacts" / "deploy"
 DEFAULT_OUT = ROOT / "docs" / "results" / "deploy.md"
-# A 1-minute load above this at the start of a run is not a quiet machine. Not ml/eval's 2.0:
-# the cluster under test and k6 run on this machine, and the idle cluster alone keeps the load
-# at 2-3.5 (2026-11-08); 5 is the measurement window's own criterion. Other projects'
-# containers are checked separately.
-BUSY_LOAD = 5.0
+# The machine counts as busy when another project's container runs at a run's start or end.
+# Its 1-minute load is reported, not judged: the cluster under test and k6 run on this machine,
+# the idle cluster alone keeps it at 2-3.5, and a run starts while the previous run's own load
+# still shows in it (2026-11-08: up to 5.7), so it cannot tell other work apart.
 SETTLE_S = 30  # after the last new api pod is ready: its connections spread (CONN_CLOSE)
 DRAINED = 1000  # a backlog below this many records counts as drained
 
@@ -172,6 +171,35 @@ def stall_seconds(r: dict) -> float | None:
     return None
 
 
+def failed_windows(r: dict) -> list[tuple[float | None, int, int | None]]:
+    """The k6 windows with failed requests: (start relative to the trigger, failures, fewest
+    ready model-server pods in the window)."""
+    trig = r["actions"][0]["t"] if r["actions"] else None
+    out = []
+    for w in r["k6"]["windows"]:
+        if not w["errors"]:
+            continue
+        span = w.get("s", 5)
+        ready = [x["ready"].get("model-server", 0) for x in r["watch"]["samples"]
+                 if w["t"] <= x["t"] < w["t"] + span]  # fmt: skip
+        out.append((w["t"] - trig if trig else None, w["errors"], min(ready) if ready else None))
+    return out
+
+
+def failed_where(t: float | None, n: int, ready: int | None) -> str:
+    what = "1 request" if n == 1 else f"{n} requests"
+    if t is None:
+        when = "in one window"
+    elif -5 < t < 5:
+        when = "in the 5 s window of a trigger"
+    elif t < 0:
+        when = f"in a window {-t:.0f} s before a trigger"
+    else:
+        when = f"in a window {t:.0f} s after a trigger"
+    pods = "" if ready is None else f", with {ready} model-server pods ready"
+    return f"{what} {when}{pods}"
+
+
 def rollout_summary(runs: list[dict]) -> list[str]:
     gated = [rollout_stats(r) for r in runs if r["variant"] == "gated"]
     noprobe = [rollout_stats(r) for r in runs if r["variant"] == "no-probe"]
@@ -186,17 +214,21 @@ def rollout_summary(runs: list[dict]) -> list[str]:
     head = (
         "The model server's rolling update does not interrupt the service."
         if err == 0
-        else f"The model server's rolling update failed {err:,} requests."
+        else f"The model server's rolling update failed {err:,} of {n:,} requests "
+        f"({pct(err, n, 4)})."
     )
     out = [
         f"- **{head}** In "
-        f"{len(gated)} rolling updates of both model-server pods under {rate} page views/s "
+        f"{len(gated)} rolling update{'' if len(gated) == 1 else 's'} of both model-server pods under {rate} page views/s "
         f"(open loop), {err} of {n:,} requests failed and {deg} of the {dn:,} answered from "
         f"the trigger on were degraded ({pct(deg, dn)}). A new pod got traffic only once its "
         f"bundle had loaded and passed its checks: Ready {rng([med(s['ready_after_start']) for s in gated], secs1)} "
         f"after its container started; never fewer than "
         f"{min((s['min_ready'] for s in gated if s['min_ready'] is not None), default='–')} ready pods."
     ]  # fmt: skip
+    if err:
+        fw = [x for r in runs if r["variant"] == "gated" for x in failed_windows(r)]
+        out[0] += " Failed: " + "; ".join(failed_where(*x) for x in fw) + "."
     if broken:
         b = broken[0]
         out.append(
@@ -211,12 +243,21 @@ def rollout_summary(runs: list[dict]) -> list[str]:
         ne = sum(s["whole"]["errors"] for s in noprobe)
         gm = sum(ms_degraded(r) for r in runs if r["variant"] == "gated")
         nm = sum(ms_degraded(r) for r in runs if r["variant"] == "no-probe")
-        out.append(
+        line = (
             f"  The same rollout without the readiness probe (pods get traffic as soon as they "
             f"start): {pct(nd, nn)} of the requests from the trigger on degraded, {ne} failed; "
             f"degradation reasons that point at the model server (`sasrec_*`, `rank_*`): "
             f"{nm:,.0f} without the probe, {gm:,.0f} with it."
         )
+        if nm <= gm and ne <= err:
+            line += (
+                " The probe made no measurable difference here: `minReadySeconds` keeps each "
+                "old pod until its replacement has run for 5 s, and a new pod serves "
+                f"{rng([med(s['ready_after_start']) for s in gated], secs1)} after its "
+                "container starts (the gated runs); what the probe keeps out is a bundle that "
+                "fails its checks (above)."
+            )
+        out.append(line)
     return out
 
 
@@ -284,18 +325,18 @@ def rollout_section(runs: list[dict]) -> list[str]:
         "Degradation reasons over each variant's runs (the api's `recloop_degraded_total`):",
         "",
     ]
-    reasons = {}
+    reasons: dict[str, dict[str, float]] = {}
     for r in rs:
+        rv = reasons.setdefault(r["variant"], {})
         for k, v in r["server"]["degraded_reasons"].items():
-            reasons.setdefault(r["variant"], {}).setdefault(k, 0)
-            reasons[r["variant"]][k] += v
+            rv[k] = rv.get(k, 0) + v
     for variant, rs_ in reasons.items():
         top = ", ".join(
-            f"`{k}` {round(v):,}" for k, v in sorted(rs_.items(), key=lambda kv: -kv[1])[:6]
+            f"`{k}` {round(v):,}"
+            for k, v in sorted(rs_.items(), key=lambda kv: -kv[1])[:6]
+            if round(v) > 0
         )
         out.append(f"- {variant}: {top or 'none'}")
-    if not reasons:
-        out.append("- none in any run")
     gated = [r for r in rs if r["variant"] == "gated"]
     if gated:
         r = gated[0]
@@ -407,7 +448,7 @@ def hpa_summary(runs: list[dict], meta: dict | None = None) -> list[str]:
     request = f"{cores(req)}-core request" if req else "request"
     return [
         f"- **{head}** At a step from {r0['base']} to {r0['step']} page "
-        f"views/s ({len(rs)} runs), the HorizontalPodAutoscaler (CPU, target "
+        f"views/s ({len(rs)} run{'' if len(rs) == 1 else 's'}), the HorizontalPodAutoscaler (CPU, target "
         f"{r0['hpa']['metrics'][0]['resource']['target']['averageUtilization']} % of the "
         f"{request}) asked for more pods {rng([s['decide_after'] for s in ss], secs)} after the step "
         f"and the first new pod was ready {rng([s['first_ready_after'] for s in ss], secs)} after "
@@ -469,7 +510,23 @@ def hpa_section(runs: list[dict], meta: dict | None = None) -> list[str]:
          "dropped iterations"],
         rows,
     )  # fmt: skip
-    out += ["", "P99 per 5 s window of the first run (ms) and its ready api pods:", ""]
+    reasons: dict[str, float] = {}
+    for r in rs:
+        for k, v in r["server"]["degraded_reasons"].items():
+            reasons[k] = reasons.get(k, 0) + v
+    top = ", ".join(
+        f"`{k}` {round(v):,}" for k, v in sorted(reasons.items(), key=lambda kv: -kv[1])[:6]
+    )
+    out += [
+        "",
+        f"Degradation reasons over the runs (the api's `recloop_degraded_total`): {top or 'none'}. "
+        "A `*_circuit_open` answer comes from a breaker open for 10 s after failed calls (half "
+        "of 20 or more in 10 s, or 10 in a row: `BREAKER_WINDOW`); it is fast, in the RRF "
+        "order of the sources that answered, without ads (§5.1).",
+        "",
+        "P99 per 5 s window of the first run (ms) and its ready api pods:",
+        "",
+    ]
     out += hpa_chart(r0)
     return out
 
@@ -527,7 +584,9 @@ def keda_stats(r: dict) -> dict:
         t_on = action_time(r, "aggregator paused")
         t_off = action_time(r, "aggregator resumed")
     peak = max((v for _, v in lag), default=None)
-    at_off = next((v for t, v in lag if t >= (t_off or 0)), None)
+    t_peak = max(lag, key=lambda x: x[1])[0] if lag else None
+    # The lag when the fault ended: the last sample at or before its end.
+    at_off = next((v for t, v in reversed(lag) if t <= (t_off or 0)), None)
     drained = next((t for t, v in lag if t > (t_off or 0) and v < DRAINED), None)
     up = next((t for t, n in reps if t >= (t_on or 0) and n > 1), None)
     back = (
@@ -536,6 +595,8 @@ def keda_stats(r: dict) -> dict:
     return {
         "component": comp,
         "peak_lag": peak,
+        "peak_after_start": (t_peak - t_on) if t_peak and t_on else None,
+        "fault_seconds": (t_off - t_on) if t_on and t_off else None,
         "lag_at_end_of_fault": at_off,
         "drained_after": (drained - t_off) if drained and t_off else None,
         "scaled_up_after": (up - t_on) if up and t_on else None,
@@ -563,8 +624,22 @@ def keda_summary(runs: list[dict]) -> list[str]:
             f"- **{head}** Billing behind a database {pg or '?'} ms "
             f"slower per reply: lag up to {rng([s['peak_lag'] for s in b], lambda x: f'{x:,.0f}')} "
             f"records, scaled to {rng([s['max_replicas'] for s in b], str)} pods "
-            f"{rng([s['scaled_up_after'] for s in b], secs)} after the slowdown began, lag below "
-            f"{DRAINED:,} {rng([s['drained_after'] for s in b], secs)} after it ended."
+            f"{rng([s['scaled_up_after'] for s in b], secs)} after the slowdown began"
+            + (
+                f"; the lag kept growing with them (peak "
+                f"{rng([s['peak_after_start'] for s in b], secs)} into the "
+                f"{secs(b[0]['fault_seconds'])} slowdown: "
+                f"{rng([s['max_replicas'] for s in b], str)} pods did not keep up with it)"
+                if all(
+                    s["peak_after_start"]
+                    and s["fault_seconds"]
+                    and s["peak_after_start"] >= 0.8 * s["fault_seconds"]
+                    for s in b
+                )
+                else ""
+            )
+            + f"; lag below {DRAINED:,} {rng([s['drained_after'] for s in b], secs)} after it "
+            "ended."
         )
     a = [keda_stats(r) for r in rs if r["variant"] == "aggregator"]
     c = [keda_stats(r) for r in rs if r["variant"] == "aggregator-capped"]
@@ -573,7 +648,7 @@ def keda_summary(runs: list[dict]) -> list[str]:
         scaled = max((s["max_replicas"] or 1) for s in a) > 1
         line = (
             f"  The aggregator after a {pause} s outage "
-            f"(backlog {rng([s['lag_at_end_of_fault'] for s in a], lambda x: f'{x:,.0f}')} records): "
+            f"(backlog {rng([s['peak_lag'] for s in a], lambda x: f'{x:,.0f}')} records): "
             f"drained in {rng([s['drained_after'] for s in a], secs)} "
             + (
                 f"with KEDA ({rng([s['max_replicas'] for s in a], str)} pods)"
@@ -613,8 +688,13 @@ def keda_section(runs: list[dict]) -> list[str]:
         f"{slow or '?'} s (pg-proxy). A batch of 1,000 records that holds a click then takes over "
         "a second, and the topic receives more than that per second.",
         f"- **aggregator**: 30 s in the aggregator is paused at 0 pods (KEDA's paused-replicas) for "
-        f"{pause or '?'} s, then resumed; **aggregator-capped**: the same with the ScaledObject's "
-        "maxReplicaCount at 1, the drain of one pod.",
+        f"{pause or '?'} s, then resumed"
+        + (
+            "; **aggregator-capped**: the same with the ScaledObject's maxReplicaCount at 1, the "
+            "drain of one pod."
+            if any(r["variant"] == "aggregator-capped" for r in rs)
+            else "."
+        ),
         "",
         "Scaling in has a cost here: a removed pod is a static member, which does not leave the "
         "group (by design: a restarted pod takes its partitions back at once), so its partitions "
@@ -753,13 +833,16 @@ def setup_section(meta: dict | None, runs: list[dict]) -> list[str]:
         f"anywhere): {', '.join(f'{k} {v}' for k, v in env['images'].items()) or '?'}.",
         f"- Load: {env.get('k6') or 'k6'} on the host, open loop, to the api's NodePort through "
         "kind's port mapping.",
-        f"- Machine load during the runs: {load_range(runs)}.",
+        f"- Machine load during the runs: {load_range(runs)}; it includes the cluster's own "
+        "load and k6's.",
     ]
     others = sorted({c for r in runs for c in other_containers(r)})
     if others:
         out.append(
             f"- {len(others)} containers of other projects ran in the same VM during the runs."
         )
+    elif runs:
+        out.append("- No other project's container ran in the VM at any run's start or end.")
     out += [
         "",
         "Requests and limits of every container of RecLoop's two charts (CPU in cores):",
@@ -808,11 +891,6 @@ def preliminary(data: dict | None, drill: dict | None) -> list[str]:
         issues.append("not run yet: " + ", ".join(missing))
     if drill is None:
         issues.append("no billing drill on the cluster yet")
-    busy = [
-        m["load1"] for r in runs for m in r.get("machine", [])[:1] if m.get("load1", 0) > BUSY_LOAD
-    ]
-    if busy:
-        issues.append(f"{len(busy)} runs started with a 1-minute load above {BUSY_LOAD:.0f}")
     if any(other_containers(r) for r in runs):
         issues.append("other projects' containers ran in the same VM")
     for x in (data or {}).get("meta", {}).get("resumed", []):

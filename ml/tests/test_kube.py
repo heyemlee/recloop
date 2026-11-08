@@ -373,7 +373,7 @@ def test_deploy_report_renders_deterministically():
     assert "**Preliminary.**" not in text
     # rollout: 0 failed of 3,000, 0 degraded in the rollout window, Ready 4 s after start.
     assert (
-        "1 rolling updates of both model-server pods under 200 page views/s (open loop), 0 of 3,000"
+        "1 rolling update of both model-server pods under 200 page views/s (open loop), 0 of 3,000"
         in text
     )
     assert "Ready 4.0 s after its container started; never fewer than 2 ready pods" in text
@@ -429,7 +429,11 @@ def test_deploy_report_headlines_follow_the_data():
     drill = kube_drill_doc()
     drill["checks"][0]["ok"] = False
     text = report.render(doc, drill)
-    assert "**The model server's rolling update failed 5 requests.**" in text
+    assert "**The model server's rolling update failed 5 of 3,000 requests (0.1667 %).**" in text
+    assert (
+        "Failed: 5 requests in a window 15 s before a trigger, with 2 model-server pods ready."
+        in text
+    )
     assert "**The api did not scale out.**" in text
     assert "**KEDA did not scale billing.**" in text
     assert "**The billing drill on the cluster failed checks.**" in text

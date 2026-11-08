@@ -602,10 +602,12 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--rollout-rate", type=int, default=150)
     p.add_argument("--rollout-seconds", type=int, default=150)
     p.add_argument("--hpa-base", type=int, default=100)
-    # 500/s: one api pod takes it at ~70 % of its half core (~0.7 ms of CPU per page view with
-    # Rank), well above the HPA's 50 %. At 650 and 800/s the scaled-out pods stayed degraded
-    # (rank breaker open, Redis budgets missed) with the node's CPU at ~2.4 of 8 cores: the
-    # single-node stack, not the api's CPU, was the limit (cluster runs of 2026-11-08).
+    # 500/s: one api pod takes it at 60-70 % of its half core (~0.7 ms of CPU per page view with
+    # Rank), above the HPA's 50 %, so it scales out without one pod being overloaded first. At
+    # 650 and 800/s the scaled-out pods stayed degraded (rank breaker open, Redis budgets
+    # missed) in the calibration runs of 2026-11-08, with the node's CPU at ~2.4 of 8 cores;
+    # whether the machine was fully quiet then is not certain (another project's image builds
+    # show no container), so a higher step is worth another try on a quiet machine.
     p.add_argument("--hpa-step", type=int, default=500)
     p.add_argument("--hpa-hold", type=int, default=240)
     p.add_argument("--conn-close", type=float, default=0.02)
