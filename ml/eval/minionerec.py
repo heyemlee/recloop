@@ -421,7 +421,21 @@ def reproduction(gen: Generation, comp: dict, calc: dict) -> dict:
     }
 
 
-SETTINGS_COMPARED = ("num_beams", "batch_size", "dtype", "max_new_tokens", "length_penalty")
+SETTINGS_COMPARED = (
+    "num_beams",
+    "batch_size",
+    "dtype",
+    "max_new_tokens",
+    "length_penalty",
+    "prefill",
+)
+# Runs from before minionerec.engine have no "prefill": each beam encoded its copy of the prompt.
+SETTING_DEFAULTS = {"prefill": "per_beam"}
+
+
+def setting(settings: dict, key: str):
+    """A run's setting, with the default for runs that predate it."""
+    return settings.get(key, SETTING_DEFAULTS.get(key))
 
 
 def comparisons(gens: dict[str, Generation], main: str) -> list[tuple[str, str]]:
@@ -437,9 +451,9 @@ def comparisons(gens: dict[str, Generation], main: str) -> list[tuple[str, str]]
             if gens[x].rows.tolist() != gens[y].rows.tolist():
                 continue
             sx, sy = gens[x].meta["settings"], gens[y].meta["settings"]
-            diff = [k for k in SETTINGS_COMPARED if sx.get(k) != sy.get(k)]
+            diff = [k for k in SETTINGS_COMPARED if setting(sx, k) != setting(sy, k)]
             if len(diff) == 1:
-                x_is_ref = sx.get(diff[0]) == main_settings.get(diff[0])
+                x_is_ref = setting(sx, diff[0]) == setting(main_settings, diff[0])
                 pairs.append((x, y) if x_is_ref else (y, x))
     return pairs
 
@@ -517,6 +531,7 @@ def cost_summary(
             "num_beams": cfg["num_beams"],
             "batch_size": cfg["batch_size"],
             "max_new_tokens": cfg["max_new_tokens"],
+            "prefill": cfg.get("prefill", SETTING_DEFAULTS["prefill"]),
             "samples": cfg["samples"],
             "warmup_calls": skip,
             "per_call": _latency_stats(seconds, skip),
@@ -583,6 +598,8 @@ def run_summary(gen: Generation, test: Split) -> dict:
         "peak_footprint": (meta.get("memory") or {}).get("lifetime_max_footprint"),
         "swapped_out_bytes": meta.get("swapped_out_bytes"),
         "mps_driver_allocated_max": max(b.get("mps_driver_allocated", 0) for b in batches),
+        # minionerec.replay: how many samples have the replayed run's 50 SIDs in the same order
+        "replay": meta.get("replay"),
     }
 
 

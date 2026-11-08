@@ -97,9 +97,12 @@ ml/                         Python 3.12 uv project (own .venv); run modules from
   bundle/                   build (+ faiss_index, run in a torch-free subprocess)
   ann/                      ANN benchmark (FAISS Flat / IVF / HNSW / IVF-PQ) and index updates
   experiment/               bucketing (Python twin of serving/internal/experiment)
+  nearline/                 keys, worker: the nearline generation worker (M7, Redis side)
   tests/
 minionerec/                 Python 3.12 uv project (own .venv, Apple Silicon only): MiniOneRec's
-                            evaluate.py + evaluate.py.patch on MPS (upstream, generate, cost)
+                            evaluate.py + evaluate.py.patch on MPS (upstream, generate, cost);
+                            engine (the same generation as a library, prompt encoded once),
+                            replay (checks it against a run), serve_gen (the worker's generator)
 web/                        Next.js 16 + shadcn/ui (:13000); /api/v1/* is proxied to the Go api
                             (/internal is not), /api/v1/chat to the agent service; e2e/;
                             /advertiser is the advertiser console, /chat the shopping assistant,
@@ -132,7 +135,8 @@ artifacts/   (ignored) models/sasrec, models/ranker, models/pctr, bundles/<versi
              bundles/current, eval/, e2e/, logs/, samples/ (raw/, impressions/, train/, meta/),
              release/, ab/,
              sim/ (world.json, run ledgers), latency/ (results.json),
-             minionerec/ (runs/<name>/, cost/, upstream/ = the staged, patched evaluate.py)
+             minionerec/ (runs/<name>/, cost/, upstream/ = the staged, patched evaluate.py),
+             nearline/ (ab/: run.json, worker/, traffic/, served_gen.jsonl)
 ```
 
 ## Commands
@@ -211,6 +215,11 @@ make minionerec-gen   # MiniOneRec on MPS over the test split, evaluate.sh's 8 s
                       # another (~5 h; resumable); MINIONEREC_ARGS="--name trial --users 200"
 make minionerec-cost  # latency / memory at 10, 20, 50 beams (MPS) + SASRec on the CPU (idle machine)
 make minionerec       # score the runs like make eval -> docs/results/minionerec.md (no GPU)
+make minionerec-replay   # the main run's batches with the prompt encoded once; every SID must match
+                         # (MPS; REPLAY_ARGS="--name once-trial --batches 25" first)
+make gen-worker       # nearline generation worker (MPS) on REDIS_URL; GEN_WORKER_ARGS="--out ..."
+make gen-ab           # simulated A/B: 3 recall sources vs 3 + gen (starts the worker; stack up)
+make nearline-report  # docs/results/nearline.md (after make gen-ab and make samples)
 ```
 
 Python: `uv run --project ml --frozen python -m ml.<package>.<module>` from the repo root (the
@@ -606,3 +615,11 @@ interpreter at exit: `ORT_DISABLE_TELEMETRY=1` (Makefile, model-server image, `m
   (`ml.eval.machine.measure_quietly`; rerun the rest with `--only`). MPS is invisible inside the
   Claude Code sandbox (torch falls back to the CPU), so real runs go outside it. `--base-model`
   runs (tests, smoke checks with a tiny random Qwen2) are left out of the report.
+- Nearline (design §11 steps 5-6): apply.lua queues a user in `gen:queue` (state Redis) when
+  their history changes, only while a worker holds `gen:worker`; due after 30 s of quiet, at
+  most 120 s after the first unanswered change. `ml.nearline.worker` claims due users, reads
+  the last 10 items and hv in one MULTI, has `minionerec.serve_gen` generate (minionerec.engine:
+  evaluate.py's prompts, constraint and beam search, the prompt pass shared by the beams), and
+  writes `gen:{uid}:{ver}` (JSON: hv, at, items, scores; testdata/gen_payload.json pins it).
+  The api reads it in the user-context pipeline only for a recall variant with an `rrf_weights`
+  entry `gen` > 0 and a `gen_version`; that arm's candidate cache key carries the result's hv.

@@ -92,7 +92,8 @@ TOOL_PKGS := github.com/bufbuild/buf/cmd/buf google.golang.org/protobuf/cmd/prot
 	rebuild-redis tools k6 proto sqlc generate build-api serve-model serve-api serve-web web-install \
 	test lint test-ml test-model-server test-minionerec test-agent test-go test-web test-props e2e \
 	fmt sim-world sim srm drill load load-smoke latency-report billing overdelivery billing-drill \
-	billing-report minionerec-gen minionerec-cost minionerec agent-cases agent-eval agent-eval-llm \
+	billing-report minionerec-gen minionerec-cost minionerec minionerec-replay gen-worker gen-ab \
+	nearline-report agent-cases agent-eval agent-eval-llm \
 	agent-eval-llm-smoke serve-agent agent-latency train-ranker spark-image samples test-samples \
 	train-pctr collect release-drill release-report ab ab-report clean-processed clean-artifacts
 
@@ -175,6 +176,21 @@ minionerec-cost: ## MiniOneRec latency / memory at 10, 20, 50 beams (MPS) and SA
 
 minionerec: ## Score MiniOneRec's generations like make eval -> docs/results/minionerec.md (no GPU)
 	$(PY) -m ml.eval.minionerec
+
+# M7 nearline (design §11 steps 5-6). The replay checks "prompt encoded once" against the main
+# run, batch by batch (MPS, idle machine): REPLAY_ARGS="--name once-trial --batches 25" first.
+REPLAY_ARGS ?= --name once-test
+minionerec-replay: ## Replay the main run's batches with the prompt encoded once; every SID sequence must match (MPS)
+	$(MR) python -m minionerec.replay $(REPLAY_ARGS)
+
+gen-worker: ## Nearline generation worker on MPS (GEN_WORKER_ARGS="--out artifacts/nearline/dev"); state Redis from REDIS_URL
+	$(PY) -m ml.nearline.worker --generator-cmd "$(MR) python -m minionerec.serve_gen" $(GEN_WORKER_ARGS)
+
+gen-ab: sim-world build-aggregator ## Simulated A/B: three recall sources vs three + gen (starts the worker; ~2 h); then make samples, nearline-report
+	$(PY) -m sim.gen_ab --worker-args '--generator-cmd "$(MR) python -m minionerec.serve_gen"' $(GEN_AB_FLAGS)
+
+nearline-report: ## docs/results/nearline.md from artifacts/nearline/ab and the sample job's impressions
+	$(PY) -m analysis.nearline_report
 
 bundle: ## Build artifacts/bundles/<version> (current -> it only if there is none: BUNDLE_FLAGS=--current)
 	$(PY) -m ml.bundle.build $(BUNDLE_FLAGS)

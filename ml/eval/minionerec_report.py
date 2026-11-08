@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from ml.eval import metrics
 from ml.eval.machine import BUSY_LOAD
-from ml.eval.minionerec import NAME, REFERENCES, SEGMENT_METRICS, SETTINGS_COMPARED
+from ml.eval.minionerec import NAME, REFERENCES, SEGMENT_METRICS, SETTINGS_COMPARED, setting
 from ml.eval.report import _ci, _signed, _table
 
 METRIC_NAMES = [f"HR@{k}" for k in metrics.KS] + [f"NDCG@{k}" for k in metrics.KS]
@@ -451,11 +451,17 @@ def _cost_section(out: dict) -> list[str]:
     ]
     rows = []
     generate = [c for c in cost["configs"].values() if c["max_new_tokens"] > 1]
-    for c in sorted(generate, key=lambda c: (c["num_beams"], c["batch_size"])):
+    once = {"once": 1}
+    for c in sorted(
+        generate,
+        key=lambda c: (c["num_beams"], once.get(c.get("prefill"), 0), c["batch_size"]),
+    ):
         pc = c["per_call"]
         rows.append(
             [
-                f"{NAME}, {c['num_beams']} beams" + (" †" if _disturbed(c) else ""),
+                f"{NAME}, {c['num_beams']} beams"
+                + (", prompt once" if c.get("prefill") == "once" else "")
+                + (" †" if _disturbed(c) else ""),
                 str(c["batch_size"]),
                 _ms(pc["p50"]),
                 _ms(pc["p90"]),
@@ -510,6 +516,7 @@ def _cost_section(out: dict) -> list[str]:
             "what they generate: encoding the prompt once and sharing its attention cache "
             "across the beams would remove most of that work.",
         ]
+        lines += _prompt_once_notes(cost, full)
     if sasrec and full:
         one = next((r for r in sasrec["runs"] if r["batch_size"] == 1 and r["threads"] == 1), None)
         if one:
@@ -522,6 +529,25 @@ def _cost_section(out: dict) -> list[str]:
             )
     lines.append("")
     return lines
+
+
+def _prompt_once_notes(cost: dict, full: dict) -> list[str]:
+    """The measured effect of encoding the prompt once (minionerec.engine), at batch 1 and 8."""
+    out = []
+    for bs in (1, 8):
+        once = cost["configs"].get(f"beam50_batch{bs}_once")
+        ref = full if bs == 1 else cost["configs"].get("beam50_batch8")
+        if not once or not ref:
+            continue
+        out.append(
+            f"- **Prompt encoded once, batch {bs}.** minionerec.engine encodes each prompt once "
+            "and repeats its attention cache for the 50 beams (the rest of the beam search is "
+            f"transformers' own): {_ms(once['per_call']['p50'])} per call (P50) instead of "
+            f"{_ms(ref['per_call']['p50'])}, {ref['per_call']['p50'] / once['per_call']['p50']:.1f} "
+            f"times faster, {once['samples_per_second']:.2f} users per second, peak memory "
+            f"{_gib(once['peak_footprint'])} instead of {_gib(ref['peak_footprint'])}."
+        )
+    return out
 
 
 FULL_RUN_SHARDS = 8  # evaluate.sh's shards: one process, one model load each
@@ -626,7 +652,7 @@ def _agreement_section(out: dict) -> list[str]:
         rows.append(
             [
                 a["run"],
-                f"{s['num_beams']} / {s['batch_size']} / {s['dtype']}",
+                f"{s['num_beams']} / {s['batch_size']} / {s['dtype']}" + _prefill(s),
                 a["reference"],
                 f"{a['samples']:,}",
                 f"{a['identical_top10']:.1%}",
@@ -662,6 +688,7 @@ def _agreement_section(out: dict) -> list[str]:
         ),
         "",
         *_same_settings_notes(out),
+        *_replay_notes(out),
     ]
 
 
@@ -672,7 +699,7 @@ def _same_settings_notes(out: dict) -> list[str]:
     notes = []
     for a in out["agreement"]:
         s, r = a["settings"], a["reference_settings"]
-        if any(s.get(k) != r.get(k) for k in SETTINGS_COMPARED):
+        if any(setting(s, k) != setting(r, k) for k in SETTINGS_COMPARED):
             continue
         n_run = out["runs"][a["run"]]["summary"]["samples"]
         n_ref = out["runs"][a["reference"]]["summary"]["samples"]
@@ -691,6 +718,32 @@ def _same_settings_notes(out: dict) -> list[str]:
     return [*notes, ""] if notes else []
 
 
+def _prefill(s: dict) -> str:
+    return ", prompt once" if setting(s, "prefill") == "once" else ""
+
+
+def _replay_notes(out: dict) -> list[str]:
+    """Runs of minionerec.replay: the main run's own batches, each prompt encoded once."""
+    notes = []
+    for name, r in out["runs"].items():
+        rep = r["summary"].get("replay")
+        if not rep:
+            continue
+        ref = r["summary"]["selection"].get("replay_of", out["main_run"])
+        verdict = (
+            f"all {rep['samples']:,} samples have `{ref}`'s {r['summary']['settings']['num_beams']} "
+            "SIDs in the same order"
+            if rep["all_identical"]
+            else f"**{rep['samples'] - rep['identical_sequences']:,} of {rep['samples']:,} samples "
+            f"differ from `{ref}`** ({rep['identical_top10']:,} have the same top 10)"
+        )
+        notes.append(
+            f"- `{name}` replays `{ref}`'s batches through minionerec.engine with each prompt "
+            f"encoded once and its attention cache shared by the beams: {verdict}."
+        )
+    return [*notes, ""] if notes else []
+
+
 def _runs_section(out: dict) -> list[str]:
     rows = []
     for name, r in out["runs"].items():
@@ -700,7 +753,7 @@ def _runs_section(out: dict) -> list[str]:
             [
                 name + (" (main)" if name == out["main_run"] else ""),
                 f"{s['samples']:,} / {s['users']:,}",
-                f"{st['num_beams']} / {st['batch_size']}",
+                f"{st['num_beams']} / {st['batch_size']}" + _prefill(st),
                 st["dtype"],
                 s["started"][:16].replace("T", " "),
                 _hours(s["wall_seconds"]),

@@ -97,6 +97,7 @@ type Debug struct {
 	Mode       string             `json:"mode,omitempty"`
 	Ranker     string             `json:"ranker,omitempty"` // what ordered the organic list (M4)
 	Ads        *adDebug           `json:"ads,omitempty"`
+	Gen        *genServed         `json:"gen,omitempty"` // M7: the nearline generation result
 	TookMs     float64            `json:"took_ms"`
 }
 
@@ -158,6 +159,78 @@ type servedPayload struct {
 	Ranker    string   `json:"ranker,omitempty"`
 	Features  []string `json:"features,omitempty"`
 	PCTRModel string   `json:"pctr_model,omitempty"`
+	// M7: the nearline generation result the request saw (arms with the gen source only).
+	Gen *genServed `json:"gen,omitempty"`
+}
+
+// genServed is what a home request of an arm with the gen source saw of the user's nearline
+// generation result (design §11 step 5): fresh (generated from the current history version),
+// stale (from an older one; Lag versions behind), missing, invalid (did not decode) or
+// unavailable (no user state). AgeMs is the result's age when the request was served.
+type genServed struct {
+	Version string `json:"ver"`
+	Status  string `json:"status"`
+	HV      int64  `json:"hv,omitempty"`
+	Lag     int64  `json:"lag,omitempty"`
+	AgeMs   int64  `json:"age_ms,omitempty"`
+	Items   int    `json:"items,omitempty"`
+}
+
+// Gen result statuses (served log, metrics).
+const (
+	GenFresh       = "fresh"
+	GenStale       = "stale"
+	GenMissing     = "missing"
+	GenInvalid     = "invalid"
+	GenUnavailable = "unavailable"
+)
+
+// genVersion is the generator version a request reads (design §11 step 5): the recall variant's
+// "gen_version", on the home feed, when the variant gives the gen source a weight. Empty: the
+// request does not read a generation result (every other arm, and the default config).
+func (s *Server) genVersion(surface string, a experiment.Assignment, weights map[string]float64) string {
+	if surface != recall.SurfaceHome || weights["gen"] <= 0 || len(a.Params) == 0 {
+		return ""
+	}
+	var p struct {
+		GenVersion string `json:"gen_version"`
+	}
+	if err := json.Unmarshal(a.Params, &p); err != nil {
+		return ""
+	}
+	return p.GenVersion
+}
+
+// genStatus describes the result a request read (genVersion non-empty).
+func genStatus(ver string, uc userstate.Context, userOK bool, now time.Time) *genServed {
+	g := &genServed{Version: ver}
+	switch {
+	case !userOK:
+		g.Status = GenUnavailable
+	case uc.GenInvalid:
+		g.Status = GenInvalid
+	case uc.Gen == nil:
+		g.Status = GenMissing
+	default:
+		g.HV, g.Items = uc.Gen.HV, len(uc.Gen.Items)
+		g.AgeMs = now.Sub(uc.Gen.AtTime()).Milliseconds()
+		if lag := uc.HV - uc.Gen.HV; lag > 0 {
+			g.Status, g.Lag = GenStale, lag
+		} else {
+			g.Status = GenFresh
+		}
+	}
+	return g
+}
+
+// genStamp is the part of the candidate cache key that tells generation results apart: a new
+// result (another history version) changes the key, so the next request recomputes and sees it
+// instead of a cached list computed without it (CandidateTTL).
+func genStamp(uc userstate.Context) string {
+	if uc.Gen == nil {
+		return ".g-"
+	}
+	return ".g" + strconv.FormatInt(uc.Gen.HV, 10)
 }
 
 // rankParams are the rank layer's experiment parameters: which order the organic list takes,
@@ -384,6 +457,7 @@ func (s *Server) recommend(q *request, specs []mixer.Spec, limit int, debugOn bo
 	}
 	assign := cfg.Assign(experiment.UserUnit(q.uid))
 	weights := s.weights(q.surface, assign["recall"])
+	genVer := s.genVersion(q.surface, assign["recall"], weights)
 	rp := s.rankParams(assign["rank"])
 	q.bundle = s.bundleFor(rp)
 	b := q.bundle
@@ -395,7 +469,7 @@ func (s *Server) recommend(q *request, specs []mixer.Spec, limit int, debugOn bo
 	var uc userstate.Context
 	status, err := q.redis(q.budget.For(plan.UserContext, plan.CacheGet+plan.Recall+plan.Rank+plan.Ads+plan.Tail), func(c context.Context) error {
 		var err error
-		uc, err = s.Users.Read(c, q.uid, q.now)
+		uc, err = s.Users.ReadWith(c, q.uid, q.now, userstate.ReadOptions{GenVersion: genVer})
 		return err
 	})
 	span.End()
@@ -413,6 +487,12 @@ func (s *Server) recommend(q *request, specs []mixer.Spec, limit int, debugOn bo
 	// Candidate cache (design §4.5): recall + ranking output, keyed by the history version.
 	// Chat requests skip it: their seed items are not part of the key.
 	variant := assign["recall"].Variant + "." + assign["rank"].Variant
+	var gen *genServed
+	if genVer != "" {
+		gen = genStatus(genVer, uc, userOK, q.now)
+		metrics.GenResults.WithLabelValues(gen.Status).Inc()
+		variant += genStamp(uc)
+	}
 	key := cache.CandidateKey(q.uid, q.surface, q.seed, variant, b.Version, uc.HV)
 	cacheResult := CacheOff
 	useCache := s.Cands != nil && q.surface != recall.SurfaceChat
@@ -458,6 +538,9 @@ func (s *Server) recommend(q *request, specs []mixer.Spec, limit int, debugOn bo
 		t = time.Now()
 		rctx, span := q.span("recall")
 		rreq := recall.Request{UserID: q.uid, Surface: q.surface, History: chatHistory(uc.History, q.seeds), Seed: q.seed, Bundle: b}
+		if genVer != "" {
+			rreq.Gen, rreq.GenVersion = uc.Gen, genVer
+		}
 		if s.Bundles != nil {
 			rreq.PinVersion = b.Version // the model server serves exactly this version
 		}
@@ -625,6 +708,7 @@ func (s *Server) recommend(q *request, specs []mixer.Spec, limit int, debugOn bo
 	served.Filters = &fstats
 	served.Cache = cacheResult
 	served.Ads = ad
+	served.Gen = gen
 	s.logServed(q.uid, requestID, served)
 	q.stage("render", t)
 
@@ -664,7 +748,7 @@ func (s *Server) recommend(q *request, specs []mixer.Spec, limit int, debugOn bo
 		resp.Debug = &Debug{
 			UserID: q.uid, HV: uc.HV, History: hist, Sources: srcs, Weights: weights,
 			Candidates: len(cands.Items), Filters: fstats, Promoted: promoted, Backfill: backfill,
-			Cache: cacheResult, Stages: q.stages, Mode: mode, Ranker: served.Ranker,
+			Cache: cacheResult, Stages: q.stages, Mode: mode, Ranker: served.Ranker, Gen: gen,
 		}
 		if ad != nil {
 			resp.Debug.Ads = &adDebug{adResult: *ad, Slots: ad.Slots}
