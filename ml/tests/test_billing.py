@@ -145,7 +145,8 @@ def test_forged_clicks_in_the_simulator():
 
 def drill_doc():
     checks = [{"check": c, "expected": 0, "actual": 0, "ok": True, "detail": ""}
-              for c in ("charges: clicked impressions with no charge", "amounts: charges above budget")]  # fmt: skip
+              for c in ("charges: clicked impressions with no charge", "amounts: charges above budget",
+                        "budget rows = ledger", "Redis spend = ledger")]  # fmt: skip
     return {
         "ok": True, "minutes": 30, "seed": 1, "faults": "duplicate=0.1", "pg_latency_ms": 200,
         "concurrency": 12, "think_ms": "50,300", "freq_cap": 20, "caught_up_seconds": 4.2,
@@ -192,8 +193,14 @@ def test_report_renders_both_runs_deterministically():
         "**The ledger equals the simulator's truth charge by charge**: 10 expected, 10 in the ledger"
         in text
     )
-    assert "**0 charges above budget**" in text
-    assert "0 clicks 3.28 %, 5 clicks 0.00 %; with pacing 0 clicks 1.64 %" in text
+    assert (
+        "**0 campaign-days with charges above budget**; the budget rows and the Redis counters equal the ledger"
+        in text
+    )
+    assert (
+        "0 clicks 3.28 % (100 % of the budgets spent), 5 clicks 0.00 % (100 % of the budgets spent); "
+        "with pacing: 0 clicks 1.64 % (100 % of the budgets spent)"
+    ) in text
     assert "| 60.0 | kill -9 billing |" in text
     assert (
         "| 3 | 2026-11-07 | 60 ¢ | $15.00 | 10 | $15.60 | $15.00 | $0.60 | 1 | $15.00 | $15.00 |"

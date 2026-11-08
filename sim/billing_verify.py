@@ -194,10 +194,15 @@ def verify(run: Path, database_url: str, redis_url: str) -> dict:
     by_day: dict[tuple, list] = defaultdict(list)
     for c in charges.values():
         by_day[(c["campaign_id"], c["day"])].append(c)
-    days, bad_sum, over, bad_row, bad_order = [], [], [], [], []
+    # The budget is the advertiser's setting (campaigns.json; the run never changes it), not the
+    # budget row billing wrote: a row created with the wrong budget must fail here.
+    days, bad_sum, over, bad_row, bad_order, bad_budget = [], [], [], [], [], []
     for key in sorted(set(by_day) | set(rows)):
         cs = by_day.get(key, [])
-        budget, spent = rows.get(key, (campaigns[key[0]]["daily_budget_cents"], 0))
+        budget = campaigns[key[0]]["daily_budget_cents"]
+        row_budget, spent = rows.get(key, (budget, 0))
+        if row_budget != budget:
+            bad_budget.append((key, budget, row_budget))
         prices = sum(c["price"] for c in cs)
         billed = sum(c["billed"] for c in cs)
         partial = sum(0 < c["billed"] < c["price"] for c in cs)
@@ -233,6 +238,14 @@ def verify(run: Path, database_url: str, redis_url: str) -> dict:
         )
     )
     checks.append(check("budget rows = ledger", 0, len(bad_row), str(bad_row[:3])))
+    checks.append(
+        check(
+            "budget rows: the campaign's daily budget",
+            0,
+            len(bad_budget),
+            str(bad_budget[:3]),
+        )
+    )
 
     # Redis: the counters ad serving reads, after reconciliation.
     r = redis.Redis.from_url(redis_url)

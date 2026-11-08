@@ -11,13 +11,21 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import random
+import subprocess
+import sys
 import time
 from datetime import UTC, datetime
+from pathlib import Path
 
 import psycopg
+import redis
 
+from sim import verify as verify_mod
 from sim.client import Api
+
+ROOT = Path(__file__).resolve().parent.parent
 
 
 def claims(token: str) -> dict:
@@ -178,5 +186,35 @@ class Ads:
             time.sleep(0.5)
         raise SystemExit(f"the api did not load the run's {want} campaigns in {timeout}s")
 
+    def candidate_cache(self) -> bool:
+        """Whether the api runs with the candidate cache (GET /readyz)."""
+        status, body, _ = self.api.get_json("/readyz")
+        return bool(body and body.get("candidate_cache"))
+
     def close(self) -> None:
         self.api.close()
+
+
+def redis_url() -> str:
+    return os.environ.get("REDIS_URL", "redis://localhost:16390/0")
+
+
+def evicted_keys() -> int:
+    """Keys Redis evicted so far (INFO stats). Billing runs must not see any: an evicted spend
+    counter makes a spent campaign look new to ad serving until reconciliation repairs it, and
+    evicted dedup markers or frequency counters change the run too."""
+    return int(redis.Redis.from_url(redis_url()).info("stats")["evicted_keys"])
+
+
+def reset_redis() -> None:
+    """Start a run from the seeded user state (`make seed`: FLUSHDB, then the dataset users'
+    histories), as the load tests do: wait until the consumers have applied everything, so no
+    event of an earlier run lands afterwards, then reseed. The spend counters of earlier
+    campaigns go too; billing's reconciliation rebuilds them from the ledger."""
+    verify_mod.wait_for_consumers(("billing", "log-sink", "aggregator"))
+    subprocess.run(
+        [sys.executable, "-m", "ml.data.seed_redis"],
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )

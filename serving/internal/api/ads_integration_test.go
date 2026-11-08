@@ -221,6 +221,25 @@ func TestSponsoredSlotsOnTheHomeFeed(t *testing.T) {
 	}
 }
 
+// Two advertisers promoting the same item never fill both slots with it.
+func TestOneSponsoredSlotPerItem(t *testing.T) {
+	f := newFixtureWith(t, fixtureOpts{items: adItems, ads: true})
+	ids := f.campaigns(
+		campaignSpec{bid: 50, budget: 1000, items: []int32{250}},
+		campaignSpec{bid: 40, budget: 1000, items: []int32{250}},
+		campaignSpec{bid: 30, budget: 1000, items: []int32{270}},
+	)
+	var r recResp
+	f.get("/v1/recommendations?user_id=7&limit=20", &r)
+	got := sponsored(r.Items)
+	if len(got) != 1 || got[0].Position != 3 || got[0].CampaignID != ids[0] || got[0].ItemID != 250 {
+		t.Fatalf("sponsored %+v", got)
+	}
+	if len(r.Items) != 20 || r.Items[8].Slot != api.SlotOrganic {
+		t.Fatalf("position 9: %+v", r.Items[8])
+	}
+}
+
 // Frequency caps count impression events: a sponsored impression reported with its token adds
 // one to fc:{uid}:{cid}:{day}; once the user saw the campaign freq_cap_per_day times today,
 // the next one wins. A bought or sold-out item is never advertised.

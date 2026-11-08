@@ -33,11 +33,12 @@ type Live struct {
 	BidCents     int32
 	FreqCap      int32
 	DailyBudget  int32
-	// RowDay / RowBudget: the campaign's budget for the UTC day the snapshot was loaded on. It
-	// differs from DailyBudget when the budget changed during the day and was capped at what
-	// had been spent (§9.5).
+	// RowDay / RowBudget / RowSpent: the campaign's budget row for the UTC day the snapshot was
+	// loaded on. The budget differs from DailyBudget when it changed during the day and was
+	// capped at what had been spent (§9.5); the spend is the ledger's as of the refresh.
 	RowDay         time.Time
 	RowBudget      int32
+	RowSpent       int32
 	StartAt, EndAt *time.Time
 	Items          []int32 // sorted
 }
@@ -48,6 +49,18 @@ func (l *Live) BudgetOn(day time.Time) int32 {
 		return l.RowBudget
 	}
 	return l.DailyBudget
+}
+
+// Spent is what serving takes as the campaign's spend on a UTC day: the larger of the Redis
+// counter (redis) and the budget row as of the last refresh. Both can only lag behind the
+// ledger, never run ahead of it: the counter by the increments not applied yet, the row by up to
+// one refresh. The row keeps a counter that Redis lost (evicted under memory pressure, or a
+// restart) from making a spent campaign look new until reconciliation repairs it.
+func (l *Live) Spent(day time.Time, redis int64) int64 {
+	if l.RowDay.Equal(day) {
+		return max(redis, int64(l.RowSpent))
+	}
+	return redis
 }
 
 // InFlight reports whether the campaign may serve at t: start_at <= t < end_at, either bound
@@ -89,7 +102,7 @@ func NewSnapshot(cs []Campaign, day, loadedAt time.Time) *Snapshot {
 		s.Campaigns = append(s.Campaigns, &Live{
 			CampaignID: c.ID, AdvertiserID: c.AdvertiserID, BidCents: c.BidCents,
 			FreqCap: c.FreqCapPerDay, DailyBudget: c.DailyBudgetCents,
-			RowDay: day, RowBudget: c.Today.BudgetCents,
+			RowDay: day, RowBudget: c.Today.BudgetCents, RowSpent: c.Today.SpentCents,
 			StartAt: c.StartAt, EndAt: c.EndAt, Items: items,
 		})
 	}
@@ -181,10 +194,11 @@ const (
 )
 
 // Admit applies the budget, frequency and pacing gates to a campaign at `now`: spent is its
-// spend today (Redis), seen the user's impressions of it today (Redis, from impression events),
-// draw a uniform number in [0, 1) for pacing.
+// spend today in Redis (Live.Spent adds the budget row as a floor), seen the user's impressions
+// of it today (Redis, from impression events), draw a uniform number in [0, 1) for pacing.
 func (p Policy) Admit(l *Live, spent, seen int64, now time.Time, draw float64) string {
 	day := UTCDay(now)
+	spent = l.Spent(day, spent)
 	budget := int64(l.BudgetOn(day))
 	if budget-spent <= int64(max(p.SafetyMarginClicks, 0))*int64(l.BidCents) {
 		return GateBudget

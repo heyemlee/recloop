@@ -67,15 +67,31 @@ def drill_summary(d: dict) -> list[str]:
         if d["ok"]
         else f"**{len(failed)} check(s) failed**: " + "; ".join(failed)
     )
-    over = next(c for c in d["checks"] if c["check"] == "amounts: charges above budget")
+    by = {c["check"]: c for c in d["checks"]}
+    over = by["amounts: charges above budget"]
+    agree = [
+        name
+        for name, check in (
+            ("budget rows", "budget rows = ledger"),
+            ("Redis counters", "Redis spend = ledger"),
+        )
+        if by.get(check, {}).get("ok")
+    ]
+    agreement = (
+        f"the {' and the '.join(agree)} equal the ledger"
+        if agree
+        else "neither the budget rows nor Redis equal the ledger"
+    )
+    if len(agree) == 1:
+        agreement += f" ({'Redis' if agree[0] == 'budget rows' else 'the budget rows'} do not)"
     return [
         f"- **Chaos drill** ({d['minutes']:.0f} minutes of simulated traffic, {n['kill']} × "
         f"`kill -9` of billing, {n['redpanda']} Redpanda restarts, PostgreSQL {d['pg_latency_ms']} "
         f"ms slower for billing {n['slow']} times): {d['sponsored_click_events']:,} sponsored "
         f"click events ({d['forged_click_events']} with a forged token) became "
         f"{d['charges']:,} charges. {verdict}: {d['charges_expected']:,} expected, "
-        f"{d['charges']:,} in the ledger. **{over['actual']} charges above budget**; the "
-        f"budget rows and the Redis counters equal the ledger.",
+        f"{d['charges']:,} in the ledger. **{over['actual']} campaign-days with charges above "
+        f"budget**; {agreement}.",
     ]
 
 
@@ -99,6 +115,12 @@ def drill_section(d: dict) -> list[str]:
         f"{d['sponsored_impressions']:,} of them seen. The run's {d['campaigns']} campaigns were "
         "served with a safety margin of 0 clicks, the setting that lets the most clicks "
         "arrive after a budget is spent.",
+        "",
+        f"The run started from the seeded Redis state, with the api's candidate cache "
+        f"{'on' if d.get('candidate_cache') else 'off'} to keep 30 minutes of simulated traffic far "
+        f"from Redis's memory cap: Redis evicted {d.get('evicted_keys', 'an unknown number of')} "
+        "keys during the run (an evicted spend counter would make a spent campaign look new to "
+        "ad serving until reconciliation repairs it).",
         "",
         f"During the traffic: {n['kill']} × `kill -9` of the billing container (started again "
         f"{down} s later), {n['redpanda']} restarts of Redpanda, and {n['slow']} windows of "
@@ -170,7 +192,9 @@ def drill_section(d: dict) -> list[str]:
             f"During the drill billing's own reconciler (every minute, restarted with billing "
             f"{during['billing_starts']} times) found a Redis counter behind the ledger in "
             f"{during['passes_with_repairs']} passes and added {during['repaired_cents']} ¢: "
-            "increments lost when billing was killed between its commit and the Redis update.",
+            "increments not in Redis yet, either lost (billing killed between its commit and "
+            "the Redis update) or still on their way (committed just before the pass read the "
+            "ledger). Each counts once either way: the repair uses the charge's own dedup marker.",
         ]
     out += [
         "",
@@ -211,23 +235,23 @@ def config_name(r: dict) -> tuple[str, str]:
 
 def overdelivery_summary(o: dict) -> list[str]:
     by = {(r["margin"], r["pacing"]): r["summary"] for r in o["results"]}
-    parts = []
-    for m in sorted({r["margin"] for r in o["results"]}):
-        s = by.get((m, False))
-        if s:
-            parts.append(f"{m} clicks {pct(s['overdelivery'], 2)}")
-    paced = [
-        f"{m} clicks {pct(by[(m, True)]['overdelivery'], 2)}"
-        for m in sorted({r["margin"] for r in o["results"]})
-        if (m, True) in by
-    ]
-    line = (
-        "- **Overdelivery** (clicks the platform absorbs, as a share of the budgets) by safety margin: "
-        + ", ".join(parts)
-    )
+    margins = sorted({r["margin"] for r in o["results"]})
+
+    def parts(paced: bool) -> str:
+        return ", ".join(
+            f"{m} clicks {pct(by[(m, paced)]['overdelivery'], 2)} ({pct(by[(m, paced)]['spent'], 0)} "
+            "of the budgets spent)"
+            for m in margins
+            if (m, paced) in by
+        )
+
+    line = "- **Overdelivery** (clicks the platform absorbs, as a share of the budgets) by safety margin"
+    plain, paced = parts(False), parts(True)
+    if plain:
+        line += ": " + plain
     if paced:
-        line += "; with pacing " + ", ".join(paced)
-    return [line + ". Details and the cost in unspent budget in §2."]
+        line += "; with pacing: " + paced
+    return [line + ". Details in §2."]
 
 
 def overdelivery_section(o: dict) -> list[str]:
@@ -244,7 +268,11 @@ def overdelivery_section(o: dict) -> list[str]:
         "billing seconds after its slot was served. The stub pCTR is the same for every ad, so "
         "the auction ranks by bid: the first campaign is shown first and runs out first, and the "
         "next one moves up. The safety margin and pacing are an ads-layer experiment (§8), "
-        "changed between configurations.",
+        "changed between configurations. Each configuration starts from the seeded Redis state; "
+        f"the api ran with its candidate cache {'on' if o.get('candidate_cache') else 'off'}, and "
+        "Redis evicted "
+        + ", ".join(str(r.get("evicted_keys", "?")) for r in o["results"])
+        + " keys during the six runs.",
         "",
         "- *overdelivery*: the auction price of clicks not billed (the budget was spent when they "
         "came in) / the budgets;",
@@ -270,6 +298,15 @@ def overdelivery_section(o: dict) -> list[str]:
         "rlrrrrrrrr",
     )  # fmt: skip
     out += [
+        "",
+        "How to read it: a click is absorbed when its slot was served while the campaign still "
+        "had budget and the click came in after the budget was gone. With no margin, serving "
+        "stops the moment the spend in Redis reaches the budget, and the clicks still on their "
+        "way from the slots served just before are absorbed: about (users looking at the "
+        "campaign's slots at that moment) × CTR clicks, whatever the budget. A margin of n "
+        "clicks stops serving while n clicks' worth is left, so fewer than n clicks on their way "
+        "are billed in full; the price is the budget that is never spent. Pacing spreads a "
+        "campaign's spend over its window, so it reaches the end of its budget late and slowly.",
         "",
         "Per campaign (spend by the end of each quarter of the window, as a share of its budget):",
         "",

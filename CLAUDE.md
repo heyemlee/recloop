@@ -127,8 +127,9 @@ make load          # latency experiments -> docs/results/latency.md (~90 min; id
                    # LOAD_FLAGS='--resume "<reason>"' continues results.json, the report says so)
 make load-smoke    # 1 repeat, 15 s runs -> artifacts/latency/smoke.md (development)
 make latency-report  # re-render latency.md from artifacts/latency/results.json
-make billing       # overdelivery + billing-drill -> docs/results/billing.md (~70 min; stack, api,
-                   # model server up; refuses to run while other campaigns are active)
+make billing       # overdelivery + billing-drill -> docs/results/billing.md (~75 min; stack, model
+                   # server and `CANDIDATE_CACHE=off make serve-api` up; reseeds Redis; refuses to
+                   # run while other campaigns are active)
 make overdelivery  # safety margin 0 / 5 / 20 clicks x pacing, 6 x ~5 min -> artifacts/billing/
 make billing-drill # 30 min of traffic, kill -9 billing, Redpanda restarts, PostgreSQL +200 ms
                    # for billing; then the ledger against the simulator's truth, charge by charge
@@ -265,11 +266,14 @@ interpreter at exit: `ORT_DISABLE_TELEMETRY=1` (Makefile, model-server image, `m
   event (`spend.lua`). Token expiry is judged at the click's receive time (stamped by the api),
   not at processing time.
 - Sponsored slots (`api/ads.go`, `ads/serving.go`): positions 3 and 9 of the home feed (the
-  auction's first and second place; organic items move down; not on item pages). Active
+  auction's first and second place, one slot per item; organic items move down; not on item
+  pages). Active
   campaigns are kept in memory, reloaded every 5 s (a snapshot older than 1 min serves no ads:
   `ads_stale`). Per request: in the flight window -> items in stock, not bought, not in the
   request's organic list (all 200) -> one Redis MGET of `spend:{cid}:{yyyymmdd}` and
-  `fc:{uid}:{cid}:{yyyymmdd}` (budget `BUDGET_ADS_MS`, 10) -> budget left > safety margin x bid,
+  `fc:{uid}:{cid}:{yyyymmdd}` (budget `BUDGET_ADS_MS`, 10) -> budget left > safety margin x bid
+  (spend = max(Redis counter, the budget row of the last refresh): an evicted counter cannot
+  make a spent campaign look new),
   frequency below the cap, pacing -> `FixedPCTR` (`ADS_FIXED_PCTR` 0.01, floor `ADS_MIN_PCTR`)
   -> `ads.Run` -> signed tokens. The page store keeps the slots (later pages show them); ads are
   never in the candidate cache. Failure: organic feed, `ads_<timeout|error|skipped>` /
@@ -303,7 +307,10 @@ interpreter at exit: `ORT_DISABLE_TELEMETRY=1` (Makefile, model-server image, `m
   can never pass the ledger. A counter ahead is reported, not changed.
 - Billing runs (`make billing`): `sim.overdelivery` and `sim.billing_drill` create their own
   campaigns through the api (and end them), refuse to start while other campaigns are active,
-  and write `artifacts/billing/`. The truth (`sim.billing_verify`) comes from the simulator's
+  reseed Redis before every configuration (`ml.data.seed_redis`, after the consumers caught
+  up), and write `artifacts/billing/`. Redis must not evict during them (`evicted_keys` is
+  recorded; the drill fails on any): run the api with `CANDIDATE_CACHE=off`, or 30 minutes of
+  simulated traffic fill the 384 MB. The truth (`sim.billing_verify`) comes from the simulator's
   ledger only: the tokens it was served (claims read, not verified), its clicks, which ones it
   forged (`forge` fault). `--dwell-ms` delays a page's events (time to click). The drill's
   docker commands use `COMPOSE_PROJECT_NAME` and the repo's `.env`; `PG_PROXY_URL` reaches

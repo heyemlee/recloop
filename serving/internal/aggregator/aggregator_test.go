@@ -142,7 +142,7 @@ func TestSponsoredImpressionsCountTowardsTheCap(t *testing.T) {
 	}
 	// ok once (redelivered) + expired (served two TTLs earlier, possibly the day before).
 	want := int64(1)
-	if events.Day(served.Add(-2*adtoken.TTL)).Equal(day) {
+	if events.Day(served.Add(-2 * adtoken.TTL)).Equal(day) {
 		want = 2
 	}
 	if n[0] != want {

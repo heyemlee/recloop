@@ -142,11 +142,15 @@ def main(argv: list[str] | None = None) -> None:
 
     ads = ads_mod.Ads(api_url, db_url)
     ads.require_no_active_campaigns()
+    cache = ads.candidate_cache()
     items = ads.pick_items(len(CAMPAIGNS) * ITEMS_PER_CAMPAIGN, args.seed)
     results = []
     try:
         for name in args.configs.split(","):
             margin, paced = parse_config(name)
+            # Every configuration starts from the same user state, with Redis far from its
+            # memory cap (an evicted spend counter would corrupt the measurement).
+            ads_mod.reset_redis()
             ads.set_policy(EXP_ID, margin, paced)
             ads.wait_policy(margin, paced, user=1)
             t0 = time.time() + args.lead
@@ -168,18 +172,22 @@ def main(argv: list[str] | None = None) -> None:
                  "--dwell-ms", args.dwell_ms, "--seed", str(args.seed), "--out", str(run_dir),
                  "--api", api_url]
             )  # fmt: skip
+            evicted = ads_mod.evicted_keys()
             summary = run_mod.run_main(sim_args)
             ads.end(ids)
             verify_mod.wait_for_consumers(("billing",))
+            evicted = ads_mod.evicted_keys() - evicted
             with psycopg.connect(db_url) as conn:
                 per = measure(conn, ids, t0, args.window, read_pages(run_dir / "ledger.jsonl"))
             res = {"config": name, "margin": margin, "pacing": paced, "t0": t0,
-                   "campaigns": per, "summary": summarize(per), "sim": summary}  # fmt: skip
+                   "campaigns": per, "summary": summarize(per), "sim": summary,
+                   "evicted_keys": evicted}  # fmt: skip
             results.append(res)
             s = res["summary"]
             print(f"  overdelivery {s['overdelivery']:.2%}, spent {s['spent']:.1%}, "
                   f"{s['exhausted']}/{s['campaigns']} ran out (median {s['ran_out_median']}), "
-                  f"serving stopped at {s['stopped_median']}", flush=True)  # fmt: skip
+                  f"serving stopped at {s['stopped_median']}, Redis evicted {evicted} keys",
+                  flush=True)  # fmt: skip
     finally:
         ads.stop_policy(EXP_ID)
         ads.close()
@@ -187,7 +195,8 @@ def main(argv: list[str] | None = None) -> None:
         "window_s": args.window, "tail_s": args.tail, "concurrency": args.concurrency,
         "dwell_ms": args.dwell_ms, "think_ms": args.think_ms, "seed": args.seed,
         "campaigns": [{"bid": b, "budget": bud} for b, bud in CAMPAIGNS],
-        "items_per_campaign": ITEMS_PER_CAMPAIGN, "freq_cap": 100, "results": results,
+        "items_per_campaign": ITEMS_PER_CAMPAIGN, "freq_cap": 100, "candidate_cache": cache,
+        "results": results,
     }  # fmt: skip
     path = ROOT / "artifacts" / "billing" / "overdelivery.json"
     path.write_text(json.dumps(doc, indent=2))

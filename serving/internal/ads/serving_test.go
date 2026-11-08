@@ -127,6 +127,28 @@ func TestBudgetGate(t *testing.T) {
 	}
 }
 
+// The budget row (refreshed every few seconds) is a floor under the Redis counter: a counter
+// that Redis lost does not make a spent campaign look new.
+func TestSpendFloorFromTheBudgetRow(t *testing.T) {
+	l := live(1, 10, 1000)
+	l.RowSpent = 995
+	if l.Spent(day, 0) != 995 || l.Spent(day, 998) != 998 || l.Spent(day.Add(24*time.Hour), 3) != 3 {
+		t.Fatalf("spent %d %d %d", l.Spent(day, 0), l.Spent(day, 998), l.Spent(day.Add(24*time.Hour), 3))
+	}
+	if g := (ads.Policy{}).Admit(l, 0, 0, at(12, 0), 0); g != "" {
+		t.Fatalf("5 left: %q", g)
+	}
+	l.RowSpent = 1000 // the counter was evicted (0), the row says it is spent
+	if g := (ads.Policy{}).Admit(l, 0, 0, at(12, 0), 0); g != ads.GateBudget {
+		t.Fatalf("evicted counter: %q", g)
+	}
+	cs := []ads.Campaign{{ID: 1, Settings: ads.Settings{Status: ads.StatusActive, DailyBudgetCents: 500, ItemIDs: []int32{1}},
+		Today: ads.BudgetDay{BudgetCents: 500, SpentCents: 120}}}
+	if s := ads.NewSnapshot(cs, day, at(1, 0)); s.Campaigns[0].RowSpent != 120 {
+		t.Fatalf("row spent %d", s.Campaigns[0].RowSpent)
+	}
+}
+
 func TestFrequencyCap(t *testing.T) {
 	l := live(1, 10, 1000)
 	p := ads.Policy{}

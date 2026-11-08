@@ -50,11 +50,16 @@ func env(key, def string) string {
 }
 
 func main() {
-	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	cmd := "run"
 	if len(os.Args) > 1 {
 		cmd = os.Args[1]
 	}
+	// `billing reconcile` prints its report on stdout: its log goes to stderr.
+	out := os.Stdout
+	if cmd != "run" {
+		out = os.Stderr
+	}
+	log := slog.New(slog.NewJSONHandler(out, nil))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	var err error

@@ -204,7 +204,14 @@ func (s *Server) selectAds(q *request, requestID uuid.UUID, positions []int, a e
 	}
 
 	winners := ads.Run(cands, ads.Config{Slots: len(positions), ReserveCents: ads.ReserveCents, MinPCTR: policy.MinPCTR})
+	placed := map[int32]bool{}
 	for _, w := range winners {
+		if placed[w.ItemID] {
+			// Two advertisers promote the same item and both won: one sponsored slot per item;
+			// the other position stays organic.
+			continue
+		}
+		placed[w.ItemID] = true
 		pos := positions[w.Rank-1]
 		tok, err := s.Ads.Keys.Sign(adtoken.Claims{
 			RequestID: requestID, Position: pos, CampaignID: w.CampaignID, ItemID: w.ItemID,

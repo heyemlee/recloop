@@ -31,7 +31,8 @@ var raiseScript = redis.NewScript(raiseLua)
 //   - Budget row vs ledger: written by the same transaction, read in one statement; a difference
 //     is a bug, reported (metric, error log) and left for a human.
 //   - Redis behind the ledger: an increment was lost (the process died between COMMIT and the
-//     Redis update, or Redis lost data). Repaired from the ledger: each charge's increment is
+//     Redis update, or Redis lost data), or has not been applied yet (a charge committed just
+//     before the ledger read). Repaired from the ledger either way: each charge's increment is
 //     applied with billing's own script and dedup marker (dedup:billing:{click event_id}), so
 //     a charge counts exactly once whether billing's own update or the repair gets there first.
 //     Then the counter is raised to at least the ledger's sum, for a counter that lost its value
@@ -48,7 +49,7 @@ type Reconciler struct {
 // Campaign-day states of a pass.
 const (
 	StateMatch       = "match"
-	StateRedisBehind = "redis_behind" // repaired
+	StateRedisBehind = "redis_behind" // repaired (lost increments, or ones still on their way)
 	StateRedisAhead  = "redis_ahead"
 )
 

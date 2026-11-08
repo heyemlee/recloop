@@ -148,9 +148,11 @@ def chaos(steps: list[dict], pg_ms: int, log: list, stop: threading.Event) -> No
 def reconcile() -> dict:
     """One reconciliation pass (billing reconcile): the ledger, the budget rows and Redis."""
     p = subprocess.run([str(BIN / "billing"), "reconcile"], capture_output=True, text=True)
-    if p.returncode not in (0, 1):
-        raise SystemExit(f"billing reconcile failed: {p.stderr}")
-    return json.loads(p.stdout)
+    # Exit 1 = the pass found a disagreement: its report (stdout) says which; the log is stderr.
+    try:
+        return json.loads(p.stdout)
+    except json.JSONDecodeError:
+        raise SystemExit(f"billing reconcile failed ({p.returncode}): {p.stderr}") from None
 
 
 def repairs_during(since: float) -> dict:
@@ -203,6 +205,11 @@ def main(argv: list[str] | None = None) -> None:
 
     ads = ads_mod.Ads(api_url, db_url)
     ads.require_no_active_campaigns()
+    cache = ads.candidate_cache()
+    # The seeded user state, and Redis far from its memory cap: an evicted spend counter, dedup
+    # marker or frequency counter would change the run (the run fails if any key is evicted).
+    ads_mod.reset_redis()
+    evicted = ads_mod.evicted_keys()
     # Toxiproxy reachable, and no toxic left from an earlier run.
     with contextlib.suppress(urllib.error.HTTPError):  # 404: none
         pg_slow(False, 0)
@@ -250,6 +257,7 @@ def main(argv: list[str] | None = None) -> None:
     t = time.time()
     verify_mod.wait_for_consumers(("billing", "log-sink", "aggregator"))
     caught_up = time.time() - t
+    evicted = ads_mod.evicted_keys() - evicted
     during = repairs_during(started)
     rec = reconcile()
     rep = billing_verify.verify(out, db_url, redis_url)
@@ -262,10 +270,15 @@ def main(argv: list[str] | None = None) -> None:
         "campaign_settings": [{"campaign_id": c["campaign_id"], "bid": c["bid_cpc_cents"],
                                "budget": c["daily_budget_cents"]} for c in camps],
         "caught_up_seconds": round(caught_up, 1), "reconcile": rec, "reconciler_during": during,
+        "evicted_keys": evicted, "candidate_cache": cache,
         "pipeline": {k: pipeline[k] for k in ("events", "pages", "checks", "ok")},
     })  # fmt: skip
     rep["ok"] = (
-        rep["ok"] and pipeline["ok"] and rec["redis_ahead"] == 0 and rec["row_mismatch"] == 0
+        rep["ok"]
+        and pipeline["ok"]
+        and rec["redis_ahead"] == 0
+        and rec["row_mismatch"] == 0
+        and evicted == 0
     )
     (out / "verify.json").write_text(json.dumps(rep, indent=2))
     billing_verify.print_report(rep)
