@@ -31,9 +31,9 @@ type RetrieveRequest struct {
 	History []int32 `protobuf:"varint,1,rep,packed,name=history,proto3" json:"history,omitempty"`
 	// Number of organic candidates; 0 means the server default (200).
 	K int32 `protobuf:"varint,2,opt,name=k,proto3" json:"k,omitempty"`
-	// Ad items that already passed eligibility filtering; scored, not retrieved (M3).
+	// Ad items that already passed eligibility filtering; scored, not retrieved.
 	AdItemIds []int32 `protobuf:"varint,3,rep,packed,name=ad_item_ids,json=adItemIds,proto3" json:"ad_item_ids,omitempty"`
-	// Bundle version to serve the request with (canary, §6); empty means the active version.
+	// Bundle version to serve the request with (canary, §6); empty means the server's default.
 	PinVersion    string `protobuf:"bytes,4,opt,name=pin_version,json=pinVersion,proto3" json:"pin_version,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -98,10 +98,11 @@ func (x *RetrieveRequest) GetPinVersion() string {
 }
 
 type RetrieveResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ModelVersion  string                 `protobuf:"bytes,1,opt,name=model_version,json=modelVersion,proto3" json:"model_version,omitempty"`
-	Organic       []*Scored              `protobuf:"bytes,2,rep,name=organic,proto3" json:"organic,omitempty"`
-	Ads           []*Scored              `protobuf:"bytes,3,rep,name=ads,proto3" json:"ads,omitempty"`
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	ModelVersion string                 `protobuf:"bytes,1,opt,name=model_version,json=modelVersion,proto3" json:"model_version,omitempty"`
+	Organic      []*Scored              `protobuf:"bytes,2,rep,name=organic,proto3" json:"organic,omitempty"`
+	// One per ad_item_ids entry the bundle knows, in request order: the SASRec inner product.
+	Ads           []*Scored `protobuf:"bytes,3,rep,name=ads,proto3" json:"ads,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -209,16 +210,190 @@ func (x *Scored) GetScore() float32 {
 	return 0
 }
 
-// Defined in M3 (ads pCTR) and M4 (organic ranking).
-type RankRequest struct {
+// What one recall source said about a candidate.
+type SourceHit struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
+	Source        string                 `protobuf:"bytes,1,opt,name=source,proto3" json:"source,omitempty"` // sasrec | itemcf | pop | text
+	Rank          int32                  `protobuf:"varint,2,opt,name=rank,proto3" json:"rank,omitempty"`    // 1-based rank in the source's list
+	Score         float32                `protobuf:"fixed32,3,opt,name=score,proto3" json:"score,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SourceHit) Reset() {
+	*x = SourceHit{}
+	mi := &file_recloop_modelserver_v1_model_server_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SourceHit) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SourceHit) ProtoMessage() {}
+
+func (x *SourceHit) ProtoReflect() protoreflect.Message {
+	mi := &file_recloop_modelserver_v1_model_server_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SourceHit.ProtoReflect.Descriptor instead.
+func (*SourceHit) Descriptor() ([]byte, []int) {
+	return file_recloop_modelserver_v1_model_server_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *SourceHit) GetSource() string {
+	if x != nil {
+		return x.Source
+	}
+	return ""
+}
+
+func (x *SourceHit) GetRank() int32 {
+	if x != nil {
+		return x.Rank
+	}
+	return 0
+}
+
+func (x *SourceHit) GetScore() float32 {
+	if x != nil {
+		return x.Score
+	}
+	return 0
+}
+
+type Candidate struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ItemId        int32                  `protobuf:"varint,1,opt,name=item_id,json=itemId,proto3" json:"item_id,omitempty"`
+	Hits          []*SourceHit           `protobuf:"bytes,2,rep,name=hits,proto3" json:"hits,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Candidate) Reset() {
+	*x = Candidate{}
+	mi := &file_recloop_modelserver_v1_model_server_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Candidate) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Candidate) ProtoMessage() {}
+
+func (x *Candidate) ProtoReflect() protoreflect.Message {
+	mi := &file_recloop_modelserver_v1_model_server_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Candidate.ProtoReflect.Descriptor instead.
+func (*Candidate) Descriptor() ([]byte, []int) {
+	return file_recloop_modelserver_v1_model_server_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *Candidate) GetItemId() int32 {
+	if x != nil {
+		return x.ItemId
+	}
+	return 0
+}
+
+func (x *Candidate) GetHits() []*SourceHit {
+	if x != nil {
+		return x.Hits
+	}
+	return nil
+}
+
+type AdCandidate struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	ItemId int32                  `protobuf:"varint,1,opt,name=item_id,json=itemId,proto3" json:"item_id,omitempty"`
+	// SASRec relevance from Retrieve; unset: the model server encodes the history itself (a
+	// request whose organic candidates came from the cache made no Retrieve call).
+	Relevance     *float32 `protobuf:"fixed32,2,opt,name=relevance,proto3,oneof" json:"relevance,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AdCandidate) Reset() {
+	*x = AdCandidate{}
+	mi := &file_recloop_modelserver_v1_model_server_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AdCandidate) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AdCandidate) ProtoMessage() {}
+
+func (x *AdCandidate) ProtoReflect() protoreflect.Message {
+	mi := &file_recloop_modelserver_v1_model_server_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AdCandidate.ProtoReflect.Descriptor instead.
+func (*AdCandidate) Descriptor() ([]byte, []int) {
+	return file_recloop_modelserver_v1_model_server_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *AdCandidate) GetItemId() int32 {
+	if x != nil {
+		return x.ItemId
+	}
+	return 0
+}
+
+func (x *AdCandidate) GetRelevance() float32 {
+	if x != nil && x.Relevance != nil {
+		return *x.Relevance
+	}
+	return 0
+}
+
+type RankRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Most recent item_ids, oldest first (the same window as Retrieve).
+	History []int32 `protobuf:"varint,1,rep,packed,name=history,proto3" json:"history,omitempty"`
+	// Fused organic candidates in their current order; may be empty.
+	Candidates []*Candidate `protobuf:"bytes,2,rep,name=candidates,proto3" json:"candidates,omitempty"`
+	// Ad candidates for pCTR; may be empty.
+	Ads []*AdCandidate `protobuf:"bytes,3,rep,name=ads,proto3" json:"ads,omitempty"`
+	// Bundle version, as for Retrieve.
+	PinVersion    string `protobuf:"bytes,4,opt,name=pin_version,json=pinVersion,proto3" json:"pin_version,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RankRequest) Reset() {
 	*x = RankRequest{}
-	mi := &file_recloop_modelserver_v1_model_server_proto_msgTypes[3]
+	mi := &file_recloop_modelserver_v1_model_server_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -230,7 +405,7 @@ func (x *RankRequest) String() string {
 func (*RankRequest) ProtoMessage() {}
 
 func (x *RankRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_recloop_modelserver_v1_model_server_proto_msgTypes[3]
+	mi := &file_recloop_modelserver_v1_model_server_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -243,18 +418,59 @@ func (x *RankRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RankRequest.ProtoReflect.Descriptor instead.
 func (*RankRequest) Descriptor() ([]byte, []int) {
-	return file_recloop_modelserver_v1_model_server_proto_rawDescGZIP(), []int{3}
+	return file_recloop_modelserver_v1_model_server_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *RankRequest) GetHistory() []int32 {
+	if x != nil {
+		return x.History
+	}
+	return nil
+}
+
+func (x *RankRequest) GetCandidates() []*Candidate {
+	if x != nil {
+		return x.Candidates
+	}
+	return nil
+}
+
+func (x *RankRequest) GetAds() []*AdCandidate {
+	if x != nil {
+		return x.Ads
+	}
+	return nil
+}
+
+func (x *RankRequest) GetPinVersion() string {
+	if x != nil {
+		return x.PinVersion
+	}
+	return ""
 }
 
 type RankResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	ModelVersion string                 `protobuf:"bytes,1,opt,name=model_version,json=modelVersion,proto3" json:"model_version,omitempty"`
+	// Names of the feature columns below (the bundle's features.json).
+	FeatureNames []string `protobuf:"bytes,2,rep,name=feature_names,json=featureNames,proto3" json:"feature_names,omitempty"`
+	// One row per organic candidate, row-major, in request order; NaN = missing.
+	Features []float32 `protobuf:"fixed32,3,rep,packed,name=features,proto3" json:"features,omitempty"`
+	// LightGBM score per organic candidate (higher first); empty if the bundle has no ranker.
+	Scores []float32 `protobuf:"fixed32,4,rep,packed,name=scores,proto3" json:"scores,omitempty"`
+	// One feature row per ad candidate, row-major, in request order.
+	AdFeatures []float32 `protobuf:"fixed32,5,rep,packed,name=ad_features,json=adFeatures,proto3" json:"ad_features,omitempty"`
+	// pCTR per ad candidate at the reference position; empty if the bundle has no pCTR model.
+	AdPctr        []float32 `protobuf:"fixed32,6,rep,packed,name=ad_pctr,json=adPctr,proto3" json:"ad_pctr,omitempty"`
+	Ranker        string    `protobuf:"bytes,7,opt,name=ranker,proto3" json:"ranker,omitempty"`                        // e.g. "lightgbm"; empty without a ranker
+	PctrModel     string    `protobuf:"bytes,8,opt,name=pctr_model,json=pctrModel,proto3" json:"pctr_model,omitempty"` // e.g. "logreg"; empty without a pCTR model
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RankResponse) Reset() {
 	*x = RankResponse{}
-	mi := &file_recloop_modelserver_v1_model_server_proto_msgTypes[4]
+	mi := &file_recloop_modelserver_v1_model_server_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -266,7 +482,7 @@ func (x *RankResponse) String() string {
 func (*RankResponse) ProtoMessage() {}
 
 func (x *RankResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_recloop_modelserver_v1_model_server_proto_msgTypes[4]
+	mi := &file_recloop_modelserver_v1_model_server_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -279,7 +495,63 @@ func (x *RankResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RankResponse.ProtoReflect.Descriptor instead.
 func (*RankResponse) Descriptor() ([]byte, []int) {
-	return file_recloop_modelserver_v1_model_server_proto_rawDescGZIP(), []int{4}
+	return file_recloop_modelserver_v1_model_server_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *RankResponse) GetModelVersion() string {
+	if x != nil {
+		return x.ModelVersion
+	}
+	return ""
+}
+
+func (x *RankResponse) GetFeatureNames() []string {
+	if x != nil {
+		return x.FeatureNames
+	}
+	return nil
+}
+
+func (x *RankResponse) GetFeatures() []float32 {
+	if x != nil {
+		return x.Features
+	}
+	return nil
+}
+
+func (x *RankResponse) GetScores() []float32 {
+	if x != nil {
+		return x.Scores
+	}
+	return nil
+}
+
+func (x *RankResponse) GetAdFeatures() []float32 {
+	if x != nil {
+		return x.AdFeatures
+	}
+	return nil
+}
+
+func (x *RankResponse) GetAdPctr() []float32 {
+	if x != nil {
+		return x.AdPctr
+	}
+	return nil
+}
+
+func (x *RankResponse) GetRanker() string {
+	if x != nil {
+		return x.Ranker
+	}
+	return ""
+}
+
+func (x *RankResponse) GetPctrModel() string {
+	if x != nil {
+		return x.PctrModel
+	}
+	return ""
 }
 
 var File_recloop_modelserver_v1_model_server_proto protoreflect.FileDescriptor
@@ -299,9 +571,38 @@ const file_recloop_modelserver_v1_model_server_proto_rawDesc = "" +
 	"\x03ads\x18\x03 \x03(\v2\x1e.recloop.modelserver.v1.ScoredR\x03ads\"7\n" +
 	"\x06Scored\x12\x17\n" +
 	"\aitem_id\x18\x01 \x01(\x05R\x06itemId\x12\x14\n" +
-	"\x05score\x18\x02 \x01(\x02R\x05score\"\r\n" +
-	"\vRankRequest\"\x0e\n" +
-	"\fRankResponse2\xbf\x01\n" +
+	"\x05score\x18\x02 \x01(\x02R\x05score\"M\n" +
+	"\tSourceHit\x12\x16\n" +
+	"\x06source\x18\x01 \x01(\tR\x06source\x12\x12\n" +
+	"\x04rank\x18\x02 \x01(\x05R\x04rank\x12\x14\n" +
+	"\x05score\x18\x03 \x01(\x02R\x05score\"[\n" +
+	"\tCandidate\x12\x17\n" +
+	"\aitem_id\x18\x01 \x01(\x05R\x06itemId\x125\n" +
+	"\x04hits\x18\x02 \x03(\v2!.recloop.modelserver.v1.SourceHitR\x04hits\"W\n" +
+	"\vAdCandidate\x12\x17\n" +
+	"\aitem_id\x18\x01 \x01(\x05R\x06itemId\x12!\n" +
+	"\trelevance\x18\x02 \x01(\x02H\x00R\trelevance\x88\x01\x01B\f\n" +
+	"\n" +
+	"_relevance\"\xc2\x01\n" +
+	"\vRankRequest\x12\x18\n" +
+	"\ahistory\x18\x01 \x03(\x05R\ahistory\x12A\n" +
+	"\n" +
+	"candidates\x18\x02 \x03(\v2!.recloop.modelserver.v1.CandidateR\n" +
+	"candidates\x125\n" +
+	"\x03ads\x18\x03 \x03(\v2#.recloop.modelserver.v1.AdCandidateR\x03ads\x12\x1f\n" +
+	"\vpin_version\x18\x04 \x01(\tR\n" +
+	"pinVersion\"\xfd\x01\n" +
+	"\fRankResponse\x12#\n" +
+	"\rmodel_version\x18\x01 \x01(\tR\fmodelVersion\x12#\n" +
+	"\rfeature_names\x18\x02 \x03(\tR\ffeatureNames\x12\x1a\n" +
+	"\bfeatures\x18\x03 \x03(\x02R\bfeatures\x12\x16\n" +
+	"\x06scores\x18\x04 \x03(\x02R\x06scores\x12\x1f\n" +
+	"\vad_features\x18\x05 \x03(\x02R\n" +
+	"adFeatures\x12\x17\n" +
+	"\aad_pctr\x18\x06 \x03(\x02R\x06adPctr\x12\x16\n" +
+	"\x06ranker\x18\a \x01(\tR\x06ranker\x12\x1d\n" +
+	"\n" +
+	"pctr_model\x18\b \x01(\tR\tpctrModel2\xbf\x01\n" +
 	"\vModelServer\x12]\n" +
 	"\bRetrieve\x12'.recloop.modelserver.v1.RetrieveRequest\x1a(.recloop.modelserver.v1.RetrieveResponse\x12Q\n" +
 	"\x04Rank\x12#.recloop.modelserver.v1.RankRequest\x1a$.recloop.modelserver.v1.RankResponseB\xf6\x01\n" +
@@ -319,26 +620,32 @@ func file_recloop_modelserver_v1_model_server_proto_rawDescGZIP() []byte {
 	return file_recloop_modelserver_v1_model_server_proto_rawDescData
 }
 
-var file_recloop_modelserver_v1_model_server_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_recloop_modelserver_v1_model_server_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_recloop_modelserver_v1_model_server_proto_goTypes = []any{
 	(*RetrieveRequest)(nil),  // 0: recloop.modelserver.v1.RetrieveRequest
 	(*RetrieveResponse)(nil), // 1: recloop.modelserver.v1.RetrieveResponse
 	(*Scored)(nil),           // 2: recloop.modelserver.v1.Scored
-	(*RankRequest)(nil),      // 3: recloop.modelserver.v1.RankRequest
-	(*RankResponse)(nil),     // 4: recloop.modelserver.v1.RankResponse
+	(*SourceHit)(nil),        // 3: recloop.modelserver.v1.SourceHit
+	(*Candidate)(nil),        // 4: recloop.modelserver.v1.Candidate
+	(*AdCandidate)(nil),      // 5: recloop.modelserver.v1.AdCandidate
+	(*RankRequest)(nil),      // 6: recloop.modelserver.v1.RankRequest
+	(*RankResponse)(nil),     // 7: recloop.modelserver.v1.RankResponse
 }
 var file_recloop_modelserver_v1_model_server_proto_depIdxs = []int32{
 	2, // 0: recloop.modelserver.v1.RetrieveResponse.organic:type_name -> recloop.modelserver.v1.Scored
 	2, // 1: recloop.modelserver.v1.RetrieveResponse.ads:type_name -> recloop.modelserver.v1.Scored
-	0, // 2: recloop.modelserver.v1.ModelServer.Retrieve:input_type -> recloop.modelserver.v1.RetrieveRequest
-	3, // 3: recloop.modelserver.v1.ModelServer.Rank:input_type -> recloop.modelserver.v1.RankRequest
-	1, // 4: recloop.modelserver.v1.ModelServer.Retrieve:output_type -> recloop.modelserver.v1.RetrieveResponse
-	4, // 5: recloop.modelserver.v1.ModelServer.Rank:output_type -> recloop.modelserver.v1.RankResponse
-	4, // [4:6] is the sub-list for method output_type
-	2, // [2:4] is the sub-list for method input_type
-	2, // [2:2] is the sub-list for extension type_name
-	2, // [2:2] is the sub-list for extension extendee
-	0, // [0:2] is the sub-list for field type_name
+	3, // 2: recloop.modelserver.v1.Candidate.hits:type_name -> recloop.modelserver.v1.SourceHit
+	4, // 3: recloop.modelserver.v1.RankRequest.candidates:type_name -> recloop.modelserver.v1.Candidate
+	5, // 4: recloop.modelserver.v1.RankRequest.ads:type_name -> recloop.modelserver.v1.AdCandidate
+	0, // 5: recloop.modelserver.v1.ModelServer.Retrieve:input_type -> recloop.modelserver.v1.RetrieveRequest
+	6, // 6: recloop.modelserver.v1.ModelServer.Rank:input_type -> recloop.modelserver.v1.RankRequest
+	1, // 7: recloop.modelserver.v1.ModelServer.Retrieve:output_type -> recloop.modelserver.v1.RetrieveResponse
+	7, // 8: recloop.modelserver.v1.ModelServer.Rank:output_type -> recloop.modelserver.v1.RankResponse
+	7, // [7:9] is the sub-list for method output_type
+	5, // [5:7] is the sub-list for method input_type
+	5, // [5:5] is the sub-list for extension type_name
+	5, // [5:5] is the sub-list for extension extendee
+	0, // [0:5] is the sub-list for field type_name
 }
 
 func init() { file_recloop_modelserver_v1_model_server_proto_init() }
@@ -346,13 +653,14 @@ func file_recloop_modelserver_v1_model_server_proto_init() {
 	if File_recloop_modelserver_v1_model_server_proto != nil {
 		return
 	}
+	file_recloop_modelserver_v1_model_server_proto_msgTypes[5].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_recloop_modelserver_v1_model_server_proto_rawDesc), len(file_recloop_modelserver_v1_model_server_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   5,
+			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -13,6 +13,10 @@
   * The SID-rule numbers are cross-checked against MiniOneRec's calc.py for every model.
   * SASRec is compared with the paper's SASRec (MiniOneRec, Table 1) and, when
     `make paper-sasrec` has run, with MiniOneRec's own SASRec script re-run on this split.
+  * RRF is the api's ranking (weighted reciprocal rank fusion of the three sources' top 200,
+    300 candidates; both variants of the recall experiment). LambdaRank is the LightGBM ranker
+    over RRF's candidates, trained on the validation split by `make train-ranker` and loaded
+    here (M4).
 
 Writes docs/results/offline.md (rendered by ml.eval.report) and artifacts/eval/offline.json.
 Does not touch the database.
@@ -33,10 +37,14 @@ from ml import paths
 from ml.data import preprocess
 from ml.eval import bootstrap, calc_check, metrics, minionerec_sasrec, report
 from ml.eval.splits import NUM_ITEMS, Split, item_sids, load_split, sid_codes, train_sequences
-from ml.models import train_sasrec
+from ml.models import train_ranker, train_sasrec
 from ml.models.itemcf import ItemCF, ItemCFParams, cooccurrence
 from ml.models.pop import Pop
+from ml.models.ranker import LambdaRank
+from ml.models.rrf import RRF
 from ml.models.sasrec import SASRec
+from ml.ranking import candidates as cand_mod
+from ml.ranking import features as feat
 
 EVAL_DIR = paths.ARTIFACTS / "eval"
 
@@ -120,7 +128,14 @@ def same_day_as_last(split: Split) -> np.ndarray:
     return last == samples.ts.to_numpy()
 
 
-PAIRS = (("ItemCF", "Pop"), ("SASRec", "Pop"), ("SASRec", "ItemCF"))
+PAIRS = (
+    ("ItemCF", "Pop"),
+    ("SASRec", "Pop"),
+    ("SASRec", "ItemCF"),
+    ("RRF", "SASRec"),
+    ("LambdaRank", "RRF"),
+    ("LambdaRank", "SASRec"),
+)
 
 
 def segment_results(split: Split, test_values: dict) -> dict:
@@ -199,6 +214,40 @@ def sasrec_variants(tuning: dict, test: Split, ev: Evaluator, resampler) -> dict
     return out
 
 
+def load_ranker(rrf: RRF, pop_counts: np.ndarray) -> tuple[LambdaRank, dict]:
+    if not (train_ranker.OUT / "model.txt").exists():
+        raise SystemExit("no ranker: run `make train-ranker` first")
+    return LambdaRank.load(train_ranker.OUT, rrf, feat.ItemTables.build(pop_counts))
+
+
+def ranking_summary(rrf: RRF, test: Split, tuning: dict) -> dict:
+    """What the ranker could reach (target among the candidates) and how it was trained."""
+    c = rrf.candidates(test)
+    found = ((c.items == test.target[:, None]) & c.valid()).any(axis=1)
+    return {
+        "candidates": cand_mod.CANDIDATE_DEPTH,
+        "source_k": cand_mod.SOURCE_K,
+        "rrf_k": cand_mod.RRF_K,
+        "weights": {
+            "control": cand_mod.CONTROL_WEIGHTS,
+            "sasrec_heavy": cand_mod.SASREC_HEAVY_WEIGHTS,
+        },
+        "test_target_in_candidates": float(found.mean()),
+        "features": list(feat.FEATURES),
+        "tuning": {k: v for k, v in tuning.items() if k != "trials"}
+        | {
+            "trials": [
+                {k: v for k, v in t.items() if k != "folds"}
+                | {
+                    "rounds": [f["best_iteration"] for f in t["folds"]],
+                    "fold_ndcg10": [f["held_out"]["NDCG@10"] for f in t["folds"]],
+                }
+                for t in tuning["trials"]
+            ]
+        },
+    }
+
+
 def paper_comparison(test_values: dict, variants: dict, resampler) -> dict:
     out = {"paper": PAPER, "ours": {}, "variants": variants, "minionerec_script": None}
     for name in ("SASRec", "ItemCF"):
@@ -224,19 +273,33 @@ def main() -> None:
     best_params, trials = tune_itemcf(sequences, valid, ev)
     itemcf = ItemCF(best_params).fit(sequences, NUM_ITEMS)
     sasrec, tuning = load_sasrec()
-    models = [pop, itemcf, sasrec]
+    sources = {"sasrec": sasrec, "itemcf": itemcf, "pop": pop}
+    rrf = RRF(sources, cand_mod.CONTROL_WEIGHTS)
+    rrf_heavy = RRF(
+        sources, cand_mod.SASREC_HEAVY_WEIGHTS, name="RRF-heavy", variant="sasrec_heavy"
+    )
+    ranker, ranker_tuning = load_ranker(rrf, pop.counts)
+    if ranker_tuning["recall"]["itemcf_params"] != best_params.__dict__:
+        raise SystemExit("the ranker was trained on another ItemCF: run `make train-ranker` again")
+    models = [pop, itemcf, sasrec, rrf, rrf_heavy, ranker]
 
     resampler = bootstrap.Resampler.build(test.user)
     results, test_values, calc_checks = {}, {}, []
     for model in models:
-        valid_scores = model.score(valid)
-        valid_values = ev.per_sample(valid_scores, valid)
+        if model is ranker:
+            # Trained on the validation split: its in-sample numbers say nothing; report the
+            # cross-validated ones of the selected configuration instead.
+            valid_point = {"item": ranker_tuning["trials"][ranker_tuning["selected"]]["cv"]}
+        else:
+            valid_values = ev.per_sample(model.score(valid), valid)
+            valid_point = {rule: _point(v) for rule, v in valid_values.items()}
         scores = model.score(test)
         values = ev.per_sample(scores, test)
         test_values[model.name] = values
         results[model.name] = {
             "description": model.describe(),
-            "valid": {rule: _point(v) for rule, v in valid_values.items()},
+            "valid": valid_point,
+            "valid_kind": "cross-validated" if model is ranker else "held out",
             "test": {rule: _with_ci(v, resampler) for rule, v in values.items()},
         }
         # calc.py cross-check on the SID rule, K = 1..50.
@@ -285,6 +348,7 @@ def main() -> None:
         "itemcf_trials": trials,
         "sasrec_tuning": {k: v for k, v in tuning.items() if k != "trials"}
         | {"trials": [{k: v for k, v in t.items() if k != "curve"} for t in tuning["trials"]]},
+        "ranking": ranking_summary(rrf, test, ranker_tuning),
         "sasrec_vs_paper": paper_comparison(
             test_values, sasrec_variants(tuning, test, ev, resampler), resampler
         ),

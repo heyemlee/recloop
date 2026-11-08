@@ -42,6 +42,8 @@ AD_TOKEN_KEYS ?= dev1:recloop-dev-only-ad-token-key-not-a-secret-0001
 # M3: the Toxiproxy API in front of billing's PostgreSQL connection (the billing drill).
 RECLOOP_PG_PROXY_PORT ?= 18475
 PG_PROXY_URL ?= http://localhost:$(RECLOOP_PG_PROXY_PORT)
+# M4: releases load and switch bundle versions on the model server's admin port.
+MODEL_SERVER_ADMIN_URL ?= http://127.0.0.1:$(MODEL_SERVER_ADMIN_PORT)
 # The compose project: `recloop` is the shared stack (the compose file's name). A checkout with a
 # private stack sets COMPOSE_PROJECT_NAME and its ports in .env; docker compose reads neither the
 # repo's .env nor that name by itself here (the file is in deploy/), so $(COMPOSE) passes both
@@ -51,7 +53,7 @@ export RECLOOP_PG_PORT RECLOOP_REDIS_PORT DATABASE_URL REDIS_URL CACHE_REDIS_URL
 	MODEL_SERVER_PORT MODEL_SERVER_ADMIN_PORT MODEL_SERVER_ADDR RECLOOP_API_URL RECLOOP_BUNDLE \
 	RECLOOP_TEXT_MODEL RECLOOP_KAFKA_PORT KAFKA_BROKERS PROMETHEUS_URL RECLOOP_BENCH_API_PORT \
 	BENCH_MS_ADMIN_URL TOXIPROXY_URL AD_TOKEN_KEYS PG_PROXY_URL COMPOSE_PROJECT_NAME AGENT_PORT \
-	RECLOOP_AGENT_URL
+	RECLOOP_AGENT_URL MODEL_SERVER_ADMIN_URL
 # onnxruntime's telemetry uploader (macOS) can crash the interpreter at exit: off everywhere.
 export ORT_DISABLE_TELEMETRY := 1
 
@@ -91,13 +93,14 @@ TOOL_PKGS := github.com/bufbuild/buf/cmd/buf google.golang.org/protobuf/cmd/prot
 	test lint test-ml test-model-server test-minionerec test-agent test-go test-web test-props e2e \
 	fmt sim-world sim srm drill load load-smoke latency-report billing overdelivery billing-drill \
 	billing-report minionerec-gen minionerec-cost minionerec agent-cases agent-eval agent-eval-llm \
-	agent-eval-llm-smoke serve-agent agent-latency clean-processed clean-artifacts
+	agent-eval-llm-smoke serve-agent agent-latency train-ranker spark-image samples test-samples \
+	train-pctr collect release-drill release-report ab ab-report clean-processed clean-artifacts
 
 help: ## List targets
 	@grep -E '^[a-z0-9-]+:.*## ' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*## "} {printf "  %-18s %s\n", $$1, $$2}'
 
-setup: up data ingest train eval bundle seed web-install ## Everything from a clean checkout to a runnable demo
+setup: up data ingest train train-ranker eval bundle seed web-install ## Everything from a clean checkout to a runnable demo
 	@echo "ready: run make serve-model, make serve-api and make serve-web (three terminals)"
 
 # The Go services as linux binaries for the containers (aggregator, billing; api in the bench
@@ -151,7 +154,10 @@ train: ## Train and tune SASRec on the train / valid splits -> artifacts/models/
 paper-sasrec: ## Re-run MiniOneRec's own SASRec script on the split (~18 min; make eval reports it)
 	$(PY) -m ml.eval.minionerec_sasrec
 
-eval: ## Offline evaluation of Pop / ItemCF / SASRec -> docs/results/offline.md (no database)
+train-ranker: ## LightGBM LambdaRank on the validation split -> artifacts/models/ranker (~7 min; needs make train)
+	$(PY) -m ml.models.train_ranker
+
+eval: ## Offline evaluation of Pop / ItemCF / SASRec / RRF / LambdaRank -> docs/results/offline.md (no database)
 	$(PY) -m ml.eval.run
 
 ann: ## ANN benchmark + index updates -> docs/results/ann.md (~25 min; run on an idle machine)
@@ -170,8 +176,8 @@ minionerec-cost: ## MiniOneRec latency / memory at 10, 20, 50 beams (MPS) and SA
 minionerec: ## Score MiniOneRec's generations like make eval -> docs/results/minionerec.md (no GPU)
 	$(PY) -m ml.eval.minionerec
 
-bundle: ## Build artifacts/bundles/<version> and point artifacts/bundles/current at it
-	$(PY) -m ml.bundle.build
+bundle: ## Build artifacts/bundles/<version> (current -> it only if there is none: BUNDLE_FLAGS=--current)
+	$(PY) -m ml.bundle.build $(BUNDLE_FLAGS)
 
 seed: ## Flush Redis and load the dataset users' histories and the demo users
 	$(PY) -m ml.data.seed_redis
@@ -228,8 +234,10 @@ serve-model: ## Model server (gRPC) on MODEL_SERVER_PORT, serving artifacts/bund
 serve-api: build-api ## Go api on API_ADDR
 	$(TRACING) $(BIN)/api
 
-serve-web: ## Next.js web app on WEB_PORT (proxies /api to the Go api)
-	cd web && npm run dev -- --port $(WEB_PORT)
+# ADMIN=1 turns on the internal admin page (/admin): releases, experiments, faults (M4).
+ADMIN ?= 0
+serve-web: ## Next.js web app on WEB_PORT (proxies /api/v1 to the Go api; ADMIN=1: the /admin page)
+	cd web && RECLOOP_ADMIN=$(ADMIN) npm run dev -- --port $(WEB_PORT)
 
 web-install: ## Install the web app's dependencies (npm ci)
 	cd web && npm ci --no-audit --no-fund
@@ -286,6 +294,52 @@ billing-drill: sim-world build-aggregator build-billing ## 30 min of traffic, ki
 
 billing-report: ## Re-render docs/results/billing.md from artifacts/billing/
 	$(PY) -m analysis.billing_report
+
+# ---------------------------------------------------------------- M4: samples, ranking, release
+
+# The training-sample job (design §7.5) is PySpark in local mode inside a container: HotSpot JVMs
+# started from the Claude app's processes on the development Mac crash at startup, and the image
+# pins the JVM and Python packages for every machine. The export runs on the host (psycopg).
+SPARK_IMAGE ?= recloop/spark:dev
+# It runs as the host user, so its outputs are the user's: Hadoop's login needs a name for that
+# uid, given by a one-line passwd file mounted read-only.
+SPARK_PASSWD := $(CURDIR)/.cache/spark-passwd
+SPARK_RUN = docker run --rm --network none --hostname localhost --cpus 2 --memory 4g \
+	--user $$(id -u):$$(id -g) -v "$(SPARK_PASSWD)":/etc/passwd:ro -v "$(CURDIR)":/repo $(SPARK_IMAGE)
+DAY ?= $(shell date -u +%F)
+spark-image: ## Image of the training-sample job: PySpark 4.2 (local mode) on a Temurin 21 JRE
+	docker build -q -t $(SPARK_IMAGE) -f deploy/spark.Dockerfile deploy/spark
+	@mkdir -p $(dir $(SPARK_PASSWD)) && printf 'spark:x:%s:%s:spark:/tmp:/bin/sh\n' "$$(id -u)" "$$(id -g)" > $(SPARK_PASSWD)
+
+samples: spark-image ## Training samples of DAY (UTC, default today): export events_raw, PySpark join -> artifacts/samples
+	$(PY) -m ml.samples.export --around $(DAY)
+	$(SPARK_RUN) -m ml.samples.job --day $(DAY) $(SAMPLES_FLAGS)
+
+test-samples: spark-image ## The sample job's tests, in its container (2 CPUs)
+	$(SPARK_RUN) -m pytest -q -p no:cacheprovider ml/tests/test_samples.py
+
+train-pctr: ## Logistic-regression pCTR on the samples (artifacts/samples/train) -> artifacts/models/pctr
+	$(PY) -m ml.models.pctr
+
+# The M4 runs need the stack, the model server and the api (`make serve-model`, `make serve-api`).
+COLLECT_SECONDS ?= 900
+collect: sim-world build-aggregator ## Traffic for the training samples: standing campaigns, COLLECT_SECONDS of sessions (~15 min)
+	$(PY) -m sim.standing
+	$(PY) -m sim.run --sessions 10000000 --max-seconds $(COLLECT_SECONDS) --concurrency 16 --think-ms 50,300 \
+		--out artifacts/sim/collect
+
+release-drill: sim-world ## Canary -> full rollout of NEW, then BAD rolled back, under traffic (~35 min) -> docs/results/release.md
+	$(PY) -m sim.release_drill --new $(NEW) --bad $(BAD) $(DRILL_FLAGS)
+	$(PY) -m analysis.release_report
+
+release-report: ## Re-render docs/results/release.md from artifacts/release/drill.json
+	$(PY) -m analysis.release_report
+
+ab: sim-world build-aggregator ## A/A, then the A/B of the ranker (RRF vs LightGBM) on simulated traffic (2 x 20 min); then make samples, ab-report
+	$(PY) -m sim.ab $(AB_FLAGS)
+
+ab-report: ## docs/results/ab.md from artifacts/ab/run.json and the sample job's impressions
+	$(PY) -m analysis.ab_report
 
 # ---------------------------------------------------------------- M6: shopping assistant
 

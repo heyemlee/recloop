@@ -7,9 +7,10 @@ package recloop.modelserver.v1;
 
 service ModelServer {
   // Encodes the history into a user vector and returns the top-k organic candidates from the
-  // item index; also scores the eligible ad items (M3).
+  // item index; the same user vector also scores the eligible ad items (relevance, §9.2).
   rpc Retrieve(RetrieveRequest) returns (RetrieveResponse);
-  // M3: pCTR for ad candidates; M4: LightGBM ranking of organic candidates. Not implemented yet.
+  // Describes and scores candidates with the bundle's ranking models (M4): the ranker's
+  // features and LightGBM score of every organic candidate, and the pCTR of every ad candidate.
   rpc Rank(RankRequest) returns (RankResponse);
 }
 
@@ -18,15 +19,16 @@ message RetrieveRequest {
   repeated int32 history = 1;
   // Number of organic candidates; 0 means the server default (200).
   int32 k = 2;
-  // Ad items that already passed eligibility filtering; scored, not retrieved (M3).
+  // Ad items that already passed eligibility filtering; scored, not retrieved.
   repeated int32 ad_item_ids = 3;
-  // Bundle version to serve the request with (canary, §6); empty means the active version.
+  // Bundle version to serve the request with (canary, §6); empty means the server's default.
   string pin_version = 4;
 }
 
 message RetrieveResponse {
   string model_version = 1;
   repeated Scored organic = 2;
+  // One per ad_item_ids entry the bundle knows, in request order: the SASRec inner product.
   repeated Scored ads = 3;
 }
 
@@ -35,7 +37,48 @@ message Scored {
   float score = 2;
 }
 
-// Defined in M3 (ads pCTR) and M4 (organic ranking).
-message RankRequest {}
+// What one recall source said about a candidate.
+message SourceHit {
+  string source = 1; // sasrec | itemcf | pop | text
+  int32 rank = 2; // 1-based rank in the source's list
+  float score = 3;
+}
 
-message RankResponse {}
+message Candidate {
+  int32 item_id = 1;
+  repeated SourceHit hits = 2;
+}
+
+message AdCandidate {
+  int32 item_id = 1;
+  // SASRec relevance from Retrieve; unset: the model server encodes the history itself (a
+  // request whose organic candidates came from the cache made no Retrieve call).
+  optional float relevance = 2;
+}
+
+message RankRequest {
+  // Most recent item_ids, oldest first (the same window as Retrieve).
+  repeated int32 history = 1;
+  // Fused organic candidates in their current order; may be empty.
+  repeated Candidate candidates = 2;
+  // Ad candidates for pCTR; may be empty.
+  repeated AdCandidate ads = 3;
+  // Bundle version, as for Retrieve.
+  string pin_version = 4;
+}
+
+message RankResponse {
+  string model_version = 1;
+  // Names of the feature columns below (the bundle's features.json).
+  repeated string feature_names = 2;
+  // One row per organic candidate, row-major, in request order; NaN = missing.
+  repeated float features = 3;
+  // LightGBM score per organic candidate (higher first); empty if the bundle has no ranker.
+  repeated float scores = 4;
+  // One feature row per ad candidate, row-major, in request order.
+  repeated float ad_features = 5;
+  // pCTR per ad candidate at the reference position; empty if the bundle has no pCTR model.
+  repeated float ad_pctr = 6;
+  string ranker = 7; // e.g. "lightgbm"; empty without a ranker
+  string pctr_model = 8; // e.g. "logreg"; empty without a pCTR model
+}

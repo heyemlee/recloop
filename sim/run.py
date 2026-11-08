@@ -207,13 +207,24 @@ class Session:
             else:
                 path = f"/v1/recommendations?user_id={user}&limit=20"
                 kind = "home"
+            t_req = time.perf_counter()
             try:
                 status, resp, _ = self.api.get_json(path)
             except OSError:
                 status, resp = 0, None
+            ms = (time.perf_counter() - t_req) * 1000
             self.stats.status[status] += 1
             self.stats.page_views[kind] += 1
             if status != 200 or not resp:
+                # The release drill counts failed page views over time (M4).
+                self.sim.ledger.write(
+                    "error",
+                    user_id=user,
+                    surface=kind,
+                    t=round(time.time(), 3),
+                    status=status,
+                    ms=round(ms, 2),
+                )
                 surface, item, cursor = "home", None, None
                 continue
             sponsored = [
@@ -232,6 +243,8 @@ class Session:
                 variants={k: v["variant"] for k, v in resp["experiments"].items()},
                 buckets={k: v["bucket"] for k, v in resp["experiments"].items()},
                 degraded=resp["degraded"],
+                model_version=resp.get("model_version"),
+                ms=round(ms, 2),
                 **({"sponsored": sponsored} if sponsored else {}),
             )
             visible = rng.randint(s.visible_min, s.visible_max)
@@ -313,7 +326,10 @@ class Simulator:
             try:
                 while True:
                     with lock:
-                        if started[0] >= sessions or (deadline and time.time() > deadline):
+                        # self.deadline, not the argument: a drill may move it while running.
+                        if started[0] >= sessions or (
+                            self.deadline and time.time() > self.deadline
+                        ):
                             break
                         started[0] += 1
                     Session(self, rng, api, st).run()

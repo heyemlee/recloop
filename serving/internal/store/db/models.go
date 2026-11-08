@@ -112,6 +112,19 @@ type ModelVersion struct {
 	Manifest    []byte
 	CreatedAt   pgtype.Timestamptz
 	ActivatedAt pgtype.Timestamptz
+	ValidatedAt pgtype.Timestamptz
+	CanaryAt    pgtype.Timestamptz
+	RetiredAt   pgtype.Timestamptz
+}
+
+type ModelVersionEvent struct {
+	EventID    int64
+	Version    string
+	FromStatus pgtype.Text
+	ToStatus   string
+	At         pgtype.Timestamptz
+	Actor      string
+	Note       string
 }
 
 type Order struct {

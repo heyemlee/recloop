@@ -26,6 +26,23 @@ type manifest struct {
 	Version  string               `json:"version"`
 	NumItems int                  `json:"num_items"`
 	Files    map[string]fileEntry `json:"files"`
+	Ranking  *struct {
+		Features []string `json:"features"`
+		Ranker   *struct {
+			Model string `json:"model"`
+		} `json:"ranker"`
+	} `json:"ranking"`
+	PCTR *struct {
+		Model             string `json:"model"`
+		ReferencePosition int    `json:"reference_position"`
+	} `json:"pctr"`
+}
+
+// Ranking describes the ranking part of an M4 bundle, which the model server serves (Rank).
+type Ranking struct {
+	Features []string // the feature columns Rank returns (features.json)
+	Ranker   string   // "lightgbm", or "" when the bundle has no ranker (features only)
+	PCTR     string   // "logreg", or "" when the bundle has no pCTR model
 }
 
 // ItemCF is the neighbour table: Neighbors[i] are item i's top neighbours, best first.
@@ -45,6 +62,8 @@ type Bundle struct {
 	PopCounts []int32
 	ItemCF    ItemCF
 	Manifest  json.RawMessage
+	// Ranking is nil for bundles from before M4: no Rank call, RRF only, FixedPCTR for ads.
+	Ranking *Ranking
 }
 
 // Load reads dir (a symlink such as artifacts/bundles/current is resolved first), verifies the
@@ -66,6 +85,15 @@ func Load(dir string) (*Bundle, error) {
 		return nil, fmt.Errorf("bundle %s: format %d, expected %d", real, m.Format, Format)
 	}
 	b := &Bundle{Version: m.Version, Dir: real, NumItems: m.NumItems, Manifest: raw}
+	if m.Ranking != nil {
+		b.Ranking = &Ranking{Features: m.Ranking.Features}
+		if m.Ranking.Ranker != nil {
+			b.Ranking.Ranker = m.Ranking.Ranker.Model
+		}
+		if m.PCTR != nil {
+			b.Ranking.PCTR = m.PCTR.Model
+		}
+	}
 
 	var pop struct {
 		Items  []int32 `json:"items"`

@@ -10,7 +10,15 @@
 //	                       recently used (redis://localhost:16391/0). Never the state instance:
 //	                       pages would fill it, so there is no fallback to REDIS_URL.
 //	MODEL_SERVER_ADDR      gRPC model server (127.0.0.1:18081)
-//	RECLOOP_BUNDLE         bundle directory (artifacts/bundles/current)
+//	RECLOOP_BUNDLE         bundle directory (artifacts/bundles/current): the startup version;
+//	                       model_versions' active version wins when there is one (M4)
+//	RECLOOP_BUNDLES_DIR    where versions live by name (the startup bundle's parent)
+//	MODEL_SERVER_ADMIN_URL the model server's admin port (http://127.0.0.1:18082): releases
+//	                       load and switch versions there, the admin page sets faults
+//	RANK                   on (default): the model server's Rank for bundles with ranking
+//	                       models (features, LightGBM, pCTR); off: RRF and the fixed pCTR only
+//	RANKER                 the default ranker when the rank experiment does not set one
+//	                       (rrf; or lightgbm)
 //	EVENTS_MODE            redpanda: events go to the event log (default); direct: written to
 //	                       PostgreSQL and Redis synchronously, M1's path, no Redpanda needed
 //	KAFKA_BROKERS          Redpanda seed brokers, comma-separated (localhost:19092)
@@ -46,6 +54,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -71,7 +80,9 @@ import (
 	"github.com/heyemlee/recloop/serving/internal/experiment"
 	"github.com/heyemlee/recloop/serving/internal/metrics"
 	"github.com/heyemlee/recloop/serving/internal/mixer"
+	"github.com/heyemlee/recloop/serving/internal/ranking"
 	"github.com/heyemlee/recloop/serving/internal/recall"
+	"github.com/heyemlee/recloop/serving/internal/release"
 	"github.com/heyemlee/recloop/serving/internal/resilience"
 	"github.com/heyemlee/recloop/serving/internal/store"
 	"github.com/heyemlee/recloop/serving/internal/tracing"
@@ -277,8 +288,35 @@ func run(log *slog.Logger) error {
 	if cat.Len() != b.NumItems {
 		return errors.New("catalog and bundle disagree on the number of items: run `make ingest`")
 	}
-	if err := st.RegisterActiveModel(ctx, b.Version, b.Dir, b.Manifest); err != nil {
+	// Bundle versions (design §6): model_versions says which one is active; without one, the
+	// startup bundle becomes it (M1's behaviour).
+	bundles := bundle.NewRegistry(env("RECLOOP_BUNDLES_DIR", filepath.Dir(b.Dir)), b)
+	check := func(nb *bundle.Bundle) error {
+		if nb.NumItems != cat.Len() {
+			return fmt.Errorf("bundle %s has %d items, the catalog %d", nb.Version, nb.NumItems, cat.Len())
+		}
+		return recall.CheckItemCFGolden(nb)
+	}
+	active, err := st.ActiveModel(ctx)
+	switch {
+	case err != nil:
 		return err
+	case active == "":
+		if err := st.RegisterActiveModel(ctx, b.Version, b.Dir, b.Manifest); err != nil {
+			return err
+		}
+	case active != b.Version:
+		ab, err := bundles.Ensure(active)
+		if err == nil {
+			err = check(ab)
+		}
+		if err != nil {
+			return fmt.Errorf("model_versions says %s is active, but it does not load: %w", active, err)
+		}
+		if err := bundles.SetActive(active); err != nil {
+			return err
+		}
+		log.Info("active bundle from model_versions", "version", active)
 	}
 
 	// Two Redis instances (design §19, 2026-11-08): state and cache.
@@ -369,14 +407,27 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	var msBreaker, pgBreaker *resilience.Breaker
+	var msBreaker, pgBreaker, rankBreaker *resilience.Breaker
 	if !naive {
 		msBreaker = resilience.NewBreaker("model_server", breakerCfg, breakerChange)
 		pgBreaker = resilience.NewBreaker("postgres", breakerCfg, breakerChange)
-		for _, name := range []string{"model_server", "postgres"} {
+		// Rank gets a breaker of its own: a slow Rank must not cut Retrieve (SASRec recall).
+		rankBreaker = resilience.NewBreaker("rank", breakerCfg, breakerChange)
+		for _, name := range []string{"model_server", "postgres", "rank"} {
 			metrics.BreakerState.WithLabelValues(name).Set(0)
 		}
 	}
+	var rankClient *ranking.Client
+	if env("RANK", "on") != "off" {
+		fixed, err := envFloat("ADS_FIXED_PCTR", 0.01)
+		if err != nil {
+			return err
+		}
+		rankClient = &ranking.Client{MS: ms, Breaker: rankBreaker, Fixed: ads.FixedPCTR(fixed)}
+	}
+	msAdmin := release.HTTPModelServer{Base: env("MODEL_SERVER_ADMIN_URL", "http://127.0.0.1:18082")}
+	releases := &release.Controller{Store: st, Bundles: bundles, MS: msAdmin, Check: check, Log: log, Now: time.Now}
+	go releases.Run(bg, 2*time.Second)
 	var cands *cache.CandidateCache
 	if env("CANDIDATE_CACHE", "on") != "off" {
 		cands = &cache.CandidateCache{R: cacheRdb, TTL: cache.CandidateTTL}
@@ -393,15 +444,19 @@ func run(log *slog.Logger) error {
 	}
 
 	srv := &api.Server{
-		Catalog: cat,
-		Bundle:  b,
-		Users:   users,
-		Pages:   cache.Pages{R: cacheRdb},
-		Cands:   cands,
-		Exps:    exps,
-		Events:  publisher,
-		Served:  served,
-		Redis:   rdb,
+		Catalog:       cat,
+		Bundle:        b,
+		Bundles:       bundles,
+		Rank:          rankClient,
+		DefaultRanker: env("RANKER", ranking.RRF),
+		Release:       releases,
+		Users:         users,
+		Pages:         cache.Pages{R: cacheRdb},
+		Cands:         cands,
+		Exps:          exps,
+		Events:        publisher,
+		Served:        served,
+		Redis:         rdb,
 		Sources: map[string][]mixer.Spec{
 			recall.SurfaceHome: {
 				{Source: recall.SASRec{Client: ms}, Timeout: envMillis("SASREC_TIMEOUT_MS", 35), MinTimeout: 5 * time.Millisecond, K: 200, Breaker: msBreaker},
@@ -475,7 +530,7 @@ func run(log *slog.Logger) error {
 	httpSrv := &http.Server{Addr: addr, Handler: handler, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 2 * time.Minute}
 	errc := make(chan error, 1)
 	go func() { errc <- httpSrv.ListenAndServe() }()
-	log.Info("api listening", "addr", addr, "bundle", b.Version, "config_version", exps.Current().Version,
+	log.Info("api listening", "addr", addr, "bundle", bundles.Active().Version, "config_version", exps.Current().Version,
 		"events", env("EVENTS_MODE", "redpanda"), "naive", naive, "candidate_cache", cands != nil, "tracing", tracingOn,
 		"budget_ms", srv.Plan.Total.Milliseconds(), "breaker_window", breakerCfg.String(), "ads", adSrv != nil)
 

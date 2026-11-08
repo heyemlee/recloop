@@ -1,7 +1,10 @@
-"""gRPC model server (design §3, §13.2): `Retrieve` = encode the history, search the item index.
+"""gRPC model server (design §3, §13.2): `Retrieve` = encode the history, search the item index;
+`Rank` = the ranking features, LightGBM scores and pCTR of a request's candidates (M4).
 
 Usage (from the repo root): python -m model_server [--bundle PATH] [--port 18081]
-The bundle defaults to $RECLOOP_BUNDLE, else artifacts/bundles/current.
+The bundle defaults to $RECLOOP_BUNDLE, else artifacts/bundles/current. It is the default
+version; others are loaded next to it through the admin port and picked per request by
+`pin_version` (model_server/registry.py, design §6).
 
 The gRPC health service reports SERVING only once the bundle has loaded and passed validation
 (the readiness signal for M5's Kubernetes probes). The caller's deadline travels with the call:
@@ -23,10 +26,12 @@ from pathlib import Path
 
 import faiss
 import grpc
+import numpy as np
 from grpc_health.v1 import health, health_pb2, health_pb2_grpc
 
 from model_server import admin
 from model_server import bundle as bundle_mod
+from model_server.registry import Registry
 from model_server.rpc import SERVICE_NAME, pb, pb_grpc
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -47,12 +52,32 @@ def _tracer():
     return trace.get_tracer("model_server")
 
 
+MAX_RANK_CANDIDATES = 1000
+MAX_ADS = 1000
+
+
 class ModelServer(pb_grpc.ModelServerServicer):
-    def __init__(self, bundle: bundle_mod.Bundle, faults: admin.Faults | None = None):
-        # One reference, swapped atomically when hot reload arrives (M4).
-        self.bundle = bundle
+    def __init__(self, bundles: Registry | bundle_mod.Bundle, faults: admin.Faults | None = None):
+        if isinstance(bundles, bundle_mod.Bundle):
+            bundles = Registry(bundles.path.parent, bundles)
+        self.bundles = bundles
         self.faults = faults or admin.Faults()
         self.tracer = _tracer()
+
+    @property
+    def bundle(self) -> bundle_mod.Bundle:
+        return self.bundles.default
+
+    def _bundle(self, pin: str, context, method: str) -> bundle_mod.Bundle:
+        b = self.bundles.get(pin)
+        if b is None:
+            admin.REQUESTS.labels("NOT_FOUND").inc()
+            admin.CALLS.labels(method, "NOT_FOUND").inc()
+            context.abort(
+                grpc.StatusCode.NOT_FOUND,
+                f"bundle {pin!r} is not loaded (default {self.bundles.default.version})",
+            )
+        return b
 
     @staticmethod
     def _expired(context, where: str) -> None:
@@ -79,18 +104,15 @@ class ModelServer(pb_grpc.ModelServerServicer):
             # Wait the injected delay, but not past the caller's deadline.
             time.sleep(delay if remaining is None else max(0.0, min(delay, remaining)))
             self._expired(context, "after_delay")
-        b = self.bundle
-        if request.pin_version and request.pin_version != b.version:
-            admin.REQUESTS.labels("NOT_FOUND").inc()
-            context.abort(
-                grpc.StatusCode.NOT_FOUND,
-                f"bundle {request.pin_version!r} is not loaded (serving {b.version})",
-            )
+        b = self._bundle(request.pin_version, context, "Retrieve")
         if request.k < 0:
             admin.REQUESTS.labels("INVALID_ARGUMENT").inc()
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "k must be >= 0")
+        if len(request.ad_item_ids) > MAX_ADS:
+            admin.REQUESTS.labels("INVALID_ARGUMENT").inc()
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, f"at most {MAX_ADS} ad items")
         k = min(request.k or DEFAULT_K, MAX_K)
-        items, scores = [], []
+        items, scores, ad_ids, ad_scores = [], [], [], []
         if b.window(request.history):
             t = time.perf_counter()
             with self.tracer.start_as_current_span("encode"):
@@ -99,7 +121,10 @@ class ModelServer(pb_grpc.ModelServerServicer):
             self._expired(context, "before_search")
             t = time.perf_counter()
             with self.tracer.start_as_current_span("search"):
-                items, scores = b.search(user, k)
+                if k > 0:
+                    items, scores = b.search(user, k)
+                # The eligible ad items are scored with the same user vector, not retrieved.
+                ad_ids, ad_scores = b.relevance(user, request.ad_item_ids)
             admin.RETRIEVE_SECONDS.labels("search").observe(time.perf_counter() - t)
         resp = pb.RetrieveResponse(
             model_version=b.version,
@@ -107,22 +132,88 @@ class ModelServer(pb_grpc.ModelServerServicer):
                 pb.Scored(item_id=int(i), score=float(s))
                 for i, s in zip(items, scores, strict=True)
             ],
-            # Ad scoring arrives with the ads pipeline (M3).
-            ads=[],
+            ads=[
+                pb.Scored(item_id=int(i), score=float(s))
+                for i, s in zip(ad_ids, ad_scores, strict=True)
+            ],
         )
         admin.REQUESTS.labels("OK").inc()
         admin.RETRIEVE_SECONDS.labels("total").observe(time.perf_counter() - t0)
         return resp
 
     def Rank(self, request, context):  # noqa: N802
-        context.abort(
-            grpc.StatusCode.UNIMPLEMENTED,
-            "Rank arrives in M3 (ads pCTR) and M4 (organic ranking)",
+        t0 = time.perf_counter()
+        admin.INFLIGHT.inc()
+        try:
+            return self._rank(request, context, t0)
+        finally:
+            admin.INFLIGHT.dec()
+
+    def _rank(self, request, context, t0: float):
+        """Features (and LightGBM scores) of the organic candidates, pCTR of the ad candidates."""
+        self._expired(context, "arrival")
+        b = self._bundle(request.pin_version, context, "Rank")
+        r = b.ranking
+        if r is None:
+            admin.CALLS.labels("Rank", "FAILED_PRECONDITION").inc()
+            context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION, f"bundle {b.version} has no ranking models"
+            )
+        if len(request.candidates) > MAX_RANK_CANDIDATES or len(request.ads) > MAX_ADS:
+            admin.CALLS.labels("Rank", "INVALID_ARGUMENT").inc()
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "too many candidates")
+        history = b.window(request.history)
+        resp = pb.RankResponse(
+            model_version=b.version,
+            feature_names=list(_feature_names()),
+            ranker="lightgbm" if r.ranker is not None else "",
+            pctr_model=r.pctr.name if r.pctr is not None else "",
         )
+        try:
+            if request.candidates:
+                t = time.perf_counter()
+                items = [c.item_id for c in request.candidates]
+                hits = [[(h.source, h.rank, h.score) for h in c.hits] for c in request.candidates]
+                x = r.features(history, items, hits)
+                admin.RANK_SECONDS.labels("features").observe(time.perf_counter() - t)
+                self._expired(context, "before_scores")
+                t = time.perf_counter()
+                resp.features.extend(x.ravel().tolist())
+                resp.scores.extend(r.scores(x).tolist())
+                admin.RANK_SECONDS.labels("scores").observe(time.perf_counter() - t)
+            if request.ads:
+                t = time.perf_counter()
+                ads = list(request.ads)
+                rel = np.asarray(
+                    [a.relevance if a.HasField("relevance") else np.nan for a in ads],
+                    dtype=np.float32,
+                )
+                missing = np.isnan(rel)
+                if missing.any() and history:
+                    user = b.encode([history])
+                    _, scored = b.relevance(user, [ads[i].item_id for i in np.flatnonzero(missing)])
+                    rel[missing] = scored
+                xa = r.ad_features(history, [a.item_id for a in ads], rel)
+                resp.ad_features.extend(xa.ravel().tolist())
+                if r.pctr is not None:
+                    resp.ad_pctr.extend(r.pctr.predict(xa).tolist())
+                admin.RANK_SECONDS.labels("ads").observe(time.perf_counter() - t)
+        except ValueError as e:
+            admin.CALLS.labels("Rank", "INVALID_ARGUMENT").inc()
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
+        admin.CALLS.labels("Rank", "OK").inc()
+        admin.RANK_SECONDS.labels("total").observe(time.perf_counter() - t0)
+        return resp
+
+
+def _feature_names():
+    from model_server.ranking import FEATURES
+
+    return FEATURES
 
 
 def serve(
-    b: bundle_mod.Bundle,
+    b: bundle_mod.Bundle | Registry,
     host: str,
     port: int,
     workers: int = DEFAULT_WORKERS,
@@ -178,15 +269,17 @@ def main(argv: list[str] | None = None) -> None:
     )
     faults = admin.Faults.from_env()
     interceptor = admin.setup_tracing()
+    # Other versions are found next to the startup bundle (artifacts/bundles/<version>).
+    registry = Registry(Path(os.path.abspath(args.bundle)).parent, b)
     server, port = serve(
-        b,
+        registry,
         args.host,
         args.port,
         args.workers,
         faults=faults,
         interceptors=[interceptor] if interceptor else None,
     )
-    httpd = admin.serve_admin(faults, args.host, args.admin_port)
+    httpd = admin.serve_admin(faults, args.host, args.admin_port, registry)
     s = faults.get()
     log.info(
         "serving recloop.modelserver.v1.ModelServer on %s:%d (%d workers); admin on :%d; "
