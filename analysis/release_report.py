@@ -74,6 +74,21 @@ def arm_rows(summary: dict) -> list[list[str]]:
     ]
 
 
+def _redis_line(r: dict | None) -> list[str]:
+    """What the drill did to the two Redis instances (sim/redis_stats.py)."""
+    if not r:
+        return []
+    st, ca = r["state"], r["cache"]
+    ok = st["evicted_keys"] == 0 and st["oom_errors"] == 0
+    return [
+        "",
+        f"Redis during the drill: the state instance ({st['policy']}, {st['maxmemory_mb']} MB) evicted "
+        f"{st['evicted_keys']:,} keys and refused {st['oom_errors']:,} writes"
+        + ("" if ok else " (**the drill's user state is not complete**)")
+        + f"; the cache instance ({ca['policy']}, {ca['maxmemory_mb']} MB) evicted {ca['evicted_keys']:,}.",
+    ]
+
+
 def render(d: dict) -> str:
     t0 = d["t0"]
     steps = d["steps"]
@@ -87,6 +102,7 @@ def render(d: dict) -> str:
         "throughout. Every step went through the api's admin endpoints, the ones the admin page's buttons call; the "
         "release state lives in PostgreSQL (`model_versions`), and every transition is a row of `model_version_events` "
         "(below).",
+        *_redis_line(d.get("redis")),
         "",
         *_table(
             ["Role", "Version", "What is in it"],

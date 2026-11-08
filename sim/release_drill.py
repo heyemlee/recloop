@@ -39,7 +39,7 @@ from pathlib import Path
 import psycopg
 
 from sim import ads as ads_mod
-from sim import standing
+from sim import redis_stats, standing
 from sim import traffic as traffic_mod
 from sim.admin import Admin
 
@@ -122,6 +122,7 @@ def main(argv: list[str] | None = None) -> None:
         + args.after_seconds
         + 600
     )
+    redis_before = redis_stats.counters()
     traffic = traffic_mod.Traffic(args.out / "traffic", args.api, args.concurrency)
     t0 = traffic.start(total)
     log["t0"] = t0
@@ -196,6 +197,8 @@ def main(argv: list[str] | None = None) -> None:
         t_end = time.time()
     finally:
         traffic.stop()
+        log["redis"] = redis_stats.delta(redis_before, redis_stats.counters())
+        print(f"drill    {redis_stats.describe(log['redis'])}")
 
     pages, events, errors = _snapshot(traffic)
 

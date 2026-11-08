@@ -41,13 +41,18 @@ services:
           cpus: "2"
           memory: 1g
 
+  # Two Redis instances (design §19, 2026-11-08). Both hold derived state only (rebuilt from
+  # the event log, design §7.2): no persistence.
+  #
+  # State: user history, recent impressions, the 7-day dedup markers, frequency caps and spend
+  # counters. It never evicts: when it is full, writes fail (the aggregator retries, the Redis
+  # alerts fire, the api stops serving ads) instead of silently dropping a dedup marker or a
+  # spend counter. ~124 B per event for 7 days (dedup marker) + 76 B per user and item seen in
+  # 24 h: 1 GB holds ~6.8 M events of a week; a 30-minute billing drill takes ~117 MB.
   redis:
     image: redis:8.10.3-alpine
-    # Redis holds derived state only (rebuilt from the event log, design §7.2): no persistence.
-    # Bounded memory: when full, evict the keys closest to expiry first (candidate cache, then
-    # pages, then the 7-day dedup markers); user history has no TTL and is never evicted.
     command: ["redis-server", "--save", "", "--appendonly", "no",
-              "--maxmemory", "384mb", "--maxmemory-policy", "volatile-ttl"]
+              "--maxmemory", "${RECLOOP_REDIS_MAXMEMORY:-1gb}", "--maxmemory-policy", "noeviction"]
     ports:
       - "127.0.0.1:${RECLOOP_REDIS_PORT:-16390}:6379"
     healthcheck:
@@ -59,7 +64,46 @@ services:
       resources:
         limits:
           cpus: "1"
+          # Above maxmemory: allocator overhead, client buffers, scripts.
+          memory: ${RECLOOP_REDIS_MEMORY_LIMIT:-1536m}
+
+  # Cache: result pages (10 min) and the candidate cache (5 min), nothing that matters for
+  # correctness. When full it evicts the least recently used: an evicted page answers 410 (the
+  # client starts over), an evicted candidate list is computed again.
+  redis-cache:
+    image: redis:8.10.3-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no",
+              "--maxmemory", "384mb", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "127.0.0.1:${RECLOOP_CACHE_REDIS_PORT:-16391}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
           memory: 512m
+
+  # INFO of both Redis instances for Prometheus (memory, evictions, rejected writes): one
+  # exporter, scraped once per instance through /scrape?target=... (deploy/prometheus).
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.95.0
+    # No default target: only /scrape answers with Redis metrics.
+    command: ["-redis.addr=", "-web.listen-address=:9121"]
+    depends_on:
+      redis:
+        condition: service_healthy
+      redis-cache:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 64m
 
   # Event log (design §7.2, §12.3). One broker: replication factor 1, acks=all is still the
   # durability point of POST /v1/events. Two listeners: containers use redpanda:9092, processes
@@ -286,7 +330,8 @@ services:
 
   # Every connection of the bench api to the model server and to Redis goes through here, so a
   # fault can cut it (proxy disabled) or slow it (latency toxic). The api reaches the model
-  # server at toxiproxy:18091 and Redis at toxiproxy:16391 in every run, faulty or not.
+  # server at toxiproxy:18091, the state Redis at toxiproxy:16391 and the cache Redis at
+  # toxiproxy:16392 in every run, faulty or not.
   toxiproxy:
     profiles: [bench]
     image: ghcr.io/shopify/toxiproxy:2.13.0
@@ -303,7 +348,8 @@ services:
 
   model-server:
     profiles: [bench]
-    image: recloop/model-server:dev
+    # A private compose project (-p) sets RECLOOP_MS_IMAGE so it does not retag the shared image.
+    image: ${RECLOOP_MS_IMAGE:-recloop/model-server:dev}
     build:
       context: ../model_server
       dockerfile: ../deploy/model-server.Dockerfile
@@ -336,6 +382,7 @@ services:
       API_ADDR: 0.0.0.0:18080
       DATABASE_URL: postgres://recloop:recloop@postgres:5432/recloop?sslmode=disable
       REDIS_URL: ${BENCH_REDIS_URL:-redis://toxiproxy:16391/0}
+      CACHE_REDIS_URL: ${BENCH_CACHE_REDIS_URL:-redis://toxiproxy:16392/0}
       MODEL_SERVER_ADDR: ${BENCH_MODEL_SERVER_ADDR:-toxiproxy:18091}
       # M4: releases load and switch bundle versions on the model server's admin port.
       MODEL_SERVER_ADMIN_URL: http://model-server:18082

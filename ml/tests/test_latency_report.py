@@ -167,6 +167,14 @@ def test_banner_names_the_deviations():
     assert "**Preliminary.**" in text and "12 CPUs" in text and "5 containers" in text
 
 
+def test_banner_names_active_campaigns():
+    data = results()
+    assert "campaigns were active" not in report.render(data)  # recorded empty, or not at all
+    data["meta"]["active_campaigns"] = [81, 82]
+    text = report.render(data)
+    assert "**Preliminary.**" in text and "2 campaigns were active" in text
+
+
 def test_every_repeat_of_an_experiment_uses_its_own_configuration():
     for plan in run.PLANS.values():
         runs = plan.runs()

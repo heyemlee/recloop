@@ -6,8 +6,12 @@ SHELL := /bin/bash
 -include .env
 RECLOOP_PG_PORT ?= 15432
 RECLOOP_REDIS_PORT ?= 16390
+RECLOOP_CACHE_REDIS_PORT ?= 16391
 DATABASE_URL ?= postgres://recloop:recloop@localhost:$(RECLOOP_PG_PORT)/recloop?sslmode=disable
+# Two Redis instances (design §19, 2026-11-08): state (user state, dedup markers, frequency caps,
+# spend; never evicts) and cache (result pages, candidate cache; evicts the least recently used).
 REDIS_URL ?= redis://localhost:$(RECLOOP_REDIS_PORT)/0
+CACHE_REDIS_URL ?= redis://localhost:$(RECLOOP_CACHE_REDIS_PORT)/0
 API_PORT ?= 18080
 MODEL_SERVER_PORT ?= 18081
 MODEL_SERVER_ADMIN_PORT ?= 18082
@@ -26,6 +30,10 @@ KAFKA_BROKERS ?= localhost:$(RECLOOP_KAFKA_PORT)
 RECLOOP_PROMETHEUS_PORT ?= 19090
 PROMETHEUS_URL ?= http://localhost:$(RECLOOP_PROMETHEUS_PORT)
 RECLOOP_BENCH_API_PORT ?= 18180
+RECLOOP_BENCH_MS_ADMIN_PORT ?= 18182
+BENCH_MS_ADMIN_URL ?= http://127.0.0.1:$(RECLOOP_BENCH_MS_ADMIN_PORT)
+RECLOOP_TOXIPROXY_PORT ?= 18474
+TOXIPROXY_URL ?= http://127.0.0.1:$(RECLOOP_TOXIPROXY_PORT)
 # Traces of `make serve-api` / `serve-model` go to the compose OTel collector. Not exported to
 # every recipe: docker compose and other OTel-aware tools would send their own traces there.
 OTEL_EXPORTER_OTLP_ENDPOINT ?= http://localhost:14317
@@ -36,10 +44,16 @@ RECLOOP_PG_PROXY_PORT ?= 18475
 PG_PROXY_URL ?= http://localhost:$(RECLOOP_PG_PROXY_PORT)
 # M4: releases load and switch bundle versions on the model server's admin port.
 MODEL_SERVER_ADMIN_URL ?= http://127.0.0.1:$(MODEL_SERVER_ADMIN_PORT)
-export RECLOOP_PG_PORT RECLOOP_REDIS_PORT DATABASE_URL REDIS_URL API_ADDR MODEL_SERVER_PORT \
-	MODEL_SERVER_ADMIN_PORT MODEL_SERVER_ADDR RECLOOP_API_URL RECLOOP_BUNDLE RECLOOP_TEXT_MODEL \
-	RECLOOP_KAFKA_PORT KAFKA_BROKERS PROMETHEUS_URL RECLOOP_BENCH_API_PORT AD_TOKEN_KEYS PG_PROXY_URL \
-	AGENT_PORT RECLOOP_AGENT_URL MODEL_SERVER_ADMIN_URL
+# The compose project: `recloop` is the shared stack (the compose file's name). A checkout with a
+# private stack sets COMPOSE_PROJECT_NAME and its ports in .env; docker compose reads neither the
+# repo's .env nor that name by itself here (the file is in deploy/), so $(COMPOSE) passes both
+# and the Python tools get them from sim/compose.py.
+COMPOSE_PROJECT_NAME ?= recloop
+export RECLOOP_PG_PORT RECLOOP_REDIS_PORT DATABASE_URL REDIS_URL CACHE_REDIS_URL API_ADDR \
+	MODEL_SERVER_PORT MODEL_SERVER_ADMIN_PORT MODEL_SERVER_ADDR RECLOOP_API_URL RECLOOP_BUNDLE \
+	RECLOOP_TEXT_MODEL RECLOOP_KAFKA_PORT KAFKA_BROKERS PROMETHEUS_URL RECLOOP_BENCH_API_PORT \
+	BENCH_MS_ADMIN_URL TOXIPROXY_URL AD_TOKEN_KEYS PG_PROXY_URL COMPOSE_PROJECT_NAME AGENT_PORT \
+	RECLOOP_AGENT_URL MODEL_SERVER_ADMIN_URL
 # onnxruntime's telemetry uploader (macOS) can crash the interpreter at exit: off everywhere.
 export ORT_DISABLE_TELEMETRY := 1
 
@@ -53,7 +67,8 @@ BUF_CACHE_DIR ?= $(CURDIR)/.cache/buf
 npm_config_cache ?= $(CURDIR)/.cache/npm
 export UV_CACHE_DIR GOMODCACHE GOCACHE GOTOOLCHAIN BUF_CACHE_DIR npm_config_cache
 
-COMPOSE := docker compose -f deploy/docker-compose.yml
+COMPOSE := docker compose -p $(COMPOSE_PROJECT_NAME) $(if $(wildcard .env),--env-file .env) \
+	-f deploy/docker-compose.yml
 BENCH := $(COMPOSE) --profile bench
 UV := uv run --project ml --frozen
 PY := $(UV) python
@@ -263,10 +278,10 @@ latency-report: ## Re-render docs/results/latency.md from artifacts/latency/resu
 
 # ---------------------------------------------------------------- M3: ads and billing
 
-# Both runs need the stack (billing included), the model server and the api, the latter run as
-# `CANDIDATE_CACHE=off make serve-api` (otherwise 30 minutes of simulated traffic fill Redis's
-# 384 MB and it evicts keys; the runs record evictions, the drill fails on any). Each run
-# reseeds Redis, creates campaigns of its own through the api and ends them afterwards.
+# Both runs need the stack (billing included), the model server and the api (`make serve-api`,
+# its defaults). Each run reseeds Redis, creates campaigns of its own through the api and ends
+# them afterwards. The state Redis must neither evict nor refuse a write during a run (the drill
+# fails otherwise); the cache Redis's evictions are only recorded (sim/redis_stats.py).
 billing: overdelivery billing-drill ## Over-delivery study + 30-minute billing drill -> docs/results/billing.md (~75 min)
 
 overdelivery: sim-world build-aggregator build-billing ## Safety margins 0 / 5 / 20 clicks, with and without pacing (~35 min) -> artifacts/billing/overdelivery.json, billing.md

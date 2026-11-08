@@ -307,6 +307,18 @@ def _metric_rows(res: dict) -> list[list[str]]:
     return rows
 
 
+def _redis_cells(r: dict | None) -> list[str]:
+    """A phase's effect on the two Redis instances (sim/redis_stats.py); the state instance
+    must show 0 / 0."""
+    if not r:
+        return ["n/a", "n/a"]
+    st, ca = r["state"], r["cache"]
+    cell = f"{st['evicted_keys']:,} / {st['oom_errors']:,}"
+    if st["evicted_keys"] or st["oom_errors"]:
+        cell = f"**{cell}**"
+    return [cell, f"{ca['evicted_keys']:,}"]
+
+
 def render(run: dict, results: dict, offline: dict | None) -> str:
     aa, ab = results.get("aa"), results.get("ab")
     lines = [
@@ -337,17 +349,26 @@ def render(run: dict, results: dict, offline: dict | None) -> str:
                 f"{(ph['to'] - ph['from']) / 60:.0f} min",
                 f"{ph['sessions']:,}",
                 f"{pv:,}",
-                str(ph.get("evicted_keys", "n/a")),
+                *_redis_cells(ph.get("redis")),
             ]
         )
     lines += _table(
-        ["Phase", "Experiment", "Arms", "Traffic", "Sessions", "Page views", "Redis evictions"],
+        [
+            "Phase",
+            "Experiment",
+            "Arms",
+            "Traffic",
+            "Sessions",
+            "Page views",
+            "State Redis: evicted / refused",
+            "Cache Redis: evicted",
+        ],
         rows,
     )
     lines += [
         "",
-        "Each phase started from the same state: the consumers caught up, Redis reseeded with the dataset users' training "
-        "histories. Unit: the user. Ratio metrics (CTR, add-to-cart rate) are sums per user, the variance of the ratio from the "
+        "Each phase started from the same state: the consumers caught up, the cache Redis flushed and the state Redis "
+        "reseeded with the dataset users' training histories. Unit: the user. Ratio metrics (CTR, add-to-cart rate) are sums per user, the variance of the ratio from the "
         f"delta method, with a user-level bootstrap interval next to it (B = {B:,}); two-sided z-test. Impressions come from the "
         "sample job (`ml/samples/job.py`): every impression joined to its served record, labelled by a click within 30 minutes.",
         "",

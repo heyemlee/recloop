@@ -31,7 +31,7 @@ import time
 from pathlib import Path
 
 from sim import ads as ads_mod
-from sim import standing
+from sim import redis_stats, standing
 from sim import traffic as traffic_mod
 from sim.admin import Admin
 
@@ -94,6 +94,7 @@ def main(argv: list[str] | None = None) -> None:
             }
         )
         admin.wait_config(version)
+        redis_before = redis_stats.counters()
         traffic = traffic_mod.Traffic(args.out / name, args.api, args.concurrency)
         t0 = traffic.start(args.seconds)
         print(
@@ -104,6 +105,8 @@ def main(argv: list[str] | None = None) -> None:
         t1 = time.time()
         admin.stop_experiment(spec["exp_id"])
         s = traffic.stats
+        redis = redis_stats.delta(redis_before, redis_stats.counters())
+        print(f"ab       {name}: {redis_stats.describe(redis)}")
         run["phases"][name] = {
             "exp_id": spec["exp_id"],
             "variants": spec["variants"],
@@ -115,7 +118,8 @@ def main(argv: list[str] | None = None) -> None:
             "get_status": {str(k): v for k, v in s.status.items()},
             "events": dict(s.events),
             "ads": dict(s.ads),
-            "evicted_keys": ads_mod.evicted_keys(),
+            # The state Redis must neither evict nor refuse a write (the report says so if it did).
+            "redis": redis,
         }
         args.out.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(run, indent=2) + "\n")

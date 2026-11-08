@@ -114,6 +114,9 @@ func (a *Aggregator) apply(ctx context.Context, changes []userstate.Change, c *C
 	now := a.Now()
 	applied, err := a.State.ApplyBatch(ctx, changes, now)
 	if err != nil {
+		// The batch is retried (offsets stay uncommitted); a full state Redis refuses every
+		// write until it has room again, and that is what this counter and the alerts show.
+		userstate.CountError("aggregator", "apply", err)
 		return err
 	}
 	delay := metrics.EventToState.WithLabelValues(Group)

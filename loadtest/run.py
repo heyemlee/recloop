@@ -19,8 +19,14 @@ Every run starts from the same state: the consumers have caught up, Redis is res
 run's rate, the fault is switched on, and k6 measures. Each configuration runs `repeats` times
 (the report takes the median); repetitions are interleaved so drift spreads over all of them.
 
+The runner refuses to start while campaigns are active (--allow-active-campaigns overrides):
+their sponsored slots would add the ads stage to the home requests, and the sessions' clicks on
+them (recs.js sends the slots' ad_tokens) would be billed for real. The ids it saw go into
+results.json (meta.active_campaigns, and each restart's).
+
 Usage: python -m loadtest.run [--plan full|smoke] [--only ladder,cache,faults,onset]
                               [--resume REASON [--redo KEY#REP ...]] [--note TEXT ...]
+                              [--allow-active-campaigns]
        (--resume keeps the finished runs of --out and runs the rest; --redo runs one again)
        python -m loadtest.report      (renders docs/results/latency.md from results.json)
 """
@@ -39,19 +45,16 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from urllib.parse import urlencode
 
+from sim import compose as compose_mod
+
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "artifacts" / "latency"
 K6 = ROOT / ".cache" / "bin" / "k6"
 AGGREGATOR = ROOT / ".cache" / "bin" / "aggregator"
 WORLD = ROOT / "artifacts" / "sim" / "world.json"
-COMPOSE = [
-    "docker",
-    "compose",
-    "-f",
-    str(ROOT / "deploy" / "docker-compose.yml"),
-    "--profile",
-    "bench",
-]
+# This checkout's compose project (COMPOSE_PROJECT_NAME, default the shared `recloop`) with the
+# bench profile: a private checkout must never recreate the shared stack's api.
+COMPOSE = compose_mod.command("bench")
 API = os.environ.get(
     "BENCH_API_URL", f"http://127.0.0.1:{os.environ.get('RECLOOP_BENCH_API_PORT', '18180')}"
 )
@@ -62,6 +65,7 @@ CONTAINERS = [
     "api",
     "model-server",
     "redis",
+    "redis-cache",
     "redpanda",
     "postgres",
     "aggregator",
@@ -74,7 +78,7 @@ FAULTS = {
     "ms_slow": "model server: 30 % of calls +200 ms",
     "ms_latency": "model server: every call +50 ms",
     "ms_down": "model server disconnected",
-    "redis_down": "Redis disconnected",
+    "redis_down": "Redis disconnected",  # both instances (state and cache), as in M2
 }
 
 
@@ -97,6 +101,7 @@ class ApiConfig:
         if not self.proxied:
             env |= {
                 "BENCH_REDIS_URL": "redis://redis:6379/0",
+                "BENCH_CACHE_REDIS_URL": "redis://redis-cache:6379/0",
                 "BENCH_MODEL_SERVER_ADDR": "model-server:18081",
             }
         return env
@@ -190,6 +195,13 @@ def http(method: str, url: str, body: dict | None = None, timeout: float = 5.0):
     return json.loads(raw) if raw else None
 
 
+def active_campaigns() -> list[int]:
+    """Ids of the active campaigns (the bench api's advertiser api)."""
+    return sorted(
+        c["campaign_id"] for c in http("GET", API + "/v1/campaigns") if c["status"] == "active"
+    )
+
+
 def wait_ready(timeout: float = 60) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -237,7 +249,8 @@ class Bench:
         elif fault == "ms_down":
             http("POST", TOXIPROXY + "/proxies/model_server", {"enabled": False})
         elif fault == "redis_down":
-            http("POST", TOXIPROXY + "/proxies/redis", {"enabled": False})
+            for proxy in ("redis", "redis_cache"):
+                http("POST", TOXIPROXY + "/proxies/" + proxy, {"enabled": False})
 
     def reset_state(self) -> float:
         """Consumers caught up, Redis reseeded, faults off. Returns the catch-up time (s)."""
@@ -301,12 +314,12 @@ def prom_by(expr: str, at: float, label: str) -> dict[str, float]:
 
 
 def docker_cpu() -> dict[str, dict]:
-    names = [f"recloop-{c}-1" for c in CONTAINERS]
+    names = [compose_mod.container(c) for c in CONTAINERS]
     raw = sh("docker", "stats", "--no-stream", "--format", "{{json .}}", *names, check=False)
     out = {}
     for line in raw.splitlines():
         d = json.loads(line)
-        name = d["Name"].removeprefix("recloop-").removesuffix("-1")
+        name = compose_mod.service_of(d["Name"])
         out[name] = {
             "cpu_pct": float(d["CPUPerc"].rstrip("%") or 0),
             "mem": d["MemUsage"].split(" / ")[0],
@@ -541,24 +554,22 @@ def environment() -> dict:
     limits = {}
     for c in CONTAINERS:
         raw = sh(
-            "docker", "inspect", f"recloop-{c}-1", "--format", "{{json .HostConfig}}", check=False
-        )
+            "docker", "inspect", compose_mod.container(c), "--format", "{{json .HostConfig}}",
+            check=False,
+        )  # fmt: skip
         if raw.strip():
             hc = json.loads(raw)
             limits[c] = {
                 "cpus": hc.get("NanoCpus", 0) / 1e9,
                 "memory_mb": hc.get("Memory", 0) // (1 << 20),
             }
-    others = [
-        n
-        for n in sh("docker", "ps", "--format", "{{.Names}}").split()
-        if not n.startswith("recloop-")
-    ]
+    others = compose_mod.other_projects_running()
     images = {}
     for c in CONTAINERS:
         raw = sh(
-            "docker", "inspect", f"recloop-{c}-1", "--format", "{{.Config.Image}}", check=False
-        )
+            "docker", "inspect", compose_mod.container(c), "--format", "{{.Config.Image}}",
+            check=False,
+        )  # fmt: skip
         images[c] = raw.strip()
     cpu_model = sh("sysctl", "-n", "machdep.cpu.brand_string", check=False).strip()
     mem = sh("sysctl", "-n", "hw.memsize", check=False).strip()
@@ -670,6 +681,12 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="only add the --note sentences to --out and exit (no runs)",
     )
+    p.add_argument(
+        "--allow-active-campaigns",
+        action="store_true",
+        help="run although campaigns are active: their sponsored slots (the ads stage) and real "
+        "charges for the sessions' clicks are then part of the runs",
+    )
     args = p.parse_args(argv)
     args.out = args.out.resolve()
     if args.annotate:
@@ -689,6 +706,14 @@ def main(argv: list[str] | None = None) -> None:
         if not path.exists():
             raise SystemExit(f"{path} is missing: run `{what}`")
     wait_ready()
+    campaigns = active_campaigns()
+    if campaigns and not args.allow_active_campaigns:
+        raise SystemExit(
+            f"{len(campaigns)} active campaign(s) ({', '.join(map(str, campaigns))}): their sponsored "
+            "slots would add the ads stage to every home request and the sessions' clicks would be "
+            "billed. End or pause them (advertiser console, DELETE /v1/campaigns/{id}), or pass "
+            "--allow-active-campaigns"
+        )
     waited = wait_idle()
     load_now = [round(x, 2) for x in os.getloadavg()]
     print(f"latency  waited {waited}s for a quiet machine: load {load_now}", flush=True)
@@ -702,12 +727,14 @@ def main(argv: list[str] | None = None) -> None:
         "environment": env,
         "started": round(time.time()),
         "idle_wait_s": waited,
+        "active_campaigns": campaigns,
     }
     results, done = [], set()
     if args.redo and not args.resume:
         raise SystemExit("--redo needs --resume")
     if args.resume:
         meta, results, done = resume(args.out, meta, runs, args.resume, waited, args.redo)
+        meta["resumed"][-1]["active_campaigns"] = campaigns
     meta["notes"] = meta.get("notes", []) + args.note
     print(
         f"latency  {len(runs) - len(done)} of {len(runs)} runs to go ({args.plan}: "

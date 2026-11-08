@@ -162,7 +162,22 @@ def test_ab_report_on_a_made_up_aa(tmp_path):
         "to": 1200,
         "sessions": 10,
         "page_views": {"home": 100},
-        "evicted_keys": 0,
+        "redis": {
+            "state": {
+                "policy": "noeviction",
+                "maxmemory_mb": 1024,
+                "evicted_keys": 0,
+                "oom_errors": 0,
+                "used_memory_mb": 40.0,
+            },
+            "cache": {
+                "policy": "allkeys-lru",
+                "maxmemory_mb": 384,
+                "evicted_keys": 7,
+                "oom_errors": 0,
+                "used_memory_mb": 300.0,
+            },
+        },
     }
     res = ab_report.analyse(df, phase, tmp_path / "none.jsonl")
     assert (
@@ -175,7 +190,7 @@ def test_ab_report_on_a_made_up_aa(tmp_path):
     md = ab_report.render(
         {"bundle": "v1", "campaigns": 16, "phases": {"aa": phase}}, {"aa": res}, None
     )
-    assert "## A/A" in md and "Re-split 100 times" in md
+    assert "## A/A" in md and "Re-split 100 times" in md and "| 0 / 0 | 7 |" in md
 
 
 def test_ab_report_finds_a_real_lift(tmp_path):
@@ -229,6 +244,22 @@ def test_release_report_renders(tmp_path, monkeypatch):
         },
         "switch": {"full": {"first_page_s": 0.01, "last_other_page_s": 0.2}},
         "phases": {"before": {"from": 1000.0, "to": 1100.0, **summary}},
+        "redis": {
+            "state": {
+                "policy": "noeviction",
+                "maxmemory_mb": 1024,
+                "evicted_keys": 0,
+                "oom_errors": 0,
+                "used_memory_mb": 40.0,
+            },
+            "cache": {
+                "policy": "allkeys-lru",
+                "maxmemory_mb": 384,
+                "evicted_keys": 0,
+                "oom_errors": 0,
+                "used_memory_mb": 30.0,
+            },
+        },
         "bad_vs_full_ctr": [-0.004, -0.007, -0.001],
         "timeline": [{"t": 90.0, "versions": {"vA": 5, "vB": 5}, "failed": 0, "p99_ms": 9.0}],
         "events": [
@@ -245,5 +276,8 @@ def test_release_report_renders(tmp_path, monkeypatch):
     monkeypatch.setattr(release_report, "BUNDLES", tmp_path)
     md = release_report.render(drill)
     assert (
-        "## Canary" in md and "Decision: full rollout." in md and "| `vB` | canary | active |" in md
+        "## Canary" in md
+        and "Decision: full rollout." in md
+        and "| `vB` | canary | active |" in md
+        and "evicted 0 keys and refused 0 writes" in md
     )

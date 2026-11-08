@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -366,6 +367,39 @@ func TestAdsFailureLeavesTheOrganicFeed(t *testing.T) {
 	g.get("/v1/recommendations?user_id=4&limit=20", &s)
 	if !slices.Contains(s.Degraded, "ads_stale") {
 		t.Fatalf("an old snapshot: degraded %v", s.Degraded)
+	}
+}
+
+// fullState stands in for userstate.Fullness.
+type fullState struct{ full atomic.Bool }
+
+func (f *fullState) Full() bool { return f.full.Load() }
+
+// While the state Redis refuses writes, frequency caps and spend stop counting: the feed is
+// organic, with ads_state_full (design §5.1: when unsure, no ads); /internal/ads/select too.
+func TestNoAdsWhileTheStateRedisIsFull(t *testing.T) {
+	f := newFixtureWith(t, fixtureOpts{items: adItems, ads: true})
+	state := &fullState{}
+	f.ads.State = state // before the first request
+	f.campaigns(campaignSpec{bid: 50, budget: 1000, items: []int32{250}})
+	var r recResp
+	f.get("/v1/recommendations?user_id=4&limit=20", &r)
+	if len(sponsored(r.Items)) == 0 {
+		t.Fatalf("no ads before: degraded %v", r.Degraded)
+	}
+	state.full.Store(true)
+	f.get("/v1/recommendations?user_id=4&limit=20", &r)
+	if len(r.Items) != 20 || len(sponsored(r.Items)) != 0 || !slices.Contains(r.Degraded, "ads_state_full") {
+		t.Fatalf("%d items, %d ads, degraded %v", len(r.Items), len(sponsored(r.Items)), r.Degraded)
+	}
+	code, out := f.selectAds(map[string]any{"user_id": 4, "candidate_item_ids": []int{250}})
+	if code != 200 || len(out.Items) != 0 || !slices.Contains(out.Degraded, "ads_state_full") {
+		t.Fatalf("ads/select: %d %+v", code, out)
+	}
+	state.full.Store(false)
+	f.get("/v1/recommendations?user_id=4&limit=20", &r)
+	if len(sponsored(r.Items)) == 0 || slices.Contains(r.Degraded, "ads_state_full") {
+		t.Fatalf("after: %d ads, degraded %v", len(sponsored(r.Items)), r.Degraded)
 	}
 }
 
