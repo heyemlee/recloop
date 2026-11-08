@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
@@ -42,6 +42,8 @@ from ml.eval import bootstrap, calc_check, metrics, run
 from ml.eval.splits import NUM_ITEMS, Split, item_sids, load_split, train_sequences
 from ml.models.itemcf import ItemCF
 from ml.models.pop import Pop
+from ml.models.rrf import dense
+from ml.ranking import candidates as cand_mod
 
 MR_ARTIFACTS = paths.ARTIFACTS / "minionerec"
 RUNS = MR_ARTIFACTS / "runs"
@@ -53,6 +55,11 @@ REPORT = paths.RESULTS / "minionerec.md"
 NAME = "MiniOneRec"
 BASELINES = ("Pop", "ItemCF", "SASRec")
 REFERENCES = ("SASRec", "ItemCF")  # paired differences MiniOneRec - reference
+# Offline RRF with MiniOneRec as a fourth source (design §11 steps 5-6): its top GEN_K items
+# after pop, weight fixed beforehand at SASRec's and ItemCF's (sim/gen_ab.py uses the same).
+GEN_SOURCE = "gen"
+GEN_WEIGHT = 1.0
+GEN_K = 50
 SEGMENT_METRICS = ("HR@10", "NDCG@10")
 HEAD_SHARE = 0.2
 CATEGORY_LEVEL = 2
@@ -169,6 +176,10 @@ class Context:
     by_sid: dict[str, list[int]]
     baselines: dict  # name -> {"item": {metric: (n,)}, "sid": {...}} on the whole test split
     descriptions: dict[str, str]
+    # The home feed's fitted sources (sasrec, itemcf, pop) and the evaluator, for the offline
+    # RRF with gen; empty in tests that bring their own baselines.
+    sources: dict = field(default_factory=dict)
+    evaluator: object | None = None
 
 
 def build_context() -> Context:
@@ -190,6 +201,8 @@ def build_context() -> Context:
         by_sid=sid_items(sids, tie_order),
         baselines={m.name: ev.per_sample(m.score(test), test) for m in models},
         descriptions={m.name: m.describe() for m in models},
+        sources={"sasrec": sasrec, "itemcf": itemcf, "pop": pop},
+        evaluator=ev,
     )
 
 
@@ -572,6 +585,57 @@ def cost_summary(
     }
 
 
+# ----------------------------------------------------------------------------- RRF + gen
+
+
+def gen_lists(gen: Generation, by_sid: dict[str, list[int]], k: int = GEN_K):
+    """MiniOneRec as a recall source: per sample its first k distinct items (each SID expanded
+    in tie order, as the item rule and the nearline worker do), -1 padded; score = -rank."""
+    items = np.full((len(gen.rows), k), -1, dtype=np.int64)
+    for i, pred in enumerate(gen.predict):
+        out, seen = [], set()
+        for sid in pred:
+            for item in by_sid.get(normalize(sid), ()):
+                if item not in seen and len(out) < k:
+                    seen.add(item)
+                    out.append(item)
+        items[i, : len(out)] = out
+    scores = np.where(items >= 0, -np.arange(1, k + 1, dtype=np.float64), np.nan)
+    return items, scores
+
+
+def rrf_with_gen(gen: Generation, ctx: Context) -> dict | None:
+    """The api's weighted RRF of the three home sources against the same with MiniOneRec's top
+    GEN_K as a fourth source, on the run's samples (item and SID rule, paired bootstrap), and how
+    much of the fused top 10 gen brings."""
+    if not ctx.sources:
+        return None
+    t, rows = ctx.test, gen.rows
+    sub = replace(t, user=t.user[rows], target=t.target[rows], history=[t.history[i] for i in rows])
+    lists = cand_mod.source_lists(ctx.sources, sub)
+    weights = {**cand_mod.CONTROL_WEIGHTS, GEN_SOURCE: GEN_WEIGHT}
+    three = cand_mod.fuse(lists, cand_mod.CONTROL_WEIGHTS, NUM_ITEMS)
+    four = cand_mod.fuse({**lists, GEN_SOURCE: gen_lists(gen, ctx.by_sid)}, weights, NUM_ITEMS)
+    v3 = ctx.evaluator.per_sample(dense(three.items, three.rrf), sub)
+    v4 = ctx.evaluator.per_sample(dense(four.items, four.rrf), sub)
+    resampler = bootstrap.Resampler.build(sub.user)
+    top = four.items[:, :10] >= 0
+    via_gen = (four.ranks[GEN_SOURCE][:, :10] > 0) & top
+    others = sum((four.ranks[s][:, :10] > 0).astype(int) for s in cand_mod.SOURCES)
+    return {
+        "weights": weights,
+        "gen_k": GEN_K,
+        "samples": len(rows),
+        "rrf": {r: _with_ci(v3[r], resampler) for r in ("item", "sid")},
+        "rrf_gen": {r: _with_ci(v4[r], resampler) for r in ("item", "sid")},
+        "difference": {
+            r: _with_ci({k: v4[r][k] - v3[r][k] for k in v3[r]}, resampler) for r in ("item", "sid")
+        },
+        "top10_from_gen": float(via_gen.sum() / top.sum()),
+        "top10_only_gen": float((via_gen & (others == 0)).sum() / top.sum()),
+    }
+
+
 # ----------------------------------------------------------------------------- main
 
 
@@ -658,6 +722,7 @@ def build(
         "bootstrap": {"B": bootstrap.B, "seed": bootstrap.SEED, "alpha": bootstrap.ALPHA},
         "runs": out_runs,
         "agreement": agreement(gens, scored_runs, main, test),
+        "rrf_gen": rrf_with_gen(gens[main], ctx),
         "cost": cost,
     }
 

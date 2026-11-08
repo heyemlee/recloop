@@ -61,6 +61,7 @@ def render(out: dict) -> str:
     lines += _setup_section(out, main)
     lines += _repro_section(out, main)
     lines += _comparison_section(out, main)
+    lines += _rrf_gen_section(out)
     if "segments" in main:
         lines += _segment_section(out, main)
     lines += _cost_section(out)
@@ -267,6 +268,35 @@ def _comparison_section(out: dict, main: dict) -> list[str]:
         "",
     ]
     return lines
+
+
+def _rrf_gen_section(out: dict) -> list[str]:
+    """RRF of the three home sources with and without MiniOneRec as a fourth (offline)."""
+    r = out.get("rrf_gen")
+    if not r:
+        return []
+    w = ", ".join(f"{k} {v:g}" for k, v in r["weights"].items())
+    rows = []
+    for rule in ("item", "sid"):
+        rows.append([f"RRF, three sources ({rule} rule)"] + [_ci(r["rrf"][rule][m]) for m in METRIC_NAMES])
+        rows.append([f"RRF + gen ({rule} rule)"] + [_ci(r["rrf_gen"][rule][m]) for m in METRIC_NAMES])
+        rows.append([f"Difference ({rule} rule)"] + [_signed(r["difference"][rule][m]) for m in METRIC_NAMES])
+    return [
+        "## As a fourth recall source",
+        "",
+        "The home feed's weighted RRF (SASRec, ItemCF and Pop, each its top 200; "
+        "ml/ranking/candidates.py replays the api's fusion) against the same with MiniOneRec's "
+        f"top {r['gen_k']} items of the main run as a fourth source (`gen`), on its "
+        f"{r['samples']:,} samples; weights {w}. The gen weight was fixed beforehand (SASRec's "
+        "and ItemCF's), not tuned on any split. This is what the nearline A/B "
+        "([nearline.md](nearline.md)) serves to its gen arm, apart from freshness.",
+        "",
+        *_table(["Model"] + METRIC_NAMES, rows),
+        "",
+        f"In the fused top 10, {r['top10_from_gen']:.1%} of the items are among gen's and "
+        f"{r['top10_only_gen']:.1%} come from gen alone.",
+        "",
+    ]
 
 
 def _segment_section(out: dict, main: dict) -> list[str]:
