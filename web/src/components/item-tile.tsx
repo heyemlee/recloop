@@ -16,6 +16,7 @@ export const SOURCE_STYLE: Record<string, string> = {
   pop: "bg-zinc-200 text-zinc-800 dark:bg-zinc-800 dark:text-zinc-200",
   text: "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200",
   backfill: "bg-amber-100 text-amber-900 dark:bg-amber-900/40 dark:text-amber-200",
+  ads: "bg-orange-100 text-orange-900 dark:bg-orange-900/40 dark:text-orange-200",
 };
 
 /** Reports an impression once the tile is at least 50% visible for 1 second (design §7.1). */
@@ -24,6 +25,7 @@ function useImpression(
   userId: number | null,
   itemId: number,
   impressionId: string,
+  adToken?: string,
 ) {
   useEffect(() => {
     const el = ref.current;
@@ -34,7 +36,7 @@ function useImpression(
         for (const e of entries) {
           if (e.intersectionRatio >= 0.5) {
             timer ??= setTimeout(() => {
-              trackImpression(userId, itemId, impressionId);
+              trackImpression(userId, itemId, impressionId, adToken);
               obs.disconnect();
             }, 1000);
           } else if (timer !== undefined) {
@@ -50,11 +52,11 @@ function useImpression(
       obs.disconnect();
       if (timer !== undefined) clearTimeout(timer);
     };
-  }, [ref, userId, itemId, impressionId]);
+  }, [ref, userId, itemId, impressionId, adToken]);
 }
 
 /** Request-level facts repeated on every tile's debug box (design §22.1). */
-export type TileMeta = { modelVersion: string; group: string; degraded: string[] };
+export type TileMeta = { modelVersion: string; group: string; degraded: string[]; adPrices?: Map<number, number> };
 
 export function ItemTile({
   rec,
@@ -72,14 +74,17 @@ export function ItemTile({
   onOpen: (rec: RecItem) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
-  useImpression(ref, userId, rec.item_id, rec.impression_id);
+  useImpression(ref, userId, rec.item_id, rec.impression_id, rec.ad_token);
   const it = rec.item;
+  const sponsored = rec.slot === "sponsored";
+  const price = meta.adPrices?.get(rec.position);
 
   return (
     <div
       ref={ref}
       data-testid="rec-tile"
       data-item-id={rec.item_id}
+      data-slot={rec.slot}
       data-sources={rec.sources.map((h) => h.source).join(",")}
       data-via={rec.sources
         .filter((h) => h.source === "itemcf" && h.via !== undefined)
@@ -93,7 +98,10 @@ export function ItemTile({
           e.preventDefault();
           onOpen(rec);
         }}
-        className="group flex flex-1 flex-col overflow-hidden rounded-xl border bg-card transition-shadow hover:shadow-md"
+        className={cn(
+          "group flex flex-1 flex-col overflow-hidden rounded-xl border bg-card transition-shadow hover:shadow-md",
+          sponsored && "border-orange-300 dark:border-orange-800",
+        )}
       >
         <div className="relative flex aspect-square items-center justify-center bg-white p-3">
           {it?.image_url ? (
@@ -105,6 +113,14 @@ export function ItemTile({
           <span className="absolute left-2 top-2 rounded-md bg-background/90 px-1.5 text-xs tabular-nums text-muted-foreground">
             #{rec.position}
           </span>
+          {sponsored && (
+            <span
+              data-testid="sponsored-label"
+              className="absolute right-2 top-2 rounded-md bg-orange-100 px-1.5 text-xs font-medium text-orange-900 dark:bg-orange-900/60 dark:text-orange-100"
+            >
+              {rec.label ?? "Sponsored"}
+            </span>
+          )}
         </div>
         <div className="flex flex-1 flex-col gap-1.5 p-3">
           <div className="line-clamp-2 text-sm font-medium leading-snug group-hover:underline">
@@ -114,7 +130,7 @@ export function ItemTile({
             {it?.brand ?? "—"} · {formatPrice(it?.price_cents)}
           </div>
           <div className="mt-auto flex flex-wrap gap-1 pt-1">
-            <Badge className={cn("rounded-md", SOURCE_STYLE[rec.source])}>{rec.source}</Badge>
+            <Badge className={cn("rounded-md", SOURCE_STYLE[rec.source])}>{sponsored ? "ad" : rec.source}</Badge>
             {rec.sources
               .filter((h) => h.source !== rec.source)
               .map((h) => (
@@ -128,7 +144,9 @@ export function ItemTile({
       {debug && (
         <div data-testid="tile-debug" className="mt-1 rounded-lg bg-muted/60 px-2 py-1.5 font-mono text-[11px] leading-relaxed text-muted-foreground">
           <div>
-            item {rec.item_id} · RRF {rec.score.toFixed(4)}
+            {sponsored
+              ? `item ${rec.item_id} · campaign ${rec.campaign_id}${price !== undefined ? ` · ${price}¢/click` : ""}`
+              : `item ${rec.item_id} · RRF ${rec.score.toFixed(4)}`}
           </div>
           {rec.sources.map((h) => (
             <div key={h.source} className="truncate">

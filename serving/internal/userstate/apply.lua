@@ -1,7 +1,8 @@
 -- Apply one event to a user's state, at most once (docs/design.md §7.3, §12.2).
 -- KEYS: 1 dedup:{group}:{event_id}  2 u:{uid}:hist  3 u:{uid}:hv  4 u:{uid}:bought  5 u:{uid}:seen
+--       6 fc:{uid}:{campaign_id}:{yyyymmdd} (only on the impression of a sponsored slot)
 -- ARGV: 1 kind (history | purchase | impression)  2 item_id  3 event time (ms)  4 now (ms)
---       5 history size  6 seen window (ms)  7 dedup TTL (ms)
+--       5 history size  6 seen window (ms)  7 dedup TTL (ms)  8 frequency-cap TTL (ms)
 if not redis.call('SET', KEYS[1], '1', 'NX', 'PX', ARGV[7]) then
   return 0  -- already applied
 end
@@ -21,5 +22,10 @@ if kind == 'impression' or kind == 'history' or kind == 'purchase' then
   redis.call('ZADD', KEYS[5], 'GT', ts, item)
   redis.call('ZREMRANGEBYSCORE', KEYS[5], '-inf', '(' .. (tonumber(ARGV[4]) - window))
   redis.call('PEXPIRE', KEYS[5], window)
+end
+-- A sponsored impression counts towards the campaign's daily frequency cap (design §9.2).
+if KEYS[6] and kind == 'impression' then
+  redis.call('INCR', KEYS[6])
+  redis.call('PEXPIRE', KEYS[6], ARGV[8])
 end
 return 1

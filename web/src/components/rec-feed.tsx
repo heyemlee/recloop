@@ -59,10 +59,12 @@ export function RecFeed({
     [first],
   );
   const recall = first?.experiments?.recall;
+  const adPrices = useMemo(() => new Map((first?.debug?.ads?.slots ?? []).map((s) => [s.pos, s.price])), [first]);
   const meta = {
     modelVersion: first?.model_version ?? "",
     group: recall ? `recall: ${recall.exp_id ? `${recall.exp_id} / ` : ""}${recall.variant}` : "",
     degraded: first?.degraded ?? [],
+    adPrices,
   };
 
   async function loadMore() {
@@ -80,9 +82,11 @@ export function RecFeed({
 
   async function open(rec: RecItem) {
     if (userId !== null) {
+      // A sponsored slot's click carries its ad_token: billing charges it (design §9.3).
       const ev = newEvent("click", userId, rec.item_id, {
         impressionId: rec.impression_id,
-        props: { surface, position: rec.position, source: rec.source },
+        adToken: rec.ad_token,
+        props: { surface, position: rec.position, source: rec.source, slot: rec.slot },
       });
       // Wait (briefly) for the click to be stored, so the next page already reflects it.
       await sendNow(ev, 1500).catch(() => undefined);

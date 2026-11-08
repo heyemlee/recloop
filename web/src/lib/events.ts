@@ -13,6 +13,8 @@ export type ClientEvent = {
   user_id: number;
   item_id: number;
   impression_id?: string;
+  /** The slot's token on impressions and clicks of sponsored items (design §9.2, §9.3). */
+  ad_token?: string;
   client_ts: string;
   props?: Record<string, unknown>;
 };
@@ -25,7 +27,7 @@ export function newEvent(
   type: EventType,
   userId: number,
   itemId: number,
-  extra: { impressionId?: string; props?: Record<string, unknown> } = {},
+  extra: { impressionId?: string; adToken?: string; props?: Record<string, unknown> } = {},
 ): ClientEvent {
   return {
     event_id: uuidv7(),
@@ -33,6 +35,7 @@ export function newEvent(
     user_id: userId,
     item_id: itemId,
     impression_id: extra.impressionId,
+    ad_token: extra.adToken,
     client_ts: new Date().toISOString(),
     props: extra.props,
   };
@@ -76,12 +79,15 @@ async function flush(beacon: boolean) {
   }
 }
 
-/** Queue an impression; each impression_id is reported once per page load. */
-export function trackImpression(userId: number, itemId: number, impressionId: string) {
+/**
+ * Queue an impression; each impression_id is reported once per page load. A sponsored slot's
+ * impression carries its ad_token: it counts towards the campaign's frequency cap.
+ */
+export function trackImpression(userId: number, itemId: number, impressionId: string, adToken?: string) {
   if (sentImpressions.has(impressionId)) return;
   sentImpressions.add(impressionId);
   start();
-  queue.push(newEvent("impression", userId, itemId, { impressionId }));
+  queue.push(newEvent("impression", userId, itemId, { impressionId, adToken }));
 }
 
 /** Send one event now; retried with the same event_id. Resolves to the api's answer. */

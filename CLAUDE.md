@@ -20,9 +20,10 @@ write-ups in `docs/results/`.
   §22.4 before anything is made public.
 - `docs/results/*.md` are generated (`make eval` writes `offline.md`, `make ann` writes
   `ann.md`, `make load` writes `latency.md`; `make latency-report` re-renders it from
-  `artifacts/latency/results.json`; `make agent-eval` writes `agent.md`); change the generator,
-  not the file. The committed `offline.md` is `make setup`, then `make paper-sasrec`, then
-  `make eval`. `make eval` re-runs give the same bytes; `make train` runs on the CPU with fixed
+  `artifacts/latency/results.json`; `make billing` writes `billing.md`, `make billing-report`
+  re-renders it from `artifacts/billing/`; `make agent-eval` writes `agent.md`); change the
+  generator, not the file. The committed `offline.md` is `make setup`, then `make paper-sasrec`,
+  then `make eval`. `make eval` re-runs give the same bytes; `make train` runs on the CPU with fixed
   seeds, and two runs with the same worker / thread counts gave identical weights. The committed
   `agent.md` is a fresh database (`make setup`: no orders, stock as ingested), then `make
   agent-eval`; re-runs differ only in its latency table, and the report says when the database
@@ -35,22 +36,28 @@ write-ups in `docs/results/`.
 
 ```
 deploy/docker-compose.yml   PostgreSQL 18 + pgvector, Redis, Redpanda (+ topic init), log-sink
-                            (Redpanda Connect), aggregator, Prometheus, Grafana, OTel collector,
-                            Jaeger; profile `bench`: Toxiproxy, api and model-server containers
+                            (Redpanda Connect), aggregator, billing (+ pg-proxy: Toxiproxy between
+                            billing and PostgreSQL), Prometheus, Grafana, OTel collector, Jaeger;
+                            profile `bench`: Toxiproxy, api and model-server containers
 deploy/connect/ prometheus/ grafana/ otel/ jaeger/ toxiproxy/   their configuration;
                             model-server.Dockerfile (bench image)
 proto/                      buf workspace; recloop/modelserver/v1/model_server.proto (design §13.2)
 serving/                    Go module github.com/heyemlee/recloop/serving
   cmd/api/                  HTTP api (:18080): /v1/recommendations, /v1/events, /v1/items/{id},
-                            /v1/advertisers, /v1/campaigns[/{id}[/report]], ...
-  cmd/aggregator/           events -> Redis; rebuild-from-db, reset-offsets, wait-lag
+                            /v1/advertisers, /v1/campaigns[/{id}[/report]], ...,
+                            POST /internal/ads/select
+  cmd/aggregator/           events -> Redis (incl. frequency caps); rebuild-from-db, reset-offsets,
+                            wait-lag
+  cmd/billing/              sponsored clicks -> charge ledger + Redis spend; reconcile every minute;
+                            `billing reconcile` = one pass
   internal/                 api, mixer (fan-out, RRF, filters), recall, experiment, events (record
                             format, Redpanda publisher, served writer, Direct = M1's sync path),
                             userstate (Redis + apply.lua), cache (pages, candidate cache, codec),
                             resilience (budgets, breakers), consumer (consume loop, lag),
                             aggregator, metrics (Prometheus), tracing (OTel), catalog, bundle,
-                            store, ads (GSP auction, pCTR interface, campaign settings), adtoken
-                            (signed ad_token), billing (charge transaction, Redis spend.lua)
+                            store, ads (GSP auction, pCTR interface, campaign settings, serving:
+                            campaign index, gates, pacing), adtoken (signed ad_token), billing
+                            (charge transaction, Redis spend.lua, consumer, reconcile + raise.lua)
   internal/store/db/        sqlc output; queries in internal/store/queries, schema = migrations/
   internal/testutil/        test DB per package (recloop_test_<package>) and Redis DB 15
   migrations/               goose (00001 catalog, 00002 events/orders/experiments/models,
@@ -72,12 +79,13 @@ ml/                         Python 3.12 uv project (own .venv); run modules from
   tests/
 minionerec/                 Python 3.12 uv project (own .venv, Apple Silicon only): MiniOneRec's
                             evaluate.py + evaluate.py.patch on MPS (upstream, generate, cost)
-web/                        Next.js 16 + shadcn/ui (:13000); /api/* is proxied to the Go api; e2e/;
-                            /advertiser is the advertiser console
+web/                        Next.js 16 + shadcn/ui (:13000); /api/v1/* is proxied to the Go api
+                            (/internal is not); e2e/; /advertiser is the advertiser console
 sim/                        traffic simulator (world, click model, sessions + fault switches, verify,
-                            drill); runs in the ml environment (`$(PY) -m sim.<module>`)
+                            drill; ads, billing_drill, billing_verify, overdelivery); runs in the
+                            ml environment (`$(PY) -m sim.<module>`)
 loadtest/                   k6 scenario recs.js, experiment runner run.py, report.py (latency.md)
-analysis/                   served_attribution.sql, srm.py
+analysis/                   served_attribution.sql, srm.py, billing_report.py (billing.md)
 tools/                      go.mod pinning buf, protoc-gen-go(-grpc), sqlc (built into .cache/bin);
                             tools/k6/go.mod pins k6 (own module)
 testdata/                   bucket_vectors.json, shared by the Go and Python bucketing tests
@@ -130,6 +138,13 @@ make load          # latency experiments -> docs/results/latency.md (~90 min; id
                    # LOAD_FLAGS='--resume "<reason>"' continues results.json, the report says so)
 make load-smoke    # 1 repeat, 15 s runs -> artifacts/latency/smoke.md (development)
 make latency-report  # re-render latency.md from artifacts/latency/results.json
+make billing       # overdelivery + billing-drill -> docs/results/billing.md (~75 min; stack, model
+                   # server and `CANDIDATE_CACHE=off make serve-api` up; reseeds Redis; refuses to
+                   # run while other campaigns are active)
+make overdelivery  # safety margin 0 / 5 / 20 clicks x pacing, 6 x ~5 min -> artifacts/billing/
+make billing-drill # 30 min of traffic, kill -9 billing, Redpanda restarts, PostgreSQL +200 ms
+                   # for billing; then the ledger against the simulator's truth, charge by charge
+make billing-report  # re-render billing.md from artifacts/billing/
 make k6            # build k6 v2.3.0 (tools/k6) into .cache/bin
 make agent-cases   # regenerate agent/eval/cases.jsonl from the items table (read-only)
 make agent-eval    # shopping assistant: baseline + oracle agents -> docs/results/agent.md (~1 min)
@@ -220,7 +235,7 @@ interpreter at exit: `ORT_DISABLE_TELEMETRY=1` (Makefile, model-server image, `m
   stock every 5 s. Served events: bounded buffer, batches retried for 30 s, dropped (counted) only
   when full.
 - Request budget (`internal/resilience`, `BUDGET_*_MS`): 100 ms total; user context 5, candidate
-  cache 3, recall 35, ranking reserve 25, tail 10. A stage gets min(its budget, left - later
+  cache 3, recall 35, ranking reserve 25, ads 10 (M3), tail 10. A stage gets min(its budget, left - later
   budgets); a remote source with < 5 ms left is skipped. Degradation reasons are
   `<dependency>_<timeout|error|circuit_open|skipped>`, `static_popular`, `pages_*`,
   `model_version_mismatch`; a degraded candidate list is never cached.
@@ -237,7 +252,8 @@ interpreter at exit: `ORT_DISABLE_TELEMETRY=1` (Makefile, model-server image, `m
   env at start); the delay stops at the caller's deadline. 32 worker threads.
 - Ports: Redpanda 19092 (admin 19644), log-sink 14195, aggregator metrics 18090, Prometheus
   19090, Grafana 13001 (dashboard "RecLoop"), Jaeger 16686, OTLP 14317 / 14318; bench api 18180,
-  bench model-server admin 18182, Toxiproxy 18474. `make serve-api` / `serve-model` send traces
+  bench model-server admin 18182, Toxiproxy 18474; M3: billing metrics 18092, pg-proxy API 18475,
+  model server admin `MODEL_SERVER_ADMIN_PORT` (18082). `make serve-api` / `serve-model` send traces
   to the collector (`OTEL_EXPORTER_OTLP_ENDPOINT`); the api serves `/metrics`.
 - Load tests run on the bench profile: api and model server containers (2 CPU each); the fault
   experiment reaches the model server and Redis through Toxiproxy, the rest directly (the proxy
@@ -248,7 +264,7 @@ interpreter at exit: `ORT_DISABLE_TELEMETRY=1` (Makefile, model-server image, `m
   = examination x relevance by text similarity), `sim/run.py` (sessions, fault switches, ledger),
   `sim/verify.py` (events_raw / orders / Redis vs the ledger), `sim/drill.py`.
 
-## Ads and billing (M3, logic part)
+## Ads and billing (M3)
 
 - Advertiser api: `GET/POST /v1/advertisers`; `GET/POST /v1/campaigns`, `GET/PATCH/DELETE
   /v1/campaigns/{id}`, `GET /v1/campaigns/{id}/report?from&to`. PATCH needs `If-Match` with the
@@ -265,7 +281,57 @@ interpreter at exit: `ORT_DISABLE_TELEMETRY=1` (Makefile, model-server image, `m
   billed = min(token price, budget - spent) -> insert into `ad_charges`, keyed by impression_id
   (business dedup) -> spent += billed; after COMMIT, Redis `spend:{cid}:{yyyymmdd}` once per
   event (`spend.lua`). Token expiry is judged at the click's receive time (stamped by the api),
-  not at processing time. Not wired to the mixer or Redpanda yet.
+  not at processing time.
+- Sponsored slots (`api/ads.go`, `ads/serving.go`): positions 3 and 9 of the home feed (the
+  auction's first and second place, one slot per item; organic items move down; not on item
+  pages). Active
+  campaigns are kept in memory, reloaded every 5 s (a snapshot older than 1 min serves no ads:
+  `ads_stale`). Per request: in the flight window -> items in stock, not bought, not in the
+  request's organic list (all 200) -> one Redis MGET of `spend:{cid}:{yyyymmdd}` and
+  `fc:{uid}:{cid}:{yyyymmdd}` (budget `BUDGET_ADS_MS`, 10) -> budget left > safety margin x bid
+  (spend = max(Redis counter, the budget row of the last refresh): an evicted counter cannot
+  make a spent campaign look new),
+  frequency below the cap, pacing -> `FixedPCTR` (`ADS_FIXED_PCTR` 0.01, floor `ADS_MIN_PCTR`)
+  -> `ads.Run` -> signed tokens. The page store keeps the slots (later pages show them); ads are
+  never in the candidate cache. Failure: organic feed, `ads_<timeout|error|skipped>` /
+  `pctr_error` in `degraded`; the §5.1 chain (no user state, SASRec or ranker) rules ads out.
+  The brand cap is an organic rule: ads are not counted in it.
+- Serving policy: `ADS_SAFETY_MARGIN_CLICKS` (5), `ADS_PACING` (off): pacing serves a campaign
+  with probability 1 while its spend is on or behind budget x elapsed share of today's flight
+  window, falling to 0 at one bid ahead. An ads-layer experiment overrides both per user
+  (params `safety_margin_clicks`, `pacing`, `min_pctr`); the billing runs set theirs that way.
+- Served items of sponsored slots carry `campaign_id`, `price`, `pctr_ppm`, `ad_token`; the
+  served event has `ads` (outcome, policy, gate counts). Responses: `slot: sponsored`,
+  `label: Sponsored`, `campaign_id`, `ad_token`; the web app sends the token with the slot's
+  impression and click.
+- `POST /internal/ads/select` (for the shopping assistant, §10.3 (5)): `{"user_id",
+  "candidate_item_ids" (items meeting the request's checked hard constraints),
+  "exclude_item_ids" (the reply's organic items), "max_price_cents"?, "slots"? (1)}` -> at most
+  one sponsored item (same gates and auction, positions from 1) with its token, a served event
+  of surface `chat`; failures are 200 with no items and `degraded`. Not proxied by the web app.
+- Frequency caps count impression events: a sponsored impression carries its slot's
+  `ad_token`; the aggregator verifies it (`AD_TOKEN_KEYS`; expired tokens count, forged or
+  misplaced ones do not) and `apply.lua` increments `fc:{uid}:{cid}:{day of serving}` (2 days)
+  under the event's dedup marker. `rebuild-from-db` rebuilds them from the payload's token.
+- Billing consumer (`cmd/billing`, group `billing`, static membership `billing-0`): only clicks
+  with a token (header `type`), 8 at a time (`BILLING_WORKERS`), offsets committed after the
+  whole batch; `ErrUnknownCampaign` and malformed records are logged and skipped. It reaches
+  PostgreSQL through `pg-proxy`. Metrics on 18092 (`recloop_billing_*`, `recloop_reconcile_*`).
+- Reconciliation (every minute in billing, `billing reconcile` once): per campaign-day of today
+  and yesterday, ledger sum vs budget row (must be equal: reported) vs Redis. A counter behind
+  the ledger is repaired by re-applying each charge with billing's own dedup marker
+  (`dedup:billing:{click event_id}`), then raised to at least the ledger sum (`raise.lua`): it
+  can never pass the ledger. A counter ahead is reported, not changed.
+- Billing runs (`make billing`): `sim.overdelivery` and `sim.billing_drill` create their own
+  campaigns through the api (and end them), refuse to start while other campaigns are active,
+  reseed Redis before every configuration (`ml.data.seed_redis`, after the consumers caught
+  up), and write `artifacts/billing/`. Redis must not evict during them (`evicted_keys` is
+  recorded; the drill fails on any): run the api with `CANDIDATE_CACHE=off`, or 30 minutes of
+  simulated traffic fill the 384 MB. The truth (`sim.billing_verify`) comes from the simulator's
+  ledger only: the tokens it was served (claims read, not verified), its clicks, which ones it
+  forged (`forge` fault). `--dwell-ms` delays a page's events (time to click). The drill's
+  docker commands use `COMPOSE_PROJECT_NAME` and the repo's `.env`; `PG_PROXY_URL` reaches
+  pg-proxy.
 - Property tests (rapid; billing ones against PostgreSQL): a sequential model with technical
   and business duplicates, late / forged / mismatched clicks, budget changes and crashes at every
   step must match the database exactly; concurrent workers must give the order-independent

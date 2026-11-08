@@ -17,17 +17,20 @@ type Plan struct {
 	UserContext time.Duration // ① Redis pipeline: history, hv, bought, seen
 	CacheGet    time.Duration // candidate cache lookup (Redis)
 	Recall      time.Duration // ② concurrent recall
-	Rank        time.Duration // ⑤ reserved for ranking (RRF in process today; Rank RPC from M3)
+	Rank        time.Duration // ⑤ reserved for ranking (RRF in process today; LightGBM from M4)
+	Ads         time.Duration // ⑥ sponsored slots: one Redis read (spend, frequency), pCTR, auction
 	Tail        time.Duration // ④⑥⑦ filters, diversity, page store, rendering
 }
 
-// DefaultPlan is the design's 100 ms request: 5 ms context, 35 ms recall, 25 ms ranking.
+// DefaultPlan is the design's 100 ms request: 5 ms context, 35 ms recall, 25 ms ranking, 10 ms
+// for the ads.
 var DefaultPlan = Plan{
 	Total:       100 * time.Millisecond,
 	UserContext: 5 * time.Millisecond,
 	CacheGet:    3 * time.Millisecond,
 	Recall:      35 * time.Millisecond,
 	Rank:        25 * time.Millisecond,
+	Ads:         10 * time.Millisecond,
 	Tail:        10 * time.Millisecond,
 }
 

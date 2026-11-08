@@ -14,7 +14,16 @@
 //	                       degradation (the baseline of the fault experiments, design §5.2)
 //	CANDIDATE_CACHE        on (default) or off
 //	BUDGET_*_MS            request budget: TOTAL 100, USER_CONTEXT 5, CACHE_GET 3, RECALL 35,
-//	                       RANK 25, TAIL 10 (design §4.1, §5.1)
+//	                       RANK 25, ADS 10, TAIL 10 (design §4.1, §5.1)
+//	ADS                    on (default): sponsored slots 3 and 9 of the home feed and
+//	                       /internal/ads/select (design §9.2); off: none
+//	AD_TOKEN_KEYS          ad_token keys, kid:secret[,kid:secret...] (no keys: no ads)
+//	ADS_SAFETY_MARGIN_CLICKS  stop a campaign when its budget left is at most this many clicks
+//	                       at its bid (5); an ads-layer experiment's "safety_margin_clicks"
+//	                       overrides it per user
+//	ADS_PACING             off (default) or on: spread a campaign's daily budget over its
+//	                       flight window ("pacing" in the ads-layer experiment)
+//	ADS_FIXED_PCTR         the stub pCTR every ad gets (0.01); ADS_MIN_PCTR the floor (0.001)
 //	BREAKER_WINDOW         time:10s:20:10 (default, design §5.1: >= 50 % of the calls of the
 //	                       last 10 s with at least 20 calls, or 10 failures in a row) or
 //	                       calls:20 (the last 20 calls); open 10 s, 5 half-open probes
@@ -28,6 +37,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -46,6 +56,9 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
 	pb "github.com/heyemlee/recloop/serving/gen/recloop/modelserver/v1"
+	"github.com/heyemlee/recloop/serving/internal/ads"
+	"github.com/heyemlee/recloop/serving/internal/adtoken"
+	"github.com/heyemlee/recloop/serving/internal/aggregator"
 	"github.com/heyemlee/recloop/serving/internal/api"
 	"github.com/heyemlee/recloop/serving/internal/bundle"
 	"github.com/heyemlee/recloop/serving/internal/cache"
@@ -102,8 +115,60 @@ func plan() resilience.Plan {
 		CacheGet:    envMillis("BUDGET_CACHE_GET_MS", int(d.CacheGet.Milliseconds())),
 		Recall:      envMillis("BUDGET_RECALL_MS", int(d.Recall.Milliseconds())),
 		Rank:        envMillis("BUDGET_RANK_MS", int(d.Rank.Milliseconds())),
+		Ads:         envMillis("BUDGET_ADS_MS", int(d.Ads.Milliseconds())),
 		Tail:        envMillis("BUDGET_TAIL_MS", int(d.Tail.Milliseconds())),
 	}
+}
+
+func envFloat(key string, def float64) (float64, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return def, nil
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", key, err)
+	}
+	return f, nil
+}
+
+// adServer sets up the sponsored slots (design §9.2): the campaign index (refreshed every
+// ads.RefreshEvery in the background), the token keys, the stub pCTR and the default policy.
+func adServer(ctx context.Context, bg context.Context, st *store.Store, log *slog.Logger) (*api.AdServer, error) {
+	if env("ADS", "on") == "off" {
+		return nil, nil
+	}
+	if os.Getenv(adtoken.EnvKeys) == "" {
+		log.Warn(adtoken.EnvKeys + " is not set: no sponsored slots")
+		return nil, nil
+	}
+	keys, err := adtoken.KeysFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	margin, err := strconv.Atoi(env("ADS_SAFETY_MARGIN_CLICKS", "5"))
+	if err != nil || margin < 0 {
+		return nil, errors.New("ADS_SAFETY_MARGIN_CLICKS must be a non-negative integer")
+	}
+	pctr, err := envFloat("ADS_FIXED_PCTR", 0.01)
+	if err != nil {
+		return nil, err
+	}
+	minPCTR, err := envFloat("ADS_MIN_PCTR", 0.001)
+	if err != nil {
+		return nil, err
+	}
+	index := ads.NewIndex(func(ctx context.Context, today time.Time) ([]ads.Campaign, error) {
+		return st.Campaigns(ctx, nil, today)
+	}, time.Now, log)
+	if err := index.Refresh(ctx); err != nil {
+		log.Warn("campaigns not loaded yet; no ads until they are", "err", err)
+	}
+	go index.Run(bg, ads.RefreshEvery)
+	return &api.AdServer{
+		Index: index, PCTR: ads.FixedPCTR(pctr), Keys: keys,
+		Policy: ads.Policy{SafetyMarginClicks: int32(margin), Pacing: env("ADS_PACING", "off") == "on", MinPCTR: minPCTR},
+	}, nil
 }
 
 // spanName keeps span names to the route, not the concrete path.
@@ -218,7 +283,11 @@ func run(log *slog.Logger) error {
 		k := events.Kafka{Client: kafka, Topic: events.Topic}
 		publisher, servedSink = k, k
 	case "direct":
-		publisher = &events.Direct{DB: st, State: users, OnStock: cat.SetStock, Now: time.Now}
+		direct := &events.Direct{DB: st, State: users, OnStock: cat.SetStock, Now: time.Now}
+		if keys, err := adtoken.KeysFromEnv(); err == nil {
+			direct.FreqKey = aggregator.FreqKeys(keys) // the aggregator's frequency-cap rule
+		}
+		publisher = direct
 		servedSink = events.PGServed{DB: st}
 	default:
 		return errors.New("EVENTS_MODE must be redpanda or direct, not " + mode)
@@ -255,6 +324,10 @@ func run(log *slog.Logger) error {
 	var cands *cache.CandidateCache
 	if env("CANDIDATE_CACHE", "on") != "off" {
 		cands = &cache.CandidateCache{R: rdb, TTL: cache.CandidateTTL}
+	}
+	adSrv, err := adServer(ctx, bg, st, log)
+	if err != nil {
+		return err
 	}
 
 	srv := &api.Server{
@@ -311,7 +384,8 @@ func run(log *slog.Logger) error {
 		Log: log,
 		Now: time.Now,
 
-		Campaigns: st, // the advertiser api (design §9.5)
+		Campaigns: st,    // the advertiser api (design §9.5)
+		Ads:       adSrv, // sponsored slots (design §9.2)
 	}
 
 	handler := srv.Handler()
@@ -331,7 +405,7 @@ func run(log *slog.Logger) error {
 	go func() { errc <- httpSrv.ListenAndServe() }()
 	log.Info("api listening", "addr", addr, "bundle", b.Version, "config_version", exps.Current().Version,
 		"events", env("EVENTS_MODE", "redpanda"), "naive", naive, "candidate_cache", cands != nil, "tracing", tracingOn,
-		"budget_ms", srv.Plan.Total.Milliseconds(), "breaker_window", breakerCfg.String())
+		"budget_ms", srv.Plan.Total.Milliseconds(), "breaker_window", breakerCfg.String(), "ads", adSrv != nil)
 
 	select {
 	case err := <-errc:

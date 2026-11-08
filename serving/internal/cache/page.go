@@ -40,7 +40,21 @@ type Page struct {
 	Degraded      []string                         `json:"degraded"`
 	HV            int64                            `json:"hv"`
 	Items         []mixer.Fused                    `json:"items,omitempty"`
-	CreatedAt     time.Time                        `json:"created_at"`
+	// Sponsored are the ad slots among Items (by position): a later page shows them as the
+	// first one did, with the tokens signed when the request was served.
+	Sponsored []Slot    `json:"sponsored,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// Slot is a sponsored position of a result list (design §9.2): the auction's winner and the
+// signed ad_token its impression and click events carry.
+type Slot struct {
+	Position   int    `json:"pos"`
+	ItemID     int32  `json:"item_id"`
+	CampaignID int64  `json:"campaign_id"`
+	PriceCents int32  `json:"price"`
+	PCTRPPM    int64  `json:"pctr_ppm"`
+	AdToken    string `json:"ad_token"`
 }
 
 const pageFormat = 'P'

@@ -25,6 +25,8 @@ const (
 	// events to user state: the aggregator, a rebuild from events_raw and the synchronous path
 	// share it, so an event applied by one is not applied again by another.
 	DedupGroup = "aggregator"
+	// FreqTTL keeps a frequency-cap counter (design §12.2: two days).
+	FreqTTL = 48 * time.Hour
 )
 
 // Keys of one user.
@@ -34,6 +36,13 @@ func BoughtKey(uid int64) string { return fmt.Sprintf("u:%d:bought", uid) }
 func SeenKey(uid int64) string   { return fmt.Sprintf("u:%d:seen", uid) }
 func DedupKey(group, eventID string) string {
 	return fmt.Sprintf("dedup:%s:%s", group, eventID)
+}
+
+// FreqKey is fc:{uid}:{campaign_id}:{yyyymmdd}: the user's impressions of a campaign's sponsored
+// slots served on that UTC day (design §9.2 step 2), counted from impression events. The date
+// format is the one of spend:{campaign_id}:{yyyymmdd} and of the events_raw partitions.
+func FreqKey(uid, campaignID int64, day time.Time) string {
+	return fmt.Sprintf("fc:%d:%d:%s", uid, campaignID, day.UTC().Format("20060102"))
 }
 
 // DemoUsersKey holds the demo user list written by `make seed`.
@@ -113,6 +122,9 @@ type Change struct {
 	ItemID  int32
 	Kind    string
 	At      time.Time // event time (from the UUIDv7 event_id)
+	// FreqKey, on the impression of a sponsored slot, is the frequency-cap counter it adds to
+	// (FreqKey(...)); empty for every other event.
+	FreqKey string
 }
 
 func (s Store) scriptArgs(c Change, now time.Time) ([]string, []any) {
@@ -120,11 +132,37 @@ func (s Store) scriptArgs(c Change, now time.Time) ([]string, []any) {
 		DedupKey(s.group(), c.EventID), HistKey(c.UserID), HVKey(c.UserID),
 		BoughtKey(c.UserID), SeenKey(c.UserID),
 	}
+	if c.FreqKey != "" {
+		keys = append(keys, c.FreqKey)
+	}
 	args := []any{
 		c.Kind, c.ItemID, c.At.UnixMilli(), now.UnixMilli(),
-		HistoryMax, SeenWindow.Milliseconds(), DedupTTL.Milliseconds(),
+		HistoryMax, SeenWindow.Milliseconds(), DedupTTL.Milliseconds(), FreqTTL.Milliseconds(),
 	}
 	return keys, args
+}
+
+// Frequency reads the frequency-cap counters (0 for a missing key) of keys in one round trip.
+func (s Store) Frequency(ctx context.Context, keys []string) ([]int64, error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	vals, err := s.R.MGet(ctx, keys...).Result()
+	if err != nil {
+		return nil, err
+	}
+	return Ints(vals), nil
+}
+
+// Ints converts an MGET reply to integers (missing or unparsable values are 0).
+func Ints(vals []any) []int64 {
+	out := make([]int64, len(vals))
+	for i, v := range vals {
+		if str, ok := v.(string); ok {
+			out[i], _ = strconv.ParseInt(str, 10, 64)
+		}
+	}
+	return out
 }
 
 // Apply applies the change exactly once: the dedup marker and the update run in one Lua script,

@@ -126,3 +126,55 @@ func TestApplyBatchMatchesApplyAndReloadsTheScript(t *testing.T) {
 		t.Fatalf("applied %v after reload", got)
 	}
 }
+
+// A sponsored impression adds to its campaign's daily frequency counter once, however often it
+// is delivered; other events with a frequency key do not count.
+func TestSponsoredImpressionsCountOncePerEvent(t *testing.T) {
+	s, mr := newStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	fc := FreqKey(7, 3, now)
+	if fc != "fc:7:3:20261107" {
+		t.Fatalf("key %s", fc)
+	}
+	imp := func(id string) Change {
+		return Change{EventID: id, UserID: 7, ItemID: 42, Kind: KindImpression, At: now, FreqKey: fc}
+	}
+	cs := []Change{imp("i1"), imp("i1"), imp("i2"), {EventID: "c1", UserID: 7, ItemID: 42, Kind: KindHistory, At: now, FreqKey: fc}, imp("i2")}
+	applied, err := s.ApplyBatch(ctx, cs, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []bool{true, false, true, true, false}; !equal(applied, want) {
+		t.Fatalf("applied %v, want %v", applied, want)
+	}
+	got, err := s.Frequency(ctx, []string{fc, FreqKey(7, 4, now)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[0] != 2 || got[1] != 0 {
+		t.Fatalf("frequency %v, want [2 0]", got)
+	}
+	if ttl := mr.TTL(fc); ttl <= 47*time.Hour || ttl > FreqTTL {
+		t.Fatalf("ttl %v", ttl)
+	}
+	// An impression without a key (organic slot) leaves the counters alone.
+	if _, err := s.Apply(ctx, Change{EventID: "i3", UserID: 7, ItemID: 43, Kind: KindImpression, At: now}, now); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.Frequency(ctx, []string{fc}); got[0] != 2 {
+		t.Fatalf("frequency %v after an organic impression", got)
+	}
+}
+
+func equal(a, b []bool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}

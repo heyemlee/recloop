@@ -14,7 +14,9 @@
 //	REDIS_URL                 Redis (redis://localhost:16390/0)
 //	DATABASE_URL              PostgreSQL, for partitions and rebuild-from-db
 //	AGGREGATOR_METRICS_ADDR   Prometheus /metrics (127.0.0.1:18090)
-//	LAG_GROUPS                consumer groups whose lag is exported (aggregator,log-sink)
+//	LAG_GROUPS                consumer groups whose lag is exported (aggregator,log-sink,billing)
+//	AD_TOKEN_KEYS             ad_token keys: sponsored impressions count towards frequency caps
+//	                          only when their token verifies (unset: no caps are counted)
 package main
 
 import (
@@ -33,6 +35,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
 
+	"github.com/heyemlee/recloop/serving/internal/adtoken"
 	"github.com/heyemlee/recloop/serving/internal/aggregator"
 	"github.com/heyemlee/recloop/serving/internal/consumer"
 	"github.com/heyemlee/recloop/serving/internal/events"
@@ -95,7 +98,24 @@ func redisStore() (userstate.Store, *redis.Client, error) {
 	return userstate.Store{R: rdb, Group: aggregator.Group}, rdb, nil
 }
 
+// freqKeys is the frequency-cap rule of AD_TOKEN_KEYS (nil when unset).
+func freqKeys(log *slog.Logger) (func(events.Event) string, error) {
+	if os.Getenv(adtoken.EnvKeys) == "" {
+		log.Warn(adtoken.EnvKeys + " is not set: sponsored impressions do not count towards frequency caps")
+		return nil, nil
+	}
+	keys, err := adtoken.KeysFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	return aggregator.FreqKeys(keys), nil
+}
+
 func run(ctx context.Context, log *slog.Logger) error {
+	freq, err := freqKeys(log)
+	if err != nil {
+		return err
+	}
 	state, rdb, err := redisStore()
 	if err != nil {
 		return err
@@ -133,10 +153,10 @@ func run(ctx context.Context, log *slog.Logger) error {
 	}
 
 	adm := kadm.NewClient(cl)
-	groups := strings.Split(env("LAG_GROUPS", "aggregator,log-sink"), ",")
+	groups := strings.Split(env("LAG_GROUPS", "aggregator,log-sink,billing"), ",")
 	go consumer.ExportLag(ctx, adm, events.Topic, groups, 5*time.Second, log)
 
-	agg := &aggregator.Aggregator{State: state, Now: time.Now, Log: log}
+	agg := &aggregator.Aggregator{State: state, FreqKey: freq, Now: time.Now, Log: log}
 	loop := &consumer.Loop{Client: cl, Group: aggregator.Group, Handle: agg.Handle, MaxPoll: 1000, Log: log}
 	log.Info("aggregator consuming", "topic", events.Topic, "group", aggregator.Group, "brokers", brokers(), "metrics", addr)
 	return loop.Run(ctx)
@@ -153,8 +173,12 @@ func rebuildFromDB(ctx context.Context, log *slog.Logger) error {
 		return err
 	}
 	defer st.Close()
+	freq, err := freqKeys(log)
+	if err != nil {
+		return err
+	}
 	t0 := time.Now()
-	agg := &aggregator.Aggregator{State: state, Now: time.Now, Log: log}
+	agg := &aggregator.Aggregator{State: state, FreqKey: freq, Now: time.Now, Log: log}
 	c, err := agg.Rebuild(ctx, st, 2000)
 	if err != nil {
 		return err

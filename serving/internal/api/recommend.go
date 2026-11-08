@@ -47,14 +47,18 @@ const (
 	CacheOff   = "off"
 )
 
-// RecItem is one recommended item.
+// RecItem is one recommended item. A sponsored slot (design §9.2, §13.1) has slot "sponsored",
+// label "Sponsored" and the ad_token its impression and click events must carry.
 type RecItem struct {
 	Position     int         `json:"position"`
 	ItemID       int32       `json:"item_id"`
 	Slot         string      `json:"slot"`
+	Label        string      `json:"label,omitempty"`
 	Source       string      `json:"source"`
 	Score        float64     `json:"score"`
 	ImpressionID string      `json:"impression_id"`
+	CampaignID   int64       `json:"campaign_id,omitempty"`
+	AdToken      string      `json:"ad_token,omitempty"`
 	Sources      []mixer.Hit `json:"sources"`
 	Item         *ItemCard   `json:"item,omitempty"`
 }
@@ -87,7 +91,14 @@ type Debug struct {
 	Cache      string             `json:"candidate_cache,omitempty"`
 	Stages     map[string]float64 `json:"stages_ms,omitempty"`
 	Mode       string             `json:"mode,omitempty"`
+	Ads        *adDebug           `json:"ads,omitempty"`
 	TookMs     float64            `json:"took_ms"`
+}
+
+// adDebug is the ads stage of the debug panel: what it decided, and each slot's price.
+type adDebug struct {
+	adResult
+	Slots []cache.Slot `json:"slots"`
 }
 
 // SourceDebug describes one recall source's answer.
@@ -101,14 +112,20 @@ type SourceDebug struct {
 	Error      string  `json:"error,omitempty"`
 }
 
-// servedItem / servedPayload are the served event (design §7.1).
+// servedItem / servedPayload are the served event (design §7.1). Sponsored items also carry
+// their campaign, the auction price (what a click is billed at most), the pCTR they were
+// ranked with (the feature at serving time) and the ad_token.
 type servedItem struct {
-	ItemID int32          `json:"item_id"`
-	Pos    int            `json:"pos"`
-	Slot   string         `json:"slot"`
-	Source string         `json:"source"`
-	Score  float64        `json:"score"`
-	Ranks  map[string]int `json:"ranks"`
+	ItemID     int32          `json:"item_id"`
+	Pos        int            `json:"pos"`
+	Slot       string         `json:"slot"`
+	Source     string         `json:"source"`
+	Score      float64        `json:"score"`
+	Ranks      map[string]int `json:"ranks"`
+	CampaignID int64          `json:"campaign_id,omitempty"`
+	Price      int32          `json:"price,omitempty"`
+	PCTRPPM    int64          `json:"pctr_ppm,omitempty"`
+	AdToken    string         `json:"ad_token,omitempty"`
 }
 
 type servedPayload struct {
@@ -125,6 +142,7 @@ type servedPayload struct {
 	Cache          string                           `json:"candidate_cache,omitempty"`
 	HV             int64                            `json:"hv"`
 	Items          []servedItem                     `json:"items"`
+	Ads            *adResult                        `json:"ads,omitempty"` // the ads stage (first page only)
 }
 
 // request is the state of one recommendation request as it moves through the stages.
@@ -293,7 +311,7 @@ func (s *Server) recommend(q *request, specs []mixer.Spec, limit int, debugOn bo
 	t := time.Now()
 	_, span := q.span("user_context")
 	var uc userstate.Context
-	status, err := q.redis(q.budget.For(plan.UserContext, plan.CacheGet+plan.Recall+plan.Rank+plan.Tail), func(c context.Context) error {
+	status, err := q.redis(q.budget.For(plan.UserContext, plan.CacheGet+plan.Recall+plan.Rank+plan.Ads+plan.Tail), func(c context.Context) error {
 		var err error
 		uc, err = s.Users.Read(c, q.uid, q.now)
 		return err
@@ -320,7 +338,7 @@ func (s *Server) recommend(q *request, specs []mixer.Spec, limit int, debugOn bo
 		if userOK || q.surface == recall.SurfaceItem {
 			t = time.Now()
 			_, span = q.span("candidate_cache.get")
-			status, err := q.redis(q.budget.For(plan.CacheGet, plan.Recall+plan.Rank+plan.Tail), func(c context.Context) error {
+			status, err := q.redis(q.budget.For(plan.CacheGet, plan.Recall+plan.Rank+plan.Ads+plan.Tail), func(c context.Context) error {
 				var err error
 				cands, err = s.Cands.Get(c, key)
 				if errors.Is(err, cache.ErrMiss) {
@@ -356,7 +374,7 @@ func (s *Server) recommend(q *request, specs []mixer.Spec, limit int, debugOn bo
 		if s.Naive {
 			results = mixer.FanOutNaive(rctx, specs, rreq)
 		} else {
-			results = mixer.FanOut(rctx, specs, rreq, q.budget.For(plan.Recall, plan.Rank+plan.Tail))
+			results = mixer.FanOut(rctx, specs, rreq, q.budget.For(plan.Recall, plan.Rank+plan.Ads+plan.Tail))
 		}
 		span.End()
 		q.stage("recall", t)
@@ -403,6 +421,20 @@ func (s *Server) recommend(q *request, specs []mixer.Spec, limit int, debugOn bo
 	}
 	q.stage("filter", t)
 
+	// ⑥ sponsored slots of the home feed (design §9.2): computed for every request, never
+	// cached; a failure leaves the organic list.
+	var ad *adResult
+	if q.surface == recall.SurfaceHome && s.Ads != nil {
+		t = time.Now()
+		res, err := s.homeSlots(q, requestID, list, uc, assign["ads"])
+		if err != nil {
+			return nil, err
+		}
+		q.stage("ads", t)
+		list = insertSponsored(list, res.Slots, PageDepth)
+		ad = &res
+	}
+
 	// Page (for the cursor) and, after a fresh and complete recall, the candidate cache entry:
 	// one Redis round trip.
 	t = time.Now()
@@ -410,6 +442,9 @@ func (s *Server) recommend(q *request, specs []mixer.Spec, limit int, debugOn bo
 	page := &cache.Page{
 		RequestID: requestID, UserID: q.uid, Surface: q.surface, Seed: q.seed, ModelVer: s.Bundle.Version,
 		Exp: assign, ConfigVersion: configVersion, Degraded: q.degraded, HV: uc.HV, Items: list, CreatedAt: q.now,
+	}
+	if ad != nil {
+		page.Sponsored = ad.Slots
 	}
 	storeCands := s.Cands != nil && cacheResult != CacheHit && complete && (userOK || q.surface == recall.SurfaceItem)
 	status, err = q.redis(q.budget.For(plan.Tail, renderReserve), func(c context.Context) error {
@@ -436,11 +471,12 @@ func (s *Server) recommend(q *request, specs []mixer.Spec, limit int, debugOn bo
 
 	// ⑦ response and served log (asynchronous, never blocks).
 	t = time.Now()
-	resp, served := s.render(requestID, q.surface, q.seed, assign, configVersion, q.degraded, list, 0, limit, pageable, uc.HV)
+	resp, served := s.render(requestID, q.surface, q.seed, assign, configVersion, q.degraded, list, page.Sponsored, 0, limit, pageable, uc.HV)
 	served.SourceVersions = cands.Versions
 	served.BackfillCount = backfill
 	served.Filters = &fstats
 	served.Cache = cacheResult
+	served.Ads = ad
 	s.logServed(q.uid, requestID, served)
 	q.stage("render", t)
 
@@ -482,6 +518,9 @@ func (s *Server) recommend(q *request, specs []mixer.Spec, limit int, debugOn bo
 			Candidates: len(cands.Items), Filters: fstats, Promoted: promoted, Backfill: backfill,
 			Cache: cacheResult, Stages: q.stages, Mode: mode,
 		}
+		if ad != nil {
+			resp.Debug.Ads = &adDebug{adResult: *ad, Slots: ad.Slots}
+		}
 	}
 	return &recResult{RecResponse: resp, cache: cacheResult}, nil
 }
@@ -508,10 +547,10 @@ func (s *Server) weights(surface string, a experiment.Assignment) map[string]flo
 }
 
 // render builds the response for items [offset, offset+limit) of the list, and the matching
-// served event.
+// served event; the items at the slots' positions are sponsored.
 func (s *Server) render(
 	requestID uuid.UUID, surface string, seed int32, assign map[string]experiment.Assignment,
-	configVersion int, degraded []string, list []mixer.Fused, offset, limit int, pageable bool, hv int64,
+	configVersion int, degraded []string, list []mixer.Fused, slots []cache.Slot, offset, limit int, pageable bool, hv int64,
 ) (RecResponse, servedPayload) {
 	end := min(offset+limit, len(list))
 	resp := RecResponse{
@@ -528,17 +567,25 @@ func (s *Server) render(
 	for i := offset; i < end; i++ {
 		f := list[i]
 		pos := i + 1
-		resp.Items = append(resp.Items, RecItem{
-			Position: pos, ItemID: f.ItemID, Slot: "organic", Source: f.Primary, Score: f.Score,
+		it := RecItem{
+			Position: pos, ItemID: f.ItemID, Slot: SlotOrganic, Source: f.Primary, Score: f.Score,
 			ImpressionID: events.ImpressionID(requestID, pos), Sources: f.Hits, Item: s.card(f.ItemID),
-		})
+		}
 		ranks := make(map[string]int, len(f.Hits))
 		for _, h := range f.Hits {
 			ranks[h.Source] = h.Rank
 		}
-		served.Items = append(served.Items, servedItem{
-			ItemID: f.ItemID, Pos: pos, Slot: "organic", Source: f.Primary, Score: f.Score, Ranks: ranks,
-		})
+		sv := servedItem{ItemID: f.ItemID, Pos: pos, Slot: SlotOrganic, Source: f.Primary, Score: f.Score, Ranks: ranks}
+		for _, sl := range slots {
+			if sl.Position == pos && sl.ItemID == f.ItemID {
+				sponsoredItem(&it, &sv, sl)
+			}
+		}
+		if it.Sources == nil {
+			it.Sources = []mixer.Hit{}
+		}
+		resp.Items = append(resp.Items, it)
+		served.Items = append(served.Items, sv)
 	}
 	if pageable && end < len(list) {
 		resp.NextCursor = cache.Cursor{RequestID: requestID, Offset: end}.Encode()
@@ -603,7 +650,7 @@ func (s *Server) nextPage(w http.ResponseWriter, r *http.Request, uid int64, cur
 		writeError(w, http.StatusBadRequest, "cursor is past the end of the list")
 		return
 	}
-	resp, served := s.render(pg.RequestID, pg.Surface, pg.Seed, pg.Exp, pg.ConfigVersion, pg.Degraded, pg.Items, cur.Offset, limit, true, pg.HV)
+	resp, served := s.render(pg.RequestID, pg.Surface, pg.Seed, pg.Exp, pg.ConfigVersion, pg.Degraded, pg.Items, pg.Sponsored, cur.Offset, limit, true, pg.HV)
 	resp.ModelVersion, served.ModelVer = pg.ModelVer, pg.ModelVer
 	s.logServed(uid, pg.RequestID, served)
 	if debugOn {
@@ -617,7 +664,7 @@ func (s *Server) nextPage(w http.ResponseWriter, r *http.Request, uid int64, cur
 // adsAllowed is the ads rule of the degradation chain (design §5.1): no sponsored items when
 // the request lost user state (no budget or frequency-cap data), the SASRec recall (no ad
 // relevance scores) or the ranker. "When in doubt, no ads: better to earn less than to charge
-// wrongly." The ads pipeline (M3) consults it.
+// wrongly." The ads stage (selectAds) consults it.
 func adsAllowed(degraded []string) bool {
 	for _, d := range degraded {
 		if strings.HasPrefix(d, "user_state_") || strings.HasPrefix(d, "sasrec_") ||
