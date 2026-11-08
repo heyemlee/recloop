@@ -286,11 +286,15 @@ billing-report: ## Re-render docs/results/billing.md from artifacts/billing/
 # started from the Claude app's processes on the development Mac crash at startup, and the image
 # pins the JVM and Python packages for every machine. The export runs on the host (psycopg).
 SPARK_IMAGE ?= recloop/spark:dev
-SPARK_RUN = docker run --rm --network none --cpus 2 --memory 4g --user $$(id -u):$$(id -g) \
-	-v "$(CURDIR)":/repo $(SPARK_IMAGE)
+# It runs as the host user, so its outputs are the user's: Hadoop's login needs a name for that
+# uid, given by a one-line passwd file mounted read-only.
+SPARK_PASSWD := $(CURDIR)/.cache/spark-passwd
+SPARK_RUN = docker run --rm --network none --hostname localhost --cpus 2 --memory 4g \
+	--user $$(id -u):$$(id -g) -v "$(SPARK_PASSWD)":/etc/passwd:ro -v "$(CURDIR)":/repo $(SPARK_IMAGE)
 DAY ?= $(shell date -u +%F)
 spark-image: ## Image of the training-sample job: PySpark 4.2 (local mode) on a Temurin 21 JRE
 	docker build -q -t $(SPARK_IMAGE) -f deploy/spark.Dockerfile deploy/spark
+	@mkdir -p $(dir $(SPARK_PASSWD)) && printf 'spark:x:%s:%s:spark:/tmp:/bin/sh\n' "$$(id -u)" "$$(id -g)" > $(SPARK_PASSWD)
 
 samples: spark-image ## Training samples of DAY (UTC, default today): export events_raw, PySpark join -> artifacts/samples
 	$(PY) -m ml.samples.export --around $(DAY)

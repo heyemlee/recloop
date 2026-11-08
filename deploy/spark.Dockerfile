@@ -14,8 +14,9 @@ ENV JAVA_HOME=/opt/java/openjdk UV_PYTHON_DOWNLOADS=never UV_COMPILE_BYTECODE=1 
 WORKDIR /env
 COPY pyproject.toml uv.lock .python-version ./
 RUN uv sync --frozen --no-install-project
-# HOME: the job runs as the host user (`docker run --user`), who has no home in the image.
+# The job runs as the host user (`docker run --user`, its name from a mounted passwd line), with
+# no network (`--network none --hostname localhost`): Spark binds to the loopback only.
 ENV PATH=/opt/venv/bin:/opt/java/openjdk/bin:$PATH PYTHONPATH=/repo PYTHONUNBUFFERED=1 \
-    HOME=/tmp TZ=UTC
+    HOME=/tmp TZ=UTC SPARK_LOCAL_IP=127.0.0.1 SPARK_LOCAL_HOSTNAME=localhost HADOOP_USER_NAME=spark
 WORKDIR /repo
 ENTRYPOINT ["python"]
