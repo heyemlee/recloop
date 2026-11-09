@@ -226,9 +226,18 @@ MiniOneRec fine-tunes Qwen2.5-1.5B to emit an item's semantic ID and decodes wit
 constrained to the catalog. Its published Office checkpoint was re-run with its own evaluation
 code on this laptop's GPU (Apple MPS): the result reproduces the paper within our intervals, and
 on the same samples it ties SASRec while a 50-beam request costs about 3 seconds
-([minionerec.md](results/minionerec.md)). That cost rules it out of the request path; the next
-step runs it near-line: when a user's history changes, a worker generates their candidates and
-stores them in Redis, and the feed uses them as a fourth recall source.
+([minionerec.md](results/minionerec.md)). Encoding each prompt once and sharing its attention
+cache across the beams brings a request to 0.64 s with the same results (the same top 10 for
+4,864 of the 4,866 test samples, the same HR and NDCG). That is still far over the feed's
+budget, so it runs near-line. When a user's history changes, the event's Lua script also queues
+the user in Redis (only while a worker is registered). A worker generates once the history has
+been quiet for 30 s, at most 120 s after the first change, and writes the top 50 items to the
+state Redis. The feed reads them in the same round trip as the rest of the user context and
+fuses them as a fourth RRF source, only in the experiment arms that give it a weight; the
+result's history version is part of the candidate cache key, so the next request uses a new
+result. Offline the fourth source raises the fused list's NDCG@10 by +0.0174 [+0.0140,
++0.0209]. In a 60-minute simulated A/B a result was written 31 s (P50) after a change and the
+feed's latency did not move ([nearline.md](results/nearline.md)).
 
 ## 13. Not in v1
 
@@ -237,3 +246,5 @@ stores them in Redis, and the feed uses them as a fourth recall source.
 - Multi-node or managed Kubernetes.
 - Hedged requests, an outbox, Bloom filters.
 - The admission control of section 4.
+- A ranker trained with the generative source's features: the near-line A/B orders both arms
+  by RRF.

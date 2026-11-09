@@ -45,7 +45,7 @@ flowchart LR
 The design, its decisions and the experiments: [docs/architecture.md](docs/architecture.md),
 [ADRs](docs/adr/) and [results](docs/results/).
 
-**Status: work in progress.** Milestones M0 to M6 are done:
+**Status: work in progress.** Milestones M0 to M7 are done:
 
 - a reproducible data pipeline, the catalog in PostgreSQL, and offline evaluation of Pop,
   ItemCF and SASRec with bootstrap intervals and a comparison with the published SASRec
@@ -113,15 +113,6 @@ catalogs of up to 1M items, and studies incremental index updates against full r
 search is enough until it needs about 1 ms of CPU per query (about 250K items); at 1M items
 IVF-Flat reaches recall@100 0.995 at a P99 of 152 µs ([results](docs/results/ann.md)).
 
-M7, done ahead of M5: MiniOneRec, a generative recommender (Qwen2.5-1.5B fine-tuned to
-emit an item's semantic ID, decoded with beam search constrained to the catalog), was re-run
-with its published Office checkpoint on this Mac's GPU. Its result reproduces: its own calc.py
-gives HR@10 0.1570 and NDCG@10 0.1237 against the paper's 0.1634 and 0.1242, both inside our
-95 % intervals, and every generated ID is in the catalog. On the same samples it ties SASRec
-(HR@10 −0.0051 [−0.0134, +0.0027]) with no significant edge in any user segment, while a
-50-beam request takes 3.1 s on the GPU against 0.15 ms for SASRec on one CPU thread
-([results](docs/results/minionerec.md)).
-
 M6, the shopping assistant, is done. On the store's chat page
 a shopper asks in plain English ("Ink cartridges for my Canon PIXMA MG3620 under $25"); the
 language model only turns the request into constraints and writes one sentence per item. Code
@@ -137,8 +128,21 @@ compare, 3 runs each), every item shown meets the gold constraints and every rep
 parser's 1.34 (a person's check of the judge is still to come). A reply then takes 4.4 s with
 Opus and 2.2 s with Haiku (P50), at $0.010 and $0.0003 ([results](docs/results/agent.md)).
 
-Next up: MiniOneRec as a fourth, near-line recall source (generated when a user's history
-changes, cached in Redis) and its simulated A/B test.
+M7: MiniOneRec, a generative recommender (Qwen2.5-1.5B fine-tuned to emit an item's semantic
+ID, decoded with beam search constrained to the catalog), was re-run with its published Office
+checkpoint on this Mac's GPU. Its result reproduces: its own calc.py gives HR@10 0.1570 and
+NDCG@10 0.1237 against the paper's 0.1634 and 0.1242, both inside our 95 % intervals, and every
+generated ID is in the catalog. On the same samples it ties SASRec (HR@10 −0.0051 [−0.0134,
++0.0027]) with no significant edge in any user segment, while a 50-beam request takes 3.1 s on
+the GPU against 0.15 ms for SASRec on one CPU thread ([results](docs/results/minionerec.md)).
+Encoding the prompt once for all 50 beams brings that to 0.64 s, with the same top 10 for 4,864
+of the 4,866 samples. It runs near-line: a history change queues the user, a worker generates
+once the history has been quiet for 30 s and writes the top 50 items to Redis, and the home feed
+fuses them as a fourth recall source. Offline that source adds NDCG@10 +0.0174 [+0.0140,
++0.0209] to the fused list. In a 60-minute simulated A/B a result was written 31 s (P50) after a
+change, the feed's P99 was 15.0 ms against 14.7 ms, and home-feed CTR rose from 0.0091 to 0.0100
+(p = 0.007); the simulator clicks by relevance to the offline split's targets, so this checks
+the path, not real users ([near-line](docs/results/nearline.md)).
 
 ## Run
 
@@ -183,8 +187,9 @@ The code is under the [MIT License](LICENSE). Code adapted from other projects k
 original license notice: the SASRec model is adapted from
 [pmixer/SASRec.pytorch](https://github.com/pmixer/SASRec.pytorch) (Apache-2.0, see
 [licenses/](licenses/)). MiniOneRec's code (Apache-2.0, see [licenses/](licenses/)) runs from
-an unmodified clone with [a patch for Apple Silicon](minionerec/evaluate.py.patch); its
-checkpoint (Apache-2.0, base model Qwen2.5-1.5B-Instruct, Apache-2.0) is downloaded by
+an unmodified clone with [a patch for Apple Silicon](minionerec/evaluate.py.patch), and
+[minionerec/engine.py](minionerec/engine.py) copies its evaluation's prefix tree and generation
+call (changed to encode each prompt once, as its header says); its checkpoint (Apache-2.0, base model Qwen2.5-1.5B-Instruct, Apache-2.0) is downloaded by
 `make data-weights` and not redistributed. The text embeddings use
 [BAAI/bge-small-en-v1.5](https://huggingface.co/BAAI/bge-small-en-v1.5) (MIT). The dataset is
 not part of this repository and has its own terms.
