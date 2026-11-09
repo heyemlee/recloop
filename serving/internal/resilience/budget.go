@@ -68,8 +68,3 @@ func (b Budget) For(want, reserve time.Duration) time.Duration {
 	}
 	return min(want, b.Left()-reserve)
 }
-
-// Stage derives the context of a stage with budget d (see For). The caller checks d first.
-func Stage(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(ctx, d)
-}

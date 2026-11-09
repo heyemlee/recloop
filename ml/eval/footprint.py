@@ -71,10 +71,6 @@ class _RusageInfoV4(ctypes.Structure):
 _libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib") if sys.platform == "darwin" else None
 
 
-def supported() -> bool:
-    return _libc is not None
-
-
 @dataclass(frozen=True)
 class Footprint:
     current: int  # bytes

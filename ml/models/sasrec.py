@@ -24,7 +24,6 @@ evaluation-harness interface, checkpoints) is new code.
 from __future__ import annotations
 
 import copy
-import json
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -376,7 +375,3 @@ class SASRec:
         model.net.eval()
         model.log = TrainLog(**ckpt["log"])
         return model
-
-
-def config_json(cfg: SASRecConfig) -> str:
-    return json.dumps(asdict(cfg), sort_keys=True)

@@ -117,14 +117,6 @@ var ErrNoPage = errors.New("page expired or unknown")
 // Pages stores pages in Redis.
 type Pages struct{ R redis.UniversalClient }
 
-func (p Pages) Put(ctx context.Context, pg *Page) error {
-	raw, err := EncodePage(pg)
-	if err != nil {
-		return err
-	}
-	return p.R.Set(ctx, PageKey(pg.RequestID), raw, PageTTL).Err()
-}
-
 // PutCmd queues the page on a pipeline.
 func (p Pages) PutCmd(ctx context.Context, pipe redis.Pipeliner, pg *Page) error {
 	raw, err := EncodePage(pg)

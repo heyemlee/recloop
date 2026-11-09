@@ -15,7 +15,7 @@ Trained by `make train-ranker` (ml.models.train_ranker), loaded by `make eval` a
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -110,7 +110,3 @@ class LambdaRank:
         booster = lgb.Booster(model_file=str(directory / "model.txt"))
         params = RankerParams(**tuning["params"])
         return cls(rrf, tables, booster, params, tuning["rounds"]), tuning
-
-
-def params_dict(p: RankerParams) -> dict:
-    return asdict(p)

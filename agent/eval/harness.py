@@ -66,10 +66,6 @@ def snapshot(items: list[Item], orders: int) -> dict[str, Any]:
     }
 
 
-class CostCapExceeded(RuntimeError):
-    pass
-
-
 def run_agent(
     spec: AgentSpec,
     cases: list[Case],

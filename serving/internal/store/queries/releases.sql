@@ -5,11 +5,6 @@ SELECT version, status, artifact_uri, manifest, created_at, activated_at, valida
 FROM model_versions
 ORDER BY created_at DESC, version;
 
--- name: GetModelVersion :one
-SELECT version, status, artifact_uri, manifest, created_at, activated_at, validated_at, canary_at, retired_at
-FROM model_versions
-WHERE version = $1;
-
 -- name: GetModelVersionForUpdate :one
 SELECT version, status, artifact_uri, manifest, created_at, activated_at, validated_at, canary_at, retired_at
 FROM model_versions

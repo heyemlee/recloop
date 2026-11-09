@@ -24,7 +24,6 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from agent.catalog import Catalog, Item
 from agent.llm import LLM, LLMCall, LLMError
 
-JUDGE_MODEL = "claude-sonnet-5-5"
 REVIEW_SEED = 20261106
 GRADES_FILE = "grades.json"
 ITEMS_PER_CALL = 10

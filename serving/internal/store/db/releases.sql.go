@@ -35,29 +35,6 @@ func (q *Queries) ActiveModelVersionForUpdate(ctx context.Context) (ModelVersion
 	return i, err
 }
 
-const getModelVersion = `-- name: GetModelVersion :one
-SELECT version, status, artifact_uri, manifest, created_at, activated_at, validated_at, canary_at, retired_at
-FROM model_versions
-WHERE version = $1
-`
-
-func (q *Queries) GetModelVersion(ctx context.Context, version string) (ModelVersion, error) {
-	row := q.db.QueryRow(ctx, getModelVersion, version)
-	var i ModelVersion
-	err := row.Scan(
-		&i.Version,
-		&i.Status,
-		&i.ArtifactUri,
-		&i.Manifest,
-		&i.CreatedAt,
-		&i.ActivatedAt,
-		&i.ValidatedAt,
-		&i.CanaryAt,
-		&i.RetiredAt,
-	)
-	return i, err
-}
-
 const getModelVersionForUpdate = `-- name: GetModelVersionForUpdate :one
 SELECT version, status, artifact_uri, manifest, created_at, activated_at, validated_at, canary_at, retired_at
 FROM model_versions
