@@ -101,8 +101,6 @@ def main(argv: list[str] | None = None) -> None:
     )
     args = ap.parse_args(argv)
 
-    import torch
-
     gen = engine.Generator(
         args.base_model,
         num_beams=args.num_beams,
@@ -113,12 +111,7 @@ def main(argv: list[str] | None = None) -> None:
     ver = version(args.num_beams, not args.per_beam)
     if args.base_model != paths.HF_CKPT:
         ver += "-test"  # never mistaken for the checkpoint's results
-    cap = None
-    if gen.device == "mps" and args.mps_memory_gb > 0:
-        limit = torch.mps.recommended_max_memory()
-        fraction = min(1.0, args.mps_memory_gb * 2**30 / limit)
-        torch.mps.set_per_process_memory_fraction(fraction)
-        cap = {"gb": args.mps_memory_gb, "fraction": fraction, "recommended_max": limit}
+    cap = engine.cap_mps_memory(args.mps_memory_gb) if gen.device == "mps" else None
     _send(
         {
             "ready": True,

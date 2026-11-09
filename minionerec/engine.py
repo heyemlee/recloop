@@ -54,6 +54,20 @@ def import_upstream(stage_dir: Path = STAGE):
     return data, LogitProcessor
 
 
+def cap_mps_memory(gb: float) -> dict | None:
+    """Cap what MPS may allocate in this process (torch.mps.set_per_process_memory_fraction of the
+    recommended maximum): an allocation past it raises instead of pushing the machine into swap.
+    None when gb <= 0 or the GPU is not MPS. Results do not depend on it."""
+    import torch
+
+    if gb <= 0 or not torch.backends.mps.is_available():
+        return None
+    limit = torch.mps.recommended_max_memory()
+    fraction = min(1.0, gb * 2**30 / limit)
+    torch.mps.set_per_process_memory_fraction(fraction)
+    return {"gb": gb, "fraction": fraction, "recommended_max": limit}
+
+
 def device_name() -> str:
     """evaluate.py's choice (patched): cuda, else mps, else cpu."""
     import torch

@@ -111,6 +111,7 @@ def _replay(args) -> None:
         dtype=s["dtype"],
         prefill_once=not args.per_beam,
     )
+    cap = engine.cap_mps_memory(args.mps_memory_gb) if gen.device == "mps" else None
     results, batches, rows, compared = [], [], [], []
     left = args.batches
     for i, (lo, _) in enumerate(s["shard_bounds"]):
@@ -182,6 +183,7 @@ def _replay(args) -> None:
         "loadavg_start": list(load_start),
         "loadavg_end": list(os.getloadavg()),
         "memory": memory,
+        "mps_cap": cap,
         "swapped_out_bytes": machine.swapped_out_bytes(vm_start, machine.vm_counters()),
         "containers_end": machine.containers(),
         "calc_py": calc,
@@ -252,6 +254,9 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--reference", default="test", help="the finished run to replay")
     ap.add_argument("--batches", type=int, default=None, help="only the first N batches")
     ap.add_argument("--per-beam", action="store_true", help="the unchanged first pass")
+    ap.add_argument(
+        "--mps-memory-gb", type=float, default=0.0, help="cap MPS allocations (0: no cap)"
+    )
     ap.add_argument(
         "--base-model", type=Path, default=paths.HF_CKPT, help="model directory (tests only)"
     )
