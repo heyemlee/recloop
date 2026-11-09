@@ -44,7 +44,8 @@ flowchart LR
 ```
 
 The design, its decisions and the experiments: [docs/architecture.md](docs/architecture.md),
-[ADRs](docs/adr/) and [results](docs/results/).
+[ADRs](docs/adr/) and [results](docs/results/). The full design document, with the decision
+log, is in Chinese: [docs/design.md](docs/design.md).
 
 **Status: work in progress.** Milestones M0 to M7 are done:
 

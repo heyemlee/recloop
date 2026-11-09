@@ -32,9 +32,7 @@ node_modules/
 .env.*
 !.env.example
 
-# Kept locally, never committed: the design document (Chinese; CLAUDE.md points to it) and other
-# coding agents' copy of the project instructions
-/docs/design.md
+# Kept locally, never committed: other coding agents' copy of the project instructions
 /AGENTS.md
 
 # Claude Code: everything under .claude/ is local except explicitly shared project config
