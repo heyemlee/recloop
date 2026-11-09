@@ -113,7 +113,7 @@ def _replay(args) -> None:
     )
     results, batches, rows, compared = [], [], [], []
     left = args.batches
-    for i, (lo, hi) in enumerate(s["shard_bounds"]):
+    for i, (lo, _) in enumerate(s["shard_bounds"]):
         if left is not None and left <= 0:
             break
         shard_rows, shard_timing = evaluate_csv(

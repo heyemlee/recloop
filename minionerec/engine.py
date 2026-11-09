@@ -89,7 +89,9 @@ def share_prompt_pass(model, num_beams: int) -> None:
         if not torch.equal(grouped, grouped[:, :1].expand_as(grouped)):
             return inner(*args, **kwargs)
         rows = slice(None, None, num_beams)
-        one = {k: v[rows] if k in _ROW_ARGS and torch.is_tensor(v) else v for k, v in kwargs.items()}
+        one = {
+            k: v[rows] if k in _ROW_ARGS and torch.is_tensor(v) else v for k, v in kwargs.items()
+        }
         out = inner(**one)
         cache.batch_repeat_interleave(num_beams)  # the same cache object generate() holds
         out.logits = out.logits.repeat_interleave(num_beams, dim=0)
@@ -154,7 +156,7 @@ class Generator:
         self.data, self.logit_processor = import_upstream(stage_dir)
         # evaluate.py: random.seed(seed); set_seed(seed) before anything else.
         random.seed(SEED)
-        np.random.seed(SEED)
+        np.random.seed(SEED)  # noqa: NPY002 (evaluate.py seeds numpy's global generator)
         torch.manual_seed(SEED)
         t0 = time.perf_counter()
         self.base_model = str(base_model)
@@ -213,7 +215,10 @@ class Generator:
             ds, self.tokenizer, max_len=MAX_LEN, test=True, category=CATEGORY_TEXT, seed=None
         )
         ds.data = pd.DataFrame(
-            {"history_item_sid": [repr(list(h)) for h in histories], "item_sid": [""] * len(histories)}
+            {
+                "history_item_sid": [repr(list(h)) for h in histories],
+                "item_sid": [""] * len(histories),
+            }
         )
         return [ds.pre(i) for i in range(len(histories))]
 

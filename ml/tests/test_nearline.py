@@ -33,7 +33,10 @@ def test_key_names_match_go():
     assert keys.result_key(7, "v1") == "gen:7:v1"
     assert keys.pending_key(7) == "gen:pending:7"
     assert (keys.WORKER_KEY, keys.QUEUE_KEY) == ("gen:worker", "gen:queue")
-    assert (keys.DEBOUNCE_MS, keys.MAX_WAIT_MS) == (30_000, 120_000)  # userstate.GenDebounce, GenMaxWait
+    assert (keys.DEBOUNCE_MS, keys.MAX_WAIT_MS) == (
+        30_000,
+        120_000,
+    )  # userstate.GenDebounce, GenMaxWait
 
 
 def test_parse_changes():
@@ -45,7 +48,9 @@ def test_shared_sids_expand_in_tie_order_and_stop_at_k():
     sids = ["<a>", "<b>", "<a>", "<c>"]  # items 0 and 2 share <a>
     by_sid = worker.sid_items(sids, tie_order=[2, 0, 3, 1])
     assert by_sid == {"<a>": [2, 0], "<c>": [3], "<b>": [1]}
-    items, scores = worker.to_items(['"<a>"\n', "<c>", "<b>", "<x>"], [-1.0, -2.0, -3.0, -4.0], by_sid)
+    items, scores = worker.to_items(
+        ['"<a>"\n', "<c>", "<b>", "<x>"], [-1.0, -2.0, -3.0, -4.0], by_sid
+    )
     assert items == [2, 0, 3, 1]
     assert scores == [-1.0, -1.0, -2.0, -3.0]
     items, _ = worker.to_items(["<a>", "<c>"], [-1.0, -2.0], by_sid, k=2)

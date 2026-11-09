@@ -278,9 +278,16 @@ def _rrf_gen_section(out: dict) -> list[str]:
     w = ", ".join(f"{k} {v:g}" for k, v in r["weights"].items())
     rows = []
     for rule in ("item", "sid"):
-        rows.append([f"RRF, three sources ({rule} rule)"] + [_ci(r["rrf"][rule][m]) for m in METRIC_NAMES])
-        rows.append([f"RRF + gen ({rule} rule)"] + [_ci(r["rrf_gen"][rule][m]) for m in METRIC_NAMES])
-        rows.append([f"Difference ({rule} rule)"] + [_signed(r["difference"][rule][m]) for m in METRIC_NAMES])
+        rows.append(
+            [f"RRF, three sources ({rule} rule)"] + [_ci(r["rrf"][rule][m]) for m in METRIC_NAMES]
+        )
+        rows.append(
+            [f"RRF + gen ({rule} rule)"] + [_ci(r["rrf_gen"][rule][m]) for m in METRIC_NAMES]
+        )
+        rows.append(
+            [f"Difference ({rule} rule)"]
+            + [_signed(r["difference"][rule][m]) for m in METRIC_NAMES]
+        )
     return [
         "## As a fourth recall source",
         "",
@@ -295,6 +302,26 @@ def _rrf_gen_section(out: dict) -> list[str]:
         "",
         f"In the fused top 10, {r['top10_from_gen']:.1%} of the items are among gen's and "
         f"{r['top10_only_gen']:.1%} come from gen alone.",
+        "",
+        *_only_gen_notes(r),
+    ]
+
+
+def _only_gen_notes(r: dict) -> list[str]:
+    if "only_gen_per_sample" not in r:
+        return []
+    best = r["only_gen_best_position"]
+    where = (
+        f"the highest of them is at position {best}"
+        if best is not None
+        else "none of them is among the candidates"
+    )
+    return [
+        f"Gen brings {r['only_gen_per_sample']:.1f} items per sample that none of the three "
+        f"sources returned into the {r['candidates']} fused candidates, but {where}: an item "
+        "only one source returned scores at most w / (60 + 1), less than an item two sources "
+        "rank within their top 50. The gain at 10 comes from the order: gen lifts the items it "
+        "agrees with.",
         "",
     ]
 

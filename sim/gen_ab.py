@@ -188,7 +188,9 @@ def main(argv: list[str] | None = None) -> None:
         )
         registered = time.time()
         gen_version = json.loads(state.get("gen:worker"))["version"]
-        print(f"gen_ab   {time.strftime('%H:%M:%S')} worker {gen_version} up; backfill of {len(arm):,} users")
+        print(
+            f"gen_ab   {time.strftime('%H:%M:%S')} worker {gen_version} up; backfill of {len(arm):,} users"
+        )
         jobs = worker_dir / "jobs.jsonl"
         backfill_s = wait_for(
             lambda: count_jobs(jobs) >= len(arm),
@@ -210,7 +212,9 @@ def main(argv: list[str] | None = None) -> None:
             args.out / "traffic", args.api, args.concurrency, think_ms=args.think_ms
         )
         t0 = traffic.start(args.seconds)
-        print(f"gen_ab   {time.strftime('%H:%M:%S')} {EXP_ID} running, {args.seconds:.0f} s of traffic")
+        print(
+            f"gen_ab   {time.strftime('%H:%M:%S')} {EXP_ID} running, {args.seconds:.0f} s of traffic"
+        )
         traffic.thread.join()
         traffic.stop()
         t1 = time.time()

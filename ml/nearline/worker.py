@@ -32,6 +32,7 @@ Usage: python -m ml.nearline.worker --out artifacts/nearline/<run> [--only-users
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import shlex
@@ -365,10 +366,8 @@ class Worker:
         finally:
             self.stop.set()
             loop_seconds = time.monotonic() - t_loop
-            try:
+            with contextlib.suppress(redis.RedisError):
                 self.r.delete(keys.WORKER_KEY)
-            except redis.RedisError:
-                pass
             memory = sampler.stop()
             gen.close()
             self.jobs.close()
@@ -415,7 +414,9 @@ def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--redis-url", default=os.environ.get("REDIS_URL", "redis://localhost:16390/0"))
-    ap.add_argument("--bundle", type=Path, default=Path(os.environ.get("RECLOOP_BUNDLE", DEFAULT_BUNDLE)))
+    ap.add_argument(
+        "--bundle", type=Path, default=Path(os.environ.get("RECLOOP_BUNDLE", DEFAULT_BUNDLE))
+    )
     ap.add_argument("--only-users", type=Path, help="JSON list: generate only for these users")
     ap.add_argument("--backfill", type=Path, help="JSON list: queue these users as due now")
     ap.add_argument("--claim", type=int, default=8, help="users per round")

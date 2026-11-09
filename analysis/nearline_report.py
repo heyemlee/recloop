@@ -111,7 +111,10 @@ def srm(df: pd.DataFrame, exp: dict) -> dict:
 
     chi2, p = stats.chisquare(observed, expected)
     mismatch = int(
-        sum(srm_mod.assign([exp], "recall", str(uid)) != row["first"] for uid, row in users.iterrows())
+        sum(
+            srm_mod.assign([exp], "recall", str(uid)) != row["first"]
+            for uid, row in users.iterrows()
+        )
     )
     switchers = int((users["nunique"] > 1).sum())
     return {
@@ -209,10 +212,16 @@ def _pcts(x) -> dict:
     x = np.asarray(x, dtype=float)
     if not len(x):
         return {"n": 0}
-    return {"n": int(len(x)), **{f"p{p}": float(np.percentile(x, p)) for p in PCTS}, "max": float(x.max())}
+    return {
+        "n": int(len(x)),
+        **{f"p{p}": float(np.percentile(x, p)) for p in PCTS},
+        "max": float(x.max()),
+    }
 
 
-def freshness(jobs: list[dict], queue: list[dict], served: list[dict], t0: float, t1: float) -> dict:
+def freshness(
+    jobs: list[dict], queue: list[dict], served: list[dict], t0: float, t1: float
+) -> dict:
     """Per history change answered during the traffic: written - applied, written - event time
     (seconds); jobs per round; the queue over time; what the gen arm's requests saw."""
     lo, hi = t0 * 1000, t1 * 1000 + 3_600_000  # changes applied during the traffic, answered later
@@ -243,7 +252,10 @@ def freshness(jobs: list[dict], queue: list[dict], served: list[dict], t0: float
         "queue_max": max((r["queued"] for r in q), default=0),
         "due_max": max((r["due"] for r in q), default=0),
         "due_last": q[-1]["due"] if q else None,
-        "served": {"requests": len(gen_served), **{k: v / max(1, len(gen_served)) for k, v in seen.items()}},
+        "served": {
+            "requests": len(gen_served),
+            **{k: v / max(1, len(gen_served)) for k, v in seen.items()},
+        },
         "stale_lag": dict(sorted(lags.items())),
         "result_age_s": _pcts(ages),
     }
@@ -334,17 +346,29 @@ def render(run: dict, worker: dict, res: dict) -> str:
         f"{s['bucketing_mismatch']} users whose arm differs from the Python bucketing"
         + (" (sound)." if s["ok"] else " — **the split is not sound: do not read the effect.**")
     )
-    L += ["", "## Effect", "", "| Metric (gen vs control) | control | gen | Difference | 95% CI (delta) | 95% CI (bootstrap) | p |", "|---|---|---|---|---|---|---|"]
+    L += [
+        "",
+        "## Effect",
+        "",
+        "| Metric (gen vs control) | control | gen | Difference | 95% CI (delta) | 95% CI (bootstrap) | p |",
+        "|---|---|---|---|---|---|---|",
+    ]
     for m in res["effect"]["metrics"].values():
         L.append(_metric_row(m["label"], m))
-    L.append(_metric_row("Ad revenue per 1,000 home impressions (cents)", res["effect"]["rpm"], d=1))
+    L.append(
+        _metric_row("Ad revenue per 1,000 home impressions (cents)", res["effect"]["rpm"], d=1)
+    )
     L += ["", "## Coverage", ""]
     c = res["coverage"]
     L.append(
         f"Organic home-feed impressions; distinct items compared at {c['impressions_compared']:,} "
         "impressions per arm (the larger arm subsampled, mean of 20 seeded draws)."
     )
-    L += ["", "| Arm | Impressions | Distinct items | ... at equal impressions | Share of the catalog | gen returned the item | gen its main source | Only gen returned it | CTR, only gen | CTR, the rest |", "|---|---|---|---|---|---|---|---|---|---|"]
+    L += [
+        "",
+        "| Arm | Impressions | Distinct items | ... at equal impressions | Share of the catalog | gen returned the item | gen its main source | Only gen returned it | CTR, only gen | CTR, the rest |",
+        "|---|---|---|---|---|---|---|---|---|---|",
+    ]
     for arm in ARMS:
         a = c["arms"][arm]
         L.append(
@@ -352,7 +376,13 @@ def render(run: dict, worker: dict, res: dict) -> str:
             f"| {a['catalog_share_at_n']:.1%} | {a['gen_share']:.1%} | {a['gen_primary_share']:.1%} "
             f"| {a['gen_only_share']:.1%} | {_s(a['gen_only_ctr'], 4)} | {_s(a['other_ctr'], 4)} |"
         )
-    L += ["", "## Latency", "", "| Arm | Requests | Client P50 (ms) | Client P99 (ms) | Degraded | Candidate cache hit rate (home, first pages) |", "|---|---|---|---|---|---|"]
+    L += [
+        "",
+        "## Latency",
+        "",
+        "| Arm | Requests | Client P50 (ms) | Client P99 (ms) | Degraded | Candidate cache hit rate (home, first pages) |",
+        "|---|---|---|---|---|---|",
+    ]
     for arm in ARMS:
         a = res["latency"][arm]
         L.append(
@@ -380,7 +410,10 @@ def render(run: dict, worker: dict, res: dict) -> str:
         + ", ".join(f"{k} {v:.1%}" for k, v in f["served"].items() if k != "requests")
         + f" of {f['served']['requests']:,}"
         + (
-            "; stale by " + ", ".join(f"{k} version{'s' if k != 1 else ''}: {v:,}" for k, v in f["stale_lag"].items())
+            "; stale by "
+            + ", ".join(
+                f"{k} version{'s' if k != 1 else ''}: {v:,}" for k, v in f["stale_lag"].items()
+            )
             if f["stale_lag"]
             else ""
         )

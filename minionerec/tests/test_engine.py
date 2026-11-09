@@ -36,7 +36,9 @@ def subset_csv(tmp_path_factory):
 
 
 def _engine(model, prefill_once):
-    return engine.Generator(model, num_beams=BEAMS, dtype="float32", prefill_once=prefill_once, device="cpu")
+    return engine.Generator(
+        model, num_beams=BEAMS, dtype="float32", prefill_once=prefill_once, device="cpu"
+    )
 
 
 def test_engine_reproduces_evaluate_py(tmp_path, tiny_model, subset_csv):  # noqa: F811
@@ -95,8 +97,6 @@ def test_prompts_from_sid_lists_match_the_csv_path(tiny_model, subset_csv):  # n
     gen = _engine(tiny_model, True)
     ds = gen.dataset(subset_csv)
     from_csv = [ds[i]["input_ids"] for i in range(len(ds))]
-    histories = [
-        ast.literal_eval(h) for h in pd.read_csv(subset_csv).history_item_sid.tolist()
-    ]
+    histories = [ast.literal_eval(h) for h in pd.read_csv(subset_csv).history_item_sid.tolist()]
     from_lists = [e["input_ids"] for e in gen.encode_histories(histories)]
     assert from_lists == from_csv

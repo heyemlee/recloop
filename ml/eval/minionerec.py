@@ -622,6 +622,11 @@ def rrf_with_gen(gen: Generation, ctx: Context) -> dict | None:
     top = four.items[:, :10] >= 0
     via_gen = (four.ranks[GEN_SOURCE][:, :10] > 0) & top
     others = sum((four.ranks[s][:, :10] > 0).astype(int) for s in cand_mod.SOURCES)
+    # Items no other source returned, over all the fused candidates: how many, and how high.
+    alone = (four.ranks[GEN_SOURCE] > 0) & (four.items >= 0)
+    for s in cand_mod.SOURCES:
+        alone &= four.ranks[s] == 0
+    positions = np.flatnonzero(alone.any(axis=0))
     return {
         "weights": weights,
         "gen_k": GEN_K,
@@ -633,6 +638,9 @@ def rrf_with_gen(gen: Generation, ctx: Context) -> dict | None:
         },
         "top10_from_gen": float(via_gen.sum() / top.sum()),
         "top10_only_gen": float((via_gen & (others == 0)).sum() / top.sum()),
+        "candidates": int(four.items.shape[1]),
+        "only_gen_per_sample": float(alone.sum(axis=1).mean()),
+        "only_gen_best_position": int(positions[0]) + 1 if len(positions) else None,
     }
 
 

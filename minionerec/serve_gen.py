@@ -32,9 +32,8 @@ VERSION_PREFIX = "minionerec"
 
 def version(num_beams: int, prefill_once: bool) -> str:
     """The generator's version, the {ver} of gen:{uid}:{ver}: checkpoint revision, beams, path."""
-    return (
-        f"{VERSION_PREFIX}-{download.HF_REVISION[:8]}-b{num_beams}"
-        + ("" if prefill_once else "-perbeam")
+    return f"{VERSION_PREFIX}-{download.HF_REVISION[:8]}-b{num_beams}" + (
+        "" if prefill_once else "-perbeam"
     )
 
 
