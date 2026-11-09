@@ -716,8 +716,8 @@ def _agreement_section(out: dict) -> list[str]:
                 f"{s['num_beams']} / {s['batch_size']} / {s['dtype']}" + _prefill(s),
                 a["reference"],
                 f"{a['samples']:,}",
-                f"{a['identical_top10']:.1%}",
-                f"{a['top10_overlap']:.1%}",
+                _share(a["identical_top10"]),
+                _share(a["top10_overlap"]),
                 _ci(a["reference_values"]["HR@10"]),
                 _ci(a["run_values"]["HR@10"]),
                 _signed(a["difference"]["HR@10"]),
@@ -823,6 +823,11 @@ def _replay_metrics_table(name: str, ref: str, m: dict) -> list[str]:
             ],
         ),
     ]
+
+
+def _share(v: float) -> str:
+    """A share as a percentage that never rounds a shortfall up to 100.0%."""
+    return ">99.9%" if 0.999 <= v < 1 else f"{v:.1%}"
 
 
 def _gap(v: float | None) -> str:

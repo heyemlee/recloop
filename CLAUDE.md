@@ -747,3 +747,17 @@ interpreter at exit: `ORT_DISABLE_TELEMETRY=1` (Makefile, model-server image, `m
   writes `gen:{uid}:{ver}` (JSON: hv, at, items, scores; testdata/gen_payload.json pins it).
   The api reads it in the user-context pipeline only for a recall variant with an `rrf_weights`
   entry `gen` > 0 and a `gen_version`; that arm's candidate cache key carries the result's hv.
+- Prompt encoded once (`make minionerec-replay`, the main run's own batches): 4,861 of 4,866
+  samples give the same 50 SIDs, 4,864 the same top 10, the same HR / NDCG at 3, 5, 10.
+  `python -m minionerec.replay diff --name once` generates the batches of the differing samples
+  again both ways with beam scores (diff.json; `make minionerec` reports it). Batch 8 x 50 beams
+  peaks at 14.8 GiB even with the prompt once (the 400-row decoding steps), so the replay and the
+  batch-8 cost row need Docker Desktop quit; the worker runs batches of 2 under its 8 GB cap (4
+  run out of it).
+- The committed `minionerec.md` / `nearline.md`: `make minionerec-replay REPLAY_ARGS="--name
+  once-trial --batches 25 --mps-memory-gb 16"`, the cost rows (`minionerec.cost --only
+  beam50_batch1_once beam50_batch8_once`), `REPLAY_ARGS="--name once --mps-memory-gb 16"` and
+  `replay diff --name once` with Docker Desktop quit; then on a private stack from empty volumes
+  `sim.gen_ab --seconds 3600 --concurrency 4` (worker `--max-batch 2`), `make samples
+  SAMPLES_FLAGS="--complete-through <traffic end + 30 min>"`, `make nearline-report`, `make
+  minionerec`.
