@@ -45,7 +45,7 @@ flowchart LR
 The design, its decisions and the experiments: [docs/architecture.md](docs/architecture.md),
 [ADRs](docs/adr/) and [results](docs/results/).
 
-**Status: work in progress.** Milestones M0 to M5 are done:
+**Status: work in progress.** Milestones M0 to M6 are done:
 
 - a reproducible data pipeline, the catalog in PostgreSQL, and offline evaluation of Pop,
   ItemCF and SASRec with bootstrap intervals and a comparison with the published SASRec
@@ -122,7 +122,7 @@ gives HR@10 0.1570 and NDCG@10 0.1237 against the paper's 0.1634 and 0.1242, bot
 50-beam request takes 3.1 s on the GPU against 0.15 ms for SASRec on one CPU thread
 ([results](docs/results/minionerec.md)).
 
-M6, the shopping assistant, is done except for its runs with Claude. On the store's chat page
+M6, the shopping assistant, is done. On the store's chat page
 a shopper asks in plain English ("Ink cartridges for my Canon PIXMA MG3620 under $25"); the
 language model only turns the request into constraints and writes one sentence per item. Code
 checks every constraint (price, stock, category, brand, genuine parts, the last purchase) on
@@ -131,8 +131,11 @@ through the recommendation API, and it carries at most one sponsored item from t
 auction, labelled by the rendering code. On 150 generated requests, a rule-based parser in
 front of the same pipeline meets the hard constraints for 88.8 % of the items it shows and the
 gold constraints reach 100 %, so the misses are parsing errors; a reply takes 15 ms (P50)
-without a model. The runs with Claude (Opus 5.5 by default, against Sonnet 5.5 and Haiku 5.5)
-wait for an API key ([results](docs/results/agent.md)).
+without a model. With Claude parsing instead (Opus 5.5 by default, Sonnet 5.5 and Haiku 5.5 to
+compare, 3 runs each), every item shown meets the gold constraints and every reply succeeds
+(the rules parser: 64.7 %); a Sonnet judge grades their items 1.64 to 1.67 out of 2, the rules
+parser's 1.34 (a person's check of the judge is still to come). A reply then takes 4.4 s with
+Opus and 2.2 s with Haiku (P50), at $0.010 and $0.0003 ([results](docs/results/agent.md)).
 
 Next up: MiniOneRec as a fourth, near-line recall source (generated when a user's history
 changes, cached in Redis) and its simulated A/B test.
