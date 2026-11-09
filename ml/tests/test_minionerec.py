@@ -544,3 +544,105 @@ def test_cost_section_renders_load_and_reruns(tmp_path):
     assert "Preliminary timings" not in text
     assert "Nothing was swapped out while it ran" in text  # the main run
     assert "`beam50_batch8`: 5 MiB swapped out while it ran" in text
+
+
+def test_replay_differences_are_reported(tmp_path):
+    test = _toy_split()
+    full = [_beams(1, 0), _beams(0, 2), _beams(4), _beams(2, 1), _beams(1, 0), _beams(2, 0)]
+    _write_run(tmp_path / "runs" / "test", list(range(len(test))), full, test)
+    # the replay: row 3's list parts at position 2 (its second and third SIDs swap)
+    row3 = [full[3][0], full[3][2], full[3][1], *full[3][3:]]
+    _write_run(
+        tmp_path / "runs" / "once", list(range(len(test))), [*full[:3], row3, *full[4:]], test
+    )
+    meta_path = tmp_path / "runs" / "once" / "run.json"
+    meta = json.loads(meta_path.read_text())
+    meta["selection"] = {"replay_of": "test", "batches": "all"}
+    meta["settings"]["prefill"] = "once"
+    meta["replay"] = {
+        "samples": 6,
+        "identical_sequences": 5,
+        "identical_top10": 5,
+        "all_identical": False,
+    }
+    meta_path.write_text(json.dumps(meta))
+    diff = {
+        "device": "mps",
+        "dtype": "bfloat16",
+        "batches": [[0, 1]],
+        "samples_regenerated": 2,
+        "per_beam_equals_reference": 2,
+        "once_equals_replay": 2,
+        "differing": [
+            {
+                "shard": 0,
+                "index": 3,
+                "sample": 3,
+                "batch_samples": 2,
+                "position": 2,
+                "reference_sid": full[3][1],
+                "replay_sid": full[3][2],
+                "gap_reference": 0.0039,
+                "gap_replay": 0.0012,
+                "score_moves": {
+                    "count": 10,
+                    "median": 0.001,
+                    "p90": 0.004,
+                    "p99": 0.0078,
+                    "max": 0.0078,
+                },
+                "near_tie": True,
+            }
+        ],
+        "largest_gap": 0.0039,
+        "largest_score_difference": 0.0078,
+        "score_differences": {
+            "count": 20,
+            "median": 0.0,
+            "p90": 0.002,
+            "p99": 0.0078,
+            "max": 0.0078,
+        },
+        "unmeasured": 0,
+        "near_ties": 1,
+    }
+    (tmp_path / "runs" / "once" / "diff.json").write_text(json.dumps(diff))
+    out = minionerec.build(
+        minionerec.finished_runs(tmp_path / "runs"),
+        "test",
+        _toy_context(test),
+        None,
+        np.array(["A"] * 12, dtype=object),
+        np.ones(len(test), dtype=bool),
+        calc_fn=_calc_from_formula,
+    )
+    m = out["runs"]["once"]["replay_metrics"]
+    ranks = minionerec.generated_ranks(
+        full, test.target, SIDS, minionerec.sid_items(SIDS, TIE_ORDER)
+    )
+    assert m["HR@3"]["reference"] == pytest.approx(np.mean(ranks["item"] <= 3))
+    replayed = minionerec.generated_ranks(
+        [*full[:3], row3, *full[4:]], test.target, SIDS, minionerec.sid_items(SIDS, TIE_ORDER)
+    )
+    assert m["NDCG@3"]["replay"] == pytest.approx(
+        metrics.per_sample(replayed["item"])["NDCG@3"].mean()
+    )
+    assert m["NDCG@3"]["replay"] != m["NDCG@3"]["reference"]
+    text = minionerec_report.render(out)
+    assert "**1 of 6 samples differ from `test`** (5 have the same top 10)" in text
+    assert "| `test` | " in text and "| `once` | " in text  # the HR / NDCG table
+    row = (
+        f"| 3 | 2 | 2 | `{full[3][1]}` | `{full[3][2]}` | 0.0039 | 0.0012 | 0.001 / 0.0078 | yes |"
+    )
+    assert row in text
+    assert "every swap is a near tie (the largest gap is 0.0039)" in text
+    d = out["runs"]["once"]["summary"]["replay_diff"]["differing"][0]
+    d.update(gap_reference=None, near_tie=False)
+    text = minionerec_report.render(out)
+    assert "0 of the 1 swaps are near ties, consistent with rounding; for the other 1" in text
+    assert "sample 3: the replay's SID at position 2 is not among the reference's beams" in text
+    d.update(gap_reference=0.01)
+    text = minionerec_report.render(out)
+    assert "sample 3: a gap of 0.01, more than the 0.0078 its scores move" in text
+    out["runs"]["once"]["summary"]["replay_diff"]["once_equals_replay"] = 1
+    assert "did not give their runs' SIDs again" in minionerec_report.render(out)

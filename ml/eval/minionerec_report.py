@@ -602,7 +602,11 @@ def _prompt_once_notes(cost: dict, full: dict) -> list[str]:
             f"transformers' own): {_ms(once['per_call']['p50'])} per call (P50) instead of "
             f"{_ms(ref['per_call']['p50'])}, {ref['per_call']['p50'] / once['per_call']['p50']:.1f} "
             f"times faster, {once['samples_per_second']:.2f} users per second, peak memory "
-            f"{_gib(once['peak_footprint'])} instead of {_gib(ref['peak_footprint'])}."
+            + (
+                f"{_gib(once['peak_footprint'])}, the same as per beam."
+                if _gib(once["peak_footprint"]) == _gib(ref["peak_footprint"])
+                else f"{_gib(once['peak_footprint'])} instead of {_gib(ref['peak_footprint'])}."
+            )
         )
     return out
 
@@ -798,7 +802,120 @@ def _replay_notes(out: dict) -> list[str]:
             f"- `{name}` replays `{ref}`'s batches through minionerec.engine with each prompt "
             f"encoded once and its attention cache shared by the beams: {verdict}."
         )
+        if r.get("replay_metrics"):
+            notes += ["", *_replay_metrics_table(name, ref, r["replay_metrics"])]
+        if r["summary"].get("replay_diff"):
+            notes += ["", *_replay_diff_notes(r["summary"]["replay_diff"])]
     return [*notes, ""] if notes else []
+
+
+def _replay_metrics_table(name: str, ref: str, m: dict) -> list[str]:
+    """A replay whose top 10 differs somewhere: HR / NDCG per K next to the main run's."""
+    keys = [k for metric in ("HR", "NDCG") for k in m if k.startswith(metric + "@")]
+    return [
+        f"  Item rule on the same samples, `{name}` against `{ref}`:",
+        "",
+        *_table(
+            ["Run", *keys],
+            [
+                [f"`{ref}`", *(f"{m[k]['reference']:.4f}" for k in keys)],
+                [f"`{name}`", *(f"{m[k]['replay']:.4f}" for k in keys)],
+            ],
+        ),
+    ]
+
+
+def _gap(v: float | None) -> str:
+    return "not among its beams" if v is None else f"{v:.3g}"
+
+
+def _why_not_near_tie(x: dict) -> str:
+    """Why a differing sample's swap is not a near tie, from its own numbers."""
+    if x.get("gap_reference") is None:
+        return (
+            f"sample {x['sample']:,}: the replay's SID at position {x['position']} is not among "
+            "the reference's beams, so its gap on the per-beam path cannot be measured"
+        )
+    if x.get("gap_replay") is None:
+        return (
+            f"sample {x['sample']:,}: the reference's SID at position {x['position']} is not "
+            "among the replay's beams, so its gap with the prompt once cannot be measured"
+        )
+    return (
+        f"sample {x['sample']:,}: a gap of {max(x['gap_reference'], x['gap_replay']):.3g}, "
+        f"more than the {x['score_moves']['max']:.3g} its scores move"
+    )
+
+
+def _replay_diff_notes(d: dict) -> list[str]:
+    """minionerec.replay diff: where each differing sample's two lists part, by how much, and
+    whether the paths' own rounding in that sample can explain it."""
+    n = d["samples_regenerated"]
+    rows = []
+    for x in d["differing"]:
+        moves = x.get("score_moves") or {}
+        rows.append(
+            [
+                f"{x['sample']:,}",
+                str(x["batch_samples"]),
+                str(x["position"]) if x["position"] else "the same lists",
+                f"`{x.get('reference_sid', '')}`",
+                f"`{x.get('replay_sid', '')}`",
+                _gap(x.get("gap_reference")),
+                _gap(x.get("gap_replay")),
+                f"{moves['median']:.3g} / {moves['max']:.3g}" if moves else "n/a",
+                "yes" if x["near_tie"] else "**no**",
+            ]
+        )
+    reproduced = d["per_beam_equals_reference"] == n and d["once_equals_replay"] == n
+    others = [x for x in d["differing"] if not x["near_tie"]]
+    k = len(d["differing"])
+    if not reproduced:
+        verdict = "the batches did not give their runs' SIDs again, so the cause is not known."
+    elif not others:
+        verdict = (
+            f"every swap is a near tie (the largest gap is {d['largest_gap']:.3g}): the "
+            "differences are consistent with rounding."
+        )
+    else:
+        verdict = (
+            f"{k - len(others)} of the {k} swaps are near ties, consistent with rounding; for the "
+            f"other {len(others)} the cause is not known ("
+            + "; ".join(_why_not_near_tie(x) for x in others)
+            + f"). The largest gap is {_gap(d['largest_gap'])}."
+        )
+    sd = d["score_differences"]
+    return [
+        f"  Neither run kept its beam scores, so `minionerec.replay diff` generated the "
+        f"{len(d['batches'])} batches that hold a differing sample once more both ways, with the "
+        f"beam scores (transformers' sequences_scores; {d['device']}, {d['dtype']}): per beam, "
+        f"{d['per_beam_equals_reference']} of {n} samples gave the reference's SIDs again; with "
+        f"the prompt once, {d['once_equals_replay']} of {n} the replay's. Over all {sd['count']:,} "
+        f"SIDs both paths returned for those {n} samples, the two paths move one SID's score by "
+        f"{sd['median']:.3g} (median), {sd['p90']:.3g} (P90), {sd['max']:.3g} (max). Per "
+        "differing sample: its batch size, the first beam position where the lists part, the SID "
+        "each has there, the gap between those two SIDs' scores on each path (the reference's "
+        "SID minus the replay's on the per-beam path, the other way round with the prompt once), "
+        "and how far the paths move that sample's shared SIDs (median / max). A near tie = both "
+        "gaps measured and neither larger than that max:",
+        "",
+        *_table(
+            [
+                "Test sample",
+                "Batch",
+                "First differing position",
+                "Reference's SID there",
+                "Replay's SID there",
+                "Gap, per beam",
+                "Gap, prompt once",
+                "Score moves",
+                "Near tie",
+            ],
+            rows,
+        ),
+        "",
+        f"  So {verdict}",
+    ]
 
 
 def _runs_section(out: dict) -> list[str]:

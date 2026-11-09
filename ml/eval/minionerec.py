@@ -675,6 +675,19 @@ def run_summary(gen: Generation, test: Split) -> dict:
     }
 
 
+def replay_metrics(run: Generation, ref: Generation, scored_runs: dict, main: str) -> dict:
+    """A replay whose top 10 differs somewhere: its item-rule HR / NDCG at every K next to the
+    main run's on the same samples."""
+    at = {int(r): i for i, r in enumerate(ref.rows)}
+    idx = np.asarray([at[int(r)] for r in run.rows])
+    ours = scored_runs[run.name]["values"][NAME]["item"]
+    theirs = scored_runs[main]["values"][NAME]["item"]
+    return {
+        k: {"reference": float(theirs[k][idx].mean()), "replay": float(ours[k].mean())}
+        for k in ours
+    }
+
+
 def build(
     runs: list[Path],
     main_run: str | None,
@@ -710,7 +723,15 @@ def build(
         if name == main:
             masks = {s: {g: m[gen.rows] for g, m in gs.items()} for s, gs in masks_full.items()}
             entry["segments"] = segments(scored["values"], users, masks)
+        if (path / "diff.json").exists():  # minionerec.replay diff: the replay's differences
+            entry["summary"]["replay_diff"] = json.loads((path / "diff.json").read_text())
         out_runs[name] = entry
+    for name, entry in out_runs.items():
+        rep = entry["summary"]["replay"]
+        if not rep or rep["identical_top10"] == rep["samples"]:
+            continue
+        if entry["summary"]["selection"].get("replay_of") == main:
+            entry["replay_metrics"] = replay_metrics(gens[name], gens[main], scored_runs, main)
 
     status, reasons = "final", []
     main_summary = out_runs[main]["summary"]
