@@ -128,7 +128,9 @@ func Validate(ce ClientEvent, now time.Time, knownItem func(int32) bool) (Event,
 	if ce.ItemID == nil || !knownItem(*ce.ItemID) {
 		return Event{}, errors.New("item_id is required and must be a catalog item")
 	}
-	ev := Event{ID: id, Day: Day(at), Time: at, Type: ce.Type, UserID: *ce.UserID, ItemID: *ce.ItemID, Received: now.UTC()}
+	// Received in microseconds, what events_raw.server_ts keeps: the items' CTR buckets
+	// (package itemctr) are picked from it on both sides, the aggregator and the sample job.
+	ev := Event{ID: id, Day: Day(at), Time: at, Type: ce.Type, UserID: *ce.UserID, ItemID: *ce.ItemID, Received: now.UTC().Truncate(time.Microsecond)}
 
 	if ce.ImpressionID != "" {
 		rid, _, err := ParseImpressionID(ce.ImpressionID)

@@ -11,6 +11,7 @@ import (
 	"github.com/heyemlee/recloop/serving/internal/ads"
 	"github.com/heyemlee/recloop/serving/internal/bundle"
 	"github.com/heyemlee/recloop/serving/internal/cache"
+	"github.com/heyemlee/recloop/serving/internal/itemctr"
 	"github.com/heyemlee/recloop/serving/internal/mixer"
 	"github.com/heyemlee/recloop/serving/internal/ranking"
 	"github.com/heyemlee/recloop/serving/internal/resilience"
@@ -95,8 +96,9 @@ func (s *Server) eligibleAdItems(q *request, uc userstate.Context) []int32 {
 
 // addRanking writes the ranking stage's view into the first page's served event: the feature
 // names once, each organic item's features and LightGBM score, and each sponsored slot's
-// features as the pCTR model saw them.
-func addRanking(served *servedPayload, rk rendered, slots []cache.Slot) {
+// features as the pCTR model saw them; next to every feature row, the item's CTR counts of the
+// request's table (ictr), with the table's as-of and seed times.
+func addRanking(served *servedPayload, rk rendered, slots []cache.Slot, ictr *itemctr.Table) {
 	if len(rk.names) == 0 {
 		for _, sl := range slots {
 			if len(sl.Features) > 0 {
@@ -127,6 +129,24 @@ func addRanking(served *servedPayload, rk rendered, slots []cache.Slot) {
 		if v, ok := rk.lgbm[it.ItemID]; ok {
 			x := float64(v)
 			it.LGBM = &x
+		}
+	}
+	if ictr == nil {
+		return
+	}
+	logged := false
+	for i := range served.Items {
+		it := &served.Items[i]
+		if len(it.F) > 0 {
+			c := ictr.Get(it.ItemID).Array()
+			it.ICTR = &c
+			logged = true
+		}
+	}
+	if logged {
+		served.ICTRAsOf = ictr.AsOf.UnixMilli()
+		if !ictr.Since.IsZero() {
+			served.ICTRSince = ictr.Since.UnixMilli()
 		}
 	}
 }

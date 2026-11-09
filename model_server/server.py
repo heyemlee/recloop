@@ -196,7 +196,21 @@ class ModelServer(pb_grpc.ModelServerServicer):
                 xa = r.ad_features(history, [a.item_id for a in ads], rel)
                 resp.ad_features.extend(xa.ravel().tolist())
                 if r.pctr is not None:
-                    resp.ad_pctr.extend(r.pctr.predict(xa).tolist())
+                    counts = np.asarray(
+                        [
+                            [
+                                a.counts.impressions_hour,
+                                a.counts.clicks_hour,
+                                a.counts.impressions_day,
+                                a.counts.clicks_day,
+                            ]
+                            if a.HasField("counts")
+                            else [np.nan] * 4
+                            for a in ads
+                        ],
+                        dtype=np.float64,
+                    )
+                    resp.ad_pctr.extend(r.pctr.predict(xa, counts=counts).tolist())
                 admin.RANK_SECONDS.labels("ads").observe(time.perf_counter() - t)
         except ValueError as e:
             admin.CALLS.labels("Rank", "INVALID_ARGUMENT").inc()

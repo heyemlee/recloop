@@ -88,6 +88,7 @@ def samples(n: int = 6000, seed: int = 2) -> pd.DataFrame:
     return pd.DataFrame(
         {
             "impression_id": [f"r{i}:{q}" for i, q in enumerate(pos)],
+            "user_id": rng.integers(0, 300, n),
             "pos": pos,
             "slot": np.where(sponsored, "sponsored", "organic"),
             "t_impression": [t0 + pd.Timedelta(seconds=int(s)) for s in range(n)],
@@ -107,8 +108,9 @@ def test_training_recovers_the_position_effect_and_serving_agrees(tmp_path, monk
     pq.write_table(pa.Table.from_pandas(df, preserve_index=False), d / "part-0.parquet")
     monkeypatch.setattr(pctr, "SAMPLES", tmp_path / "train")
     monkeypatch.setattr(pctr, "OUT", tmp_path / "model")
-    pctr.main()
+    pctr.main([])
     m = json.loads((tmp_path / "model" / "model.json").read_text())
+    assert m["variant"] == "base" and "ctr" not in m  # samples without counts
     effect = m["training"]["position_log_odds_vs_pos1"]
     # The simulator's examination is pos^-0.7: log-odds fall with the position.
     assert (
@@ -132,3 +134,90 @@ def test_training_recovers_the_position_effect_and_serving_agrees(tmp_path, monk
         pctr.predict_json(m, x, np.full(200, pctr.REFERENCE_POSITION), np.ones(200)),
         atol=1e-12,
     )
+
+
+def ctr_samples(n: int = 12000, seed: int = 3) -> pd.DataFrame:
+    """Clicks follow examination(pos) x the item's own appeal; the item's past impressions and
+    clicks (its counts) reveal the appeal, the other features do not."""
+    rng = np.random.default_rng(seed)
+    df = samples(n, seed)
+    items = rng.integers(0, 150, len(df))
+    appeal = rng.normal(0, 0.9, 150)
+    p = np.clip(0.06 * df.pos.to_numpy() ** -0.7 * np.exp(appeal[items]), 0, 1)
+    y = (rng.random(len(df)) < p).astype(int)
+    imp_h = rng.poisson(80, len(df))
+    imp_d = imp_h + rng.poisson(1500, len(df))
+    rate = np.clip(0.03 * np.exp(appeal[items]), 0, 1)
+    clk_h = rng.binomial(imp_h, rate)
+    clk_d = clk_h + rng.binomial(imp_d - imp_h, rate)
+    df = df.assign(
+        item_id=items,
+        label=y,
+        weight=1.0,
+        ictr=[list(map(int, r)) for r in zip(imp_h, clk_h, imp_d, clk_d, strict=True)],
+        ictr_source="served",
+    )
+    return df
+
+
+def test_ctr_columns_help_and_serving_agrees(tmp_path, monkeypatch):
+    pytest.importorskip("sklearn")
+    df = ctr_samples()
+    d = tmp_path / "train" / "day=2026-11-08"
+    d.mkdir(parents=True)
+    pq.write_table(pa.Table.from_pandas(df, preserve_index=False), d / "part-0.parquet")
+    monkeypatch.setattr(pctr, "SAMPLES", tmp_path / "train")
+    monkeypatch.setattr(pctr, "OUT", tmp_path / "model")
+    monkeypatch.setattr(pctr, "BOOTSTRAP", 50)
+    pctr.main(["--label", "test"])
+    m = json.loads((tmp_path / "model" / "model.json").read_text())
+    ev = json.loads((tmp_path / "model" / "eval" / "test.json").read_text())
+    assert m["variant"] == "ctr" and tuple(m["columns"]) == pctr.COLUMNS_CTR
+    assert 0 < m["ctr"]["prior"] < 0.2 and m["ctr"]["strength"] in pctr.STRENGTH_GRID
+    assert ev["shipped"] == "ctr" and ev["counts_source"] == {"served": len(df)}
+    held = ev["variants"]
+    assert held["ctr"]["held_out"]["auc"] > held["base"]["held_out"]["auc"] + 0.03
+    c = ev["comparison"]["all"]
+    assert c["auc"]["ci95"][0] > 0 and c["logloss"]["diff"] < 0
+    assert set(held["ctr"]["held_out"]["by_decile"]) <= {f"d{k}" for k in range(1, 11)}
+
+    # The serving twin: same probabilities from the shipped JSON, with and without counts.
+    x = np.asarray([[np.nan if v is None else v for v in row] for row in df.features[:300]])
+    pos, sp = df.pos.to_numpy()[:300], (df.slot == "sponsored").to_numpy()[:300]
+    counts = np.asarray(df.ictr[:300].tolist(), dtype=np.float64)
+    served = serving.PCTRModel.from_json(m)
+    np.testing.assert_allclose(
+        served.predict(x, pos, sp, counts), pctr.predict_json(m, x, pos, sp, counts), atol=1e-12
+    )
+    # Missing counts are the prior: the same as zero impressions and zero clicks.
+    np.testing.assert_allclose(
+        served.predict(x, pos, sp), served.predict(x, pos, sp, np.zeros((300, 4))), atol=1e-12
+    )
+    # More clicks of the day on the same impressions: a higher pCTR (the day's estimate of the
+    # appeal is the precise one here; the hour's is collinear with it, its sign is not pinned).
+    more = counts.copy()
+    more[:, 3] += 30
+    assert (served.predict(x, pos, sp, more) > served.predict(x, pos, sp, counts)).all()
+    # Every row had counts in both windows; --since keeps the samples served from then on.
+    assert ev["counts_coverage"]["all"] == {"hour": 1.0, "day": 1.0} and ev["since"] is None
+    t = pd.to_datetime(df.t_impression, utc=True)
+    cut = t.iloc[len(df) // 2]
+    pctr.main(["--label", "late", "--since", cut.tz_localize(None).isoformat()])
+    late = json.loads((tmp_path / "model" / "eval" / "late.json").read_text())
+    assert late["rows"] == int((t >= cut).sum()) and late["since"] == cut.isoformat()
+    assert json.loads((tmp_path / "model" / "model.json").read_text())["training"]["since"] == (
+        cut.isoformat()
+    )
+
+
+def test_ctr_columns_are_finite_at_the_edges():
+    c = np.asarray([[0, 0, 0, 0], [0, 7, 3, 9], [10, 10, 10, 10], [np.nan] * 4], dtype=float)
+    for twin in (pctr.ctr_columns, serving.ctr_columns):
+        out = twin(c, 0.01, 10.0)
+        for v in out.values():
+            assert np.isfinite(v).all()
+        assert out["ictr_1h_logit"][0] == out["ictr_1h_logit"][3]  # missing = no evidence
+        assert out["ictr_1h_logit"][1] > out["ictr_1h_logit"][0]
+    a, b = pctr.ctr_columns(c, 0.01, 10.0), serving.ctr_columns(c, 0.01, 10.0)
+    for k in pctr.CTR_COLUMNS:
+        np.testing.assert_array_equal(a[k], b[k])

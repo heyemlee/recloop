@@ -24,8 +24,8 @@ write-ups in `docs/results/`.
   re-renders it from `artifacts/billing/`; `make agent-eval` writes `agent.md`, `make
   agent-latency` adds its chat-path section; `make release-drill` writes `release.md`, `make
   release-report` re-renders it from `artifacts/release/drill.json`; `make ab-report` writes
-  `ab.md` from `artifacts/ab/` and the sample job's impressions); change the generator, not the
-  file. The committed `offline.md` is `make setup`, then `make paper-sasrec`,
+  `ab.md` from `artifacts/ab/` and the sample job's impressions; `make pctr-report` writes
+  `pctr.md` from `artifacts/models/pctr/eval/`); change the generator, not the file. The committed `offline.md` is `make setup`, then `make paper-sasrec`,
   then `make eval` (`make setup` includes `make train-ranker`). `make eval` re-runs give the same
   bytes; `make train` runs on the CPU with fixed seeds, and two runs with the same worker / thread
   counts gave identical weights; `make train-ranker` (one thread) gives the same model. The committed
@@ -69,6 +69,8 @@ serving/                    Go module github.com/heyemlee/recloop/serving
                             campaign index, gates, pacing), adtoken (signed ad_token), billing
                             (charge transaction, Redis spend.lua, consumer, reconcile + raise.lua),
                             ranking (M4: the model server's Rank: features, LightGBM, pCTR),
+                            itemctr (M4: the items' recent impression / click buckets, the api's
+                            table of them: the pCTR's item CTR),
                             release (M4: model versions built -> ... -> retired, reconcile),
                             bundle (+ registry: several versions at once)
   internal/store/db/        sqlc output; queries in internal/store/queries, schema = migrations/
@@ -111,10 +113,12 @@ sim/                        traffic simulator (world, click model, sessions + fa
                             release_drill, ab); runs in the ml environment (`$(PY) -m sim.<module>`)
 loadtest/                   k6 scenario recs.js, experiment runner run.py, report.py (latency.md)
 analysis/                   served_attribution.sql, srm.py, billing_report.py (billing.md),
-                            ab_report.py (ab.md), release_report.py (release.md)
+                            ab_report.py (ab.md), release_report.py (release.md),
+                            pctr_report.py (pctr.md)
 tools/                      go.mod pinning buf, protoc-gen-go(-grpc), sqlc (built into .cache/bin);
                             tools/k6/go.mod pins k6 (own module)
-testdata/                   bucket_vectors.json, shared by the Go and Python bucketing tests
+testdata/                   bucket_vectors.json, shared by the Go and Python bucketing tests;
+                            item_ctr_vectors.json, by the Go item CTR and the sample job tests
 agent/                      Python 3.12 uv project (own .venv): the shopping assistant (design §10)
   agent, parsing, schema    one turn; LLM / rule parsing into ShoppingRequest (Pydantic)
   catalog, tools, text      search_items (BM25 + pgvector, RRF, SQL filters), details, history,
@@ -188,7 +192,10 @@ make spark-image   # the sample job's image (recloop/spark:dev)
 make samples       # DAY=YYYY-MM-DD (UTC, default today): export events_raw around it, then the
                    # PySpark job -> artifacts/samples/{impressions,train,meta}
 make test-samples  # the sample job's tests, in its container
-make train-pctr    # logistic-regression pCTR on artifacts/samples/train -> artifacts/models/pctr
+make train-pctr    # logistic-regression pCTR on artifacts/samples/train, with and without the
+                   # item CTR columns -> artifacts/models/pctr (model.json, eval/<label>.json;
+                   # PCTR_FLAGS="--days D --since T --label NAME")
+make pctr-report   # docs/results/pctr.md from artifacts/models/pctr/eval
 make collect       # standing campaigns + COLLECT_SECONDS (900) of simulated traffic for samples
 make release-drill # NEW=<version> BAD=<version>: canary 5% -> full rollout, then BAD activated
                    # and rolled back, under traffic (~35 min) -> docs/results/release.md
@@ -403,7 +410,7 @@ interpreter at exit: `ORT_DISABLE_TELEMETRY=1` (Makefile, model-server image, `m
 
 - Two instances (design §19, 2026-11-08), both without persistence (derived state, rebuilt from
   the log). State `redis` (`REDIS_URL`, 16390): `u:{uid}:*`, `dedup:*`, `fc:*`, `spend:*`,
-  `demo:users`; `noeviction`, `RECLOOP_REDIS_MAXMEMORY` 1 GB (container 1.5 GB). Cache
+  `demo:users`, `ictr:*` and `state:seeded_at` (M4, the item CTR buckets); `noeviction`, `RECLOOP_REDIS_MAXMEMORY` 1 GB (container 1.5 GB). Cache
   `redis-cache` (`CACHE_REDIS_URL`, 16391): `page:*`, `cand:*`; `allkeys-lru`, 384 MB. The api
   uses both (user context, ads MGET, demo users: state; candidate cache, pages: cache; the page +
   candidate write is still one pipeline). `CACHE_REDIS_URL` defaults to the cache instance and
@@ -412,12 +419,13 @@ interpreter at exit: `ORT_DISABLE_TELEMETRY=1` (Makefile, model-server image, `m
   reconciliation use the state instance only.
 - Sizing (measured on redis 8.10, replaying the 30-minute billing drill with apply.lua): 124 B per
   event (7-day dedup marker) + 76 B per (user, item) seen in 24 h; the seed is 3 MB, the drill
-  ~117 MB, one `make load` run ~150 MB (reseeded before every run). 1 GB holds ~6.8 M events of a
-  week. When the state instance is full it refuses writes (a script at its first write: nothing
-  half applied): the aggregator retries its batch (offsets uncommitted, lag grows, no loss),
-  billing still charges in PostgreSQL but its spend update and reconciliation's repairs fail, the
-  api serves no ads (`userstate.Fullness`: INFO every 5 s, full at 98 % of maxmemory or on a new
-  `errorstat_OOM`). Remedy: `make seed` / `make rebuild-redis`, or a larger maxmemory.
+  ~117 MB, one `make load` run ~150 MB (reseeded before every run); the item CTR buckets (M4)
+  stay under 14 MB. 1 GB holds ~6.8 M events of a week. When the state instance is full it
+  refuses writes (a script at its first write: nothing half applied): the aggregator retries its
+  batch (offsets uncommitted, lag grows, no loss), billing still charges in PostgreSQL but its
+  spend update and reconciliation's repairs fail, the api serves no ads (`userstate.Fullness`:
+  INFO every 5 s, full at 98 % of maxmemory or on a new `errorstat_OOM`). Remedy: `make seed` /
+  `make rebuild-redis`, or a larger maxmemory.
 - Visible: redis_exporter v1.95.0 (`job="redis"`, label `redis="state"|"cache"`):
   `redis_memory_*`, `redis_evicted_keys_total`, `redis_errors_total{err="OOM"}`; the services'
   `recloop_redis_errors_total{component,op,kind}` and the api's `recloop_redis_state_full`.
@@ -480,8 +488,9 @@ interpreter at exit: `ORT_DISABLE_TELEMETRY=1` (Makefile, model-server image, `m
   `/admin/api/*` forwards an allowlist to the api's `/internal/admin/*` only when the web app runs
   with `RECLOOP_ADMIN=1`; otherwise 404.
 - Samples (`ml/samples`, design §7.5): `export.py` writes events_raw by day and type to
-  `artifacts/samples/raw/` on the host; `job.py` (PySpark, local mode) reads served of D-1..D,
-  impressions of D-1..D, clicks / carts / purchases of D..D+1; one row per event_id, one
+  `artifacts/samples/raw/` on the host (`--around D`: D-2..D+1); `job.py` (PySpark, local mode)
+  reads served of D-1..D, impressions of D-1..D, clicks / carts / purchases of D..D+1 (and the
+  impressions and clicks of D-2..D+1 for the item CTR counts); one row per event_id, one
   impression per impression_id (a click without one stands for it), joined to its served record
   on (request_id, position) (no record or another item: dropped, counted); label = a click within
   30 minutes (event times = UUIDv7 times); carted / purchased within 30 minutes after the click;
@@ -494,7 +503,33 @@ interpreter at exit: `ORT_DISABLE_TELEMETRY=1` (Makefile, model-server image, `m
 - pCTR (`ml/models/pctr.py`): logistic regression (scikit-learn) on the samples' features plus
   the slot and the position (one-hot 1..10, 11-20, 21+), weighted; C chosen on a time-ordered
   split, judged on the last 20 % (AUC, log loss, calibration by position); the model server sets
-  the position to 3 and sponsored to 1.
+  the position to 3 and sponsored to 1. Variant `ctr` (shipped when the samples carry counts)
+  adds the item CTR columns: per window (hour, day) the log-odds of (clicks + strength x prior)
+  / (impressions + strength) (prior = the training rows' CTR, strength chosen with C from 10 /
+  100 / 1000) and log(1 + impressions); missing counts = 0 = the prior. Both variants are judged
+  on the same split, with a paired user bootstrap of the differences ->
+  `artifacts/models/pctr/eval/<label>.json` -> `make pctr-report`.
+- Item CTR counts (`internal/itemctr`, design §9.2 step 3, §19 2026-11-08): impression and click
+  events with an impression_id, once per event_id, every surface, bucketed by the api's receive
+  time (`Event.Received`, kept in microseconds = `events_raw.server_ts`; a client clock cannot
+  reach a closed bucket). apply.lua counts them under the event's dedup marker into
+  `ictr:5m:{yyyymmddHHMM}` / `ictr:1h:{yyyymmddHH}` (fields `i:{item}`, `c:{item}`; expire 90 min
+  / 25 h 30 min after the bucket's start; an expired bucket of a replayed event is skipped). The
+  api (when it serves ads) rebuilds an in-memory table 15 s after each 5-minute boundary E
+  (`itemctr.Refresher`, checked every 10 s; one HGETALL at a time): hour = the 12 complete
+  5-minute buckets before E, day = the 24 complete hours before E's hour, none that starts before
+  `state:seeded_at` (written by `make seed`, deleted by `rebuild-from-db` / `reset-offsets`); a
+  table older than 15 min is not used. The ads stage sends each candidate's counts in Rank
+  (`AdCandidate.counts`); the served event logs `ictr` [hour impressions, hour clicks, day
+  impressions, day clicks] next to every `f`, and `ictr_asof` / `ictr_since` (Unix ms). The sample
+  job (step 8; the export covers D-2..D+1) recomputes the counts from the log for the logged E and
+  seed (records from before: E = 15 s before serving, no seed); samples keep the logged counts
+  (`ictr_source` served) or the recomputed ones (log); meta `item_ctr` compares them (the online /
+  offline check). `sim.verify` (so `make drill`) checks the run's events were counted exactly
+  once. Size (measured): ~43 B per field; at ~87 page views/s a 5-minute bucket holds ~4,200
+  fields (~190 KB), an hourly one ~5,500 (~230 KB); at most 46 live hashes, under 14 MB with
+  every item in each. Known limit: the counts are not validated (forged impressions / clicks
+  raise an item's pCTR, and a higher pCTR lowers its GSP price).
 - Runs (stack, model server and api up; one at a time on an idle machine): `make collect`, then
   `make samples` and `make train-pctr`, `make bundle` (the release), `make bundle
   BUNDLE_FLAGS="--sasrec artifacts/models/sasrec/trials/8.pt"` (a bad release: the BCE trial),
@@ -507,6 +542,13 @@ interpreter at exit: `ORT_DISABLE_TELEMETRY=1` (Makefile, model-server image, `m
   traffic, `make samples` gets `SAMPLES_FLAGS="--complete-through <the traffic's end + 30 min,
   UTC>"`: the simulator has stopped, so nothing can arrive later and this reads what a run 30
   minutes later would (the default, the newest event, leaves the last 30 minutes not final).
+- The committed `pctr.md`: `make samples` of the M4 runs' day, `make train-pctr PCTR_FLAGS="--days
+  2026-11-08 --until 2026-11-08T15:00:00Z --label m4-runs"` (counts recomputed: those records
+  logged none); then `make seed`, `COLLECT_SECONDS=1800 make collect` (+ `sim.verify --run
+  artifacts/sim/collect`), `make samples` (the whole day again), `make train-pctr
+  PCTR_FLAGS="--days 2026-11-08 --since <the collect's start> --label collect"` (counts logged);
+  m4-runs once more (the same numbers from the new samples; the last run is the shipped model),
+  `make pctr-report`.
 
 ## Shopping assistant (M6)
 

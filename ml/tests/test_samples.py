@@ -9,6 +9,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import uuid
+from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -71,7 +72,9 @@ class Log:
         self.rows.setdefault((at.date(), typ), []).append(row)
         return eid
 
-    def served(self, at, user, items, offset=0, variant="control", ranker="rrf"):
+    def served(
+        self, at, user, items, offset=0, variant="control", ranker="rrf", extra=None, ictr=None
+    ):
         rid = uuid7(at, 10_000 + self.n)
         payload = {
             "surface": "home",
@@ -99,6 +102,10 @@ class Log:
                 for i, it in enumerate(items)
             ],
         }
+        payload.update(extra or {})
+        for item in payload["items"]:
+            if ictr and item["item_id"] in ictr:
+                item["ictr"] = ictr[item["item_id"]]
         self.add("served", at, user, request_id=rid, payload=payload)
         return rid
 
@@ -266,3 +273,104 @@ def test_complete_through_defaults_to_the_newest_event(spark, tmp_path):
     )
     assert not imps.loc[imp_id(ids["late"], 2)].final
     assert imps.loc[imp_id(ids["rid"], 1)].final
+
+
+VECTORS = Path(__file__).resolve().parents[2] / "testdata" / "item_ctr_vectors.json"
+
+
+def parse_ts(s: str) -> dt.datetime:
+    return dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+
+
+def vector_log() -> tuple[Log, dict]:
+    """The shared vectors' events (serving/internal/itemctr tests use the same file): a repeated
+    event_id is a copy received later, with the same UUIDv7 time."""
+    v = json.loads(VECTORS.read_text())
+    log, ids, first = Log(), {}, {}
+    for e in v["events"]:
+        rec = parse_ts(e["received"])
+        at = first.setdefault(e["event_id"], rec)
+        if e["event_id"] not in ids:
+            ids[e["event_id"]] = uuid7(at, 50_000 + len(ids))
+        log.add(
+            e["type"],
+            at,
+            9,
+            event_id=ids[e["event_id"]],
+            impression_id=e["impression_id"],
+            item=e["item"],
+            server_ts=rec,
+        )
+    return log, v
+
+
+def test_item_ctr_windows_match_the_shared_vectors(spark, tmp_path):
+    from pyspark.sql import functions as F
+
+    log, v = vector_log()
+    log.write(tmp_path / "raw")
+    days = [DAY - dt.timedelta(days=2), DAY - dt.timedelta(days=1), DAY, DAY + dt.timedelta(days=1)]
+    ev = job.read_events(spark, tmp_path / "raw", {"impression": days, "click": days})
+    ev = {t: job.first_by(df, "event_id", "server_ts") for t, df in ev.items()}
+    counts5, counts1h = job.bucket_counts(job.ctr_events(ev["impression"], ev["click"]))
+    keys = []
+    for t in v["tables"]:
+        asof = int(parse_ts(t["asof"]).timestamp() * 1000)
+        since = int(parse_ts(t["since"]).timestamp() * 1000) if t["since"] else 0
+        keys += [(item, asof, since) for item in range(10)]
+    kdf = spark.createDataFrame(keys, "item_id int, asof_ms bigint, since_ms bigint")
+    got = {
+        (r.item_id, r.asof_ms, r.since_ms): [r.imp_1h, r.clk_1h, r.imp_24h, r.clk_24h]
+        for r in job.window_counts(kdf, counts5, counts1h).collect()
+    }
+    assert len(got) == len(keys)
+    for t in v["tables"]:
+        asof = int(parse_ts(t["asof"]).timestamp() * 1000)
+        since = int(parse_ts(t["since"]).timestamp() * 1000) if t["since"] else 0
+        for item in range(10):
+            want = t["counts"].get(str(item), [0, 0, 0, 0])
+            assert got[(item, asof, since)] == want, (t["asof"], t["since"], item)
+    assert counts5.filter(F.col("imp") < 0).count() == 0
+
+
+def test_samples_keep_the_logged_counts_and_meta_compares_them(spark, tmp_path):
+    log, _ = vector_log()
+    at = dt.datetime(2026, 11, 8, 10, 7, tzinfo=dt.UTC)
+    asof = int(dt.datetime(2026, 11, 8, 10, 5, tzinfo=dt.UTC).timestamp() * 1000)
+    # Logged counts: item 1 as the log says; item 2 with one click of the day too many.
+    rid = log.served(
+        at, 21, [1, 2], extra={"ictr_asof": asof}, ictr={1: [5, 2, 5, 1], 2: [0, 0, 1, 2]}
+    )
+    # A page from before the api logged counts: the job recomputes them for the table the api
+    # would have had (15 s before serving: 10:00).
+    old = log.served(dt.datetime(2026, 11, 8, 10, 5, 10, tzinfo=dt.UTC), 22, [1])
+    for user, r, items in ((21, rid, [1, 2]), (22, old, [1])):
+        for pos, it in enumerate(items, start=1):
+            log.add(
+                "impression",
+                at + dt.timedelta(seconds=pos),
+                user,
+                impression_id=imp_id(r, pos),
+                item=it,
+            )
+    log.write(tmp_path / "raw")
+    through = dt.datetime(2026, 11, 9, 0, 0, tzinfo=dt.UTC)
+    meta = job.run(
+        DAY, tmp_path / "raw", tmp_path / "out", complete_through=through, rate=1.0, spark=spark
+    )
+    imps = (
+        pq.read_table(tmp_path / "out" / "impressions" / "day=2026-11-08")
+        .to_pandas()
+        .set_index("impression_id")
+    )
+    a, b, c = imps.loc[imp_id(rid, 1)], imps.loc[imp_id(rid, 2)], imps.loc[imp_id(old, 1)]
+    assert a.ictr_source == "served" and list(a.ictr) == [5, 2, 5, 1] == list(a.ictr_log)
+    assert list(b.ictr) == [0, 0, 1, 2] and list(b.ictr_log) == [0, 0, 1, 1]  # served wins
+    assert c.ictr_source == "log" and list(c.ictr) == [5, 1, 5, 1] and c.ictr_served is None
+    assert c.ictr_asof == int(dt.datetime(2026, 11, 8, 10, 0, tzinfo=dt.UTC).timestamp() * 1000)
+    train = pq.read_table(tmp_path / "out" / "train" / "day=2026-11-08").to_pandas()
+    assert set(train.ictr_source) == {"served", "log"} and train.ictr.notna().all()
+    check = meta["item_ctr"]
+    assert check["logged"] == 2 and check["equal"] == 1 and check["differ"] == 1
+    assert check["logged_above_log"] == 1 and check["logged_below_log"] == 0
+    assert check["max_abs_diff"] == [0, 0, 0, 1] and check["recomputed_only"] == 1

@@ -8,6 +8,8 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
+
+	"github.com/heyemlee/recloop/serving/internal/itemctr"
 )
 
 func newStore(t *testing.T) (Store, *miniredis.Miniredis) {
@@ -177,4 +179,67 @@ func equal(a, b []bool) bool {
 		}
 	}
 	return true
+}
+
+// The items' CTR buckets (package itemctr): an impression or click counts once per event, in the
+// buckets of its receive time, next to the frequency cap of a sponsored impression; a replayed
+// event whose bucket has expired leaves that bucket alone.
+func TestItemCTRCountsOncePerEventInTheReceiveBuckets(t *testing.T) {
+	s, mr := newStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 11, 8, 10, 7, 0, 0, time.UTC)
+	mr.SetTime(now)
+	recv := func(hhmmss string) time.Time {
+		at, err := time.Parse("2006-01-02T15:04:05.999999Z", "2026-11-08T"+hhmmss+"Z")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return at
+	}
+	fc := FreqKey(7, 3, now)
+	cs := []Change{
+		{EventID: "i1", UserID: 7, ItemID: 42, Kind: KindImpression, At: now, CTR: itemctr.Impression, Received: recv("10:04:59.999999")},
+		{EventID: "i1", UserID: 7, ItemID: 42, Kind: KindImpression, At: now, CTR: itemctr.Impression, Received: recv("10:06:00")},
+		{EventID: "s1", UserID: 7, ItemID: 42, Kind: KindImpression, At: now, FreqKey: fc, CTR: itemctr.Impression, Received: recv("10:03:00")},
+		{EventID: "c1", UserID: 7, ItemID: 42, Kind: KindHistory, At: now, CTR: itemctr.Click, Received: recv("10:06:00")},
+		{EventID: "a1", UserID: 7, ItemID: 42, Kind: KindHistory, At: now}, // add_to_cart: not counted
+		// Received at 08:00: its 5-minute bucket expired at 09:30, its hourly one has a day left.
+		{EventID: "o1", UserID: 7, ItemID: 42, Kind: KindImpression, At: now, CTR: itemctr.Impression, Received: recv("08:00:00")},
+		// Received yesterday at 07:00: both buckets have expired (a replay of an old event).
+		{EventID: "o2", UserID: 7, ItemID: 42, Kind: KindImpression, At: now, CTR: itemctr.Impression, Received: recv("10:00:00").Add(-27 * time.Hour)},
+	}
+	applied, err := s.ApplyBatch(ctx, cs, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []bool{true, false, true, true, true, true, true}; !equal(applied, want) {
+		t.Fatalf("applied %v, want %v", applied, want)
+	}
+	for _, c := range []struct{ key, field, want string }{
+		{"ictr:5m:202611081000", "i:42", "2"}, // i1 (the first copy) and s1
+		{"ictr:5m:202611081005", "i:42", ""},  // the copy of i1 received at 10:06 is a duplicate
+		{"ictr:5m:202611081005", "c:42", "1"},
+		{"ictr:1h:2026110810", "i:42", "2"},
+		{"ictr:1h:2026110810", "c:42", "1"},
+		{"ictr:5m:202611080800", "i:42", ""},
+		{"ictr:1h:2026110808", "i:42", "1"},
+		{"ictr:1h:2026110707", "i:42", ""},
+	} {
+		if got := mr.HGet(c.key, c.field); got != c.want {
+			t.Errorf("%s %s = %q, want %q", c.key, c.field, got, c.want)
+		}
+	}
+	if mr.Exists("ictr:5m:202611080800") || mr.Exists("ictr:1h:2026110707") || mr.Exists("ictr:5m:202611070700") {
+		t.Error("an expired bucket was written")
+	}
+	if got, _ := s.Frequency(ctx, []string{fc}); got[0] != 1 {
+		t.Fatalf("frequency %v next to the CTR counts", got)
+	}
+	// Each bucket expires at its start + TTL (itemctr.TargetOf).
+	if ttl := mr.TTL("ictr:5m:202611081000"); ttl != itemctr.TTL5m-7*time.Minute {
+		t.Errorf("5-minute bucket ttl %v", ttl)
+	}
+	if ttl := mr.TTL("ictr:1h:2026110810"); ttl != itemctr.TTL1h-7*time.Minute {
+		t.Errorf("hourly bucket ttl %v", ttl)
+	}
 }

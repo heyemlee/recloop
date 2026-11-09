@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/heyemlee/recloop/serving/internal/adtoken"
 	"github.com/heyemlee/recloop/serving/internal/api"
 	"github.com/heyemlee/recloop/serving/internal/billing"
+	"github.com/heyemlee/recloop/serving/internal/itemctr"
 	"github.com/heyemlee/recloop/serving/internal/store"
 	"github.com/heyemlee/recloop/serving/internal/userstate"
 )
@@ -77,14 +79,18 @@ func (f *fixture) claims(it api.RecItem) adtoken.Claims {
 type servedRow struct {
 	Surface string `json:"surface"`
 	Items   []struct {
-		ItemID     int32  `json:"item_id"`
-		Pos        int    `json:"pos"`
-		Slot       string `json:"slot"`
-		CampaignID int64  `json:"campaign_id"`
-		Price      int32  `json:"price"`
-		AdToken    string `json:"ad_token"`
+		ItemID     int32      `json:"item_id"`
+		Pos        int        `json:"pos"`
+		Slot       string     `json:"slot"`
+		CampaignID int64      `json:"campaign_id"`
+		Price      int32      `json:"price"`
+		AdToken    string     `json:"ad_token"`
+		F          []*float64 `json:"f"`
+		ICTR       *[4]uint32 `json:"ictr"`
 	} `json:"items"`
-	Ads *struct {
+	ICTRAsOf  int64 `json:"ictr_asof"`
+	ICTRSince int64 `json:"ictr_since"`
+	Ads       *struct {
 		Outcome string `json:"outcome"`
 		Stats   struct {
 			Winners int `json:"winners"`
@@ -488,6 +494,101 @@ func TestInternalAdSelect(t *testing.T) {
 	} {
 		if code, _ := f.selectAds(bad); code != 400 {
 			t.Fatalf("%v: %d", bad, code)
+		}
+	}
+}
+
+// featurePCTR is a pCTR model that returns a feature row per item (as Rank does) and records the
+// counts it was given.
+type featurePCTR struct {
+	mu     sync.Mutex
+	counts map[int32][4]uint32
+	calls  int
+}
+
+func (m *featurePCTR) PredictCTR(_ context.Context, r ads.PCTRRequest) (ads.PCTRResult, error) {
+	m.mu.Lock()
+	m.counts, m.calls = r.Counts, m.calls+1
+	m.mu.Unlock()
+	res := ads.PCTRResult{Model: "logreg", FeatureNames: []string{"sasrec_score", "n_sources"}}
+	for range r.ItemIDs {
+		res.CTR = append(res.CTR, 0.01)
+		res.Features = append(res.Features, []float32{0.5, 0})
+	}
+	return res, nil
+}
+
+type staticTable struct{ t *itemctr.Table }
+
+func (s staticTable) Current() *itemctr.Table { return s.t }
+
+// The pCTR gets every candidate item's counts from the api's item CTR table, and the served event
+// logs the counts next to the sponsored slots' features, with the table's as-of and seed times;
+// a table past itemctr.MaxAge is not used.
+func TestPCTRGetsTheItemCTRCountsAndServedLogsThem(t *testing.T) {
+	f := newFixtureWith(t, fixtureOpts{items: adItems, ads: true})
+	f.campaigns(
+		campaignSpec{bid: 50, budget: 1000, items: []int32{250}},
+		campaignSpec{bid: 30, budget: 1000, items: []int32{260}},
+	)
+	model := &featurePCTR{}
+	f.ads.PCTR = model
+	asOf := itemctr.AsOfAt(time.Now())
+	since := asOf.Add(-3 * time.Hour)
+	f.ads.ItemCTR = staticTable{itemctr.NewTable(asOf, since, map[int32]itemctr.Counts{
+		250: {ImpHour: 12, ClkHour: 1, ImpDay: 300, ClkDay: 4},
+	})}
+	var page recResp
+	if code := f.get("/v1/recommendations?user_id=5&limit=20", &page); code != 200 {
+		t.Fatalf("status %d", code)
+	}
+	if len(sponsored(page.Items)) != 2 {
+		t.Fatalf("sponsored %+v", sponsored(page.Items))
+	}
+	model.mu.Lock()
+	got := model.counts
+	model.mu.Unlock()
+	if got[250] != [4]uint32{12, 1, 300, 4} || got[260] != [4]uint32{} || len(got) != 2 {
+		t.Fatalf("counts given to the pCTR: %v", got)
+	}
+	rows := f.servedRows(page.RequestID)
+	if rows[0].ICTRAsOf != asOf.UnixMilli() || rows[0].ICTRSince != since.UnixMilli() {
+		t.Fatalf("as-of %d since %d, want %d %d", rows[0].ICTRAsOf, rows[0].ICTRSince, asOf.UnixMilli(), since.UnixMilli())
+	}
+	for _, it := range rows[0].Items {
+		if it.Slot != "sponsored" {
+			if it.ICTR != nil {
+				t.Fatalf("an organic item without features has counts: %+v", it)
+			}
+			continue
+		}
+		want := [4]uint32{}
+		if it.ItemID == 250 {
+			want = [4]uint32{12, 1, 300, 4}
+		}
+		if len(it.F) != 2 || it.ICTR == nil || *it.ICTR != want {
+			t.Fatalf("served slot %+v", it)
+		}
+	}
+
+	// A table whose builds have failed for longer than MaxAge: no counts, nothing logged.
+	f.ads.ItemCTR = staticTable{itemctr.NewTable(asOf.Add(-itemctr.MaxAge-10*time.Minute), time.Time{}, nil)}
+	if code := f.get("/v1/recommendations?user_id=6&limit=20", &page); code != 200 {
+		t.Fatalf("status %d", code)
+	}
+	model.mu.Lock()
+	got, calls := model.counts, model.calls
+	model.mu.Unlock()
+	if calls != 2 || got != nil {
+		t.Fatalf("pCTR calls %d; a stale table's counts reached it: %v", calls, got)
+	}
+	rows = f.servedRows(page.RequestID)
+	if rows[0].ICTRAsOf != 0 {
+		t.Fatalf("stale table logged: %d", rows[0].ICTRAsOf)
+	}
+	for _, it := range rows[0].Items {
+		if it.ICTR != nil {
+			t.Fatalf("counts logged from a stale table: %+v", it)
 		}
 	}
 }

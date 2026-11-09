@@ -108,6 +108,9 @@ func (c *Client) PredictCTR(ctx context.Context, r ads.PCTRRequest) (ads.PCTRRes
 		if rel, ok := r.Relevance[id]; ok {
 			a.Relevance = proto.Float32(rel)
 		}
+		if c, ok := r.Counts[id]; ok {
+			a.Counts = &pb.ItemCounts{ImpressionsHour: c[0], ClicksHour: c[1], ImpressionsDay: c[2], ClicksDay: c[3]}
+		}
 		req.Ads[i] = a
 	}
 	resp, err := c.call(ctx, req)

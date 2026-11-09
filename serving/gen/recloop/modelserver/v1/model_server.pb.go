@@ -328,7 +328,10 @@ type AdCandidate struct {
 	ItemId int32                  `protobuf:"varint,1,opt,name=item_id,json=itemId,proto3" json:"item_id,omitempty"`
 	// SASRec relevance from Retrieve; unset: the model server encodes the history itself (a
 	// request whose organic candidates came from the cache made no Retrieve call).
-	Relevance     *float32 `protobuf:"fixed32,2,opt,name=relevance,proto3,oneof" json:"relevance,omitempty"`
+	Relevance *float32 `protobuf:"fixed32,2,opt,name=relevance,proto3,oneof" json:"relevance,omitempty"`
+	// The item's recent impressions and clicks (the api's item CTR table); unset: the api has
+	// none, and a pCTR model with CTR columns uses its prior.
+	Counts        *ItemCounts `protobuf:"bytes,3,opt,name=counts,proto3" json:"counts,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -377,6 +380,83 @@ func (x *AdCandidate) GetRelevance() float32 {
 	return 0
 }
 
+func (x *AdCandidate) GetCounts() *ItemCounts {
+	if x != nil {
+		return x.Counts
+	}
+	return nil
+}
+
+// Impressions and clicks of one item in the complete buckets of the last hour and the last day
+// before the api's table time (serving/internal/itemctr; design §9.2 step 3).
+type ItemCounts struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	ImpressionsHour uint32                 `protobuf:"varint,1,opt,name=impressions_hour,json=impressionsHour,proto3" json:"impressions_hour,omitempty"`
+	ClicksHour      uint32                 `protobuf:"varint,2,opt,name=clicks_hour,json=clicksHour,proto3" json:"clicks_hour,omitempty"`
+	ImpressionsDay  uint32                 `protobuf:"varint,3,opt,name=impressions_day,json=impressionsDay,proto3" json:"impressions_day,omitempty"`
+	ClicksDay       uint32                 `protobuf:"varint,4,opt,name=clicks_day,json=clicksDay,proto3" json:"clicks_day,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *ItemCounts) Reset() {
+	*x = ItemCounts{}
+	mi := &file_recloop_modelserver_v1_model_server_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ItemCounts) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ItemCounts) ProtoMessage() {}
+
+func (x *ItemCounts) ProtoReflect() protoreflect.Message {
+	mi := &file_recloop_modelserver_v1_model_server_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ItemCounts.ProtoReflect.Descriptor instead.
+func (*ItemCounts) Descriptor() ([]byte, []int) {
+	return file_recloop_modelserver_v1_model_server_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *ItemCounts) GetImpressionsHour() uint32 {
+	if x != nil {
+		return x.ImpressionsHour
+	}
+	return 0
+}
+
+func (x *ItemCounts) GetClicksHour() uint32 {
+	if x != nil {
+		return x.ClicksHour
+	}
+	return 0
+}
+
+func (x *ItemCounts) GetImpressionsDay() uint32 {
+	if x != nil {
+		return x.ImpressionsDay
+	}
+	return 0
+}
+
+func (x *ItemCounts) GetClicksDay() uint32 {
+	if x != nil {
+		return x.ClicksDay
+	}
+	return 0
+}
+
 type RankRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Most recent item_ids, oldest first (the same window as Retrieve).
@@ -393,7 +473,7 @@ type RankRequest struct {
 
 func (x *RankRequest) Reset() {
 	*x = RankRequest{}
-	mi := &file_recloop_modelserver_v1_model_server_proto_msgTypes[6]
+	mi := &file_recloop_modelserver_v1_model_server_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -405,7 +485,7 @@ func (x *RankRequest) String() string {
 func (*RankRequest) ProtoMessage() {}
 
 func (x *RankRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_recloop_modelserver_v1_model_server_proto_msgTypes[6]
+	mi := &file_recloop_modelserver_v1_model_server_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -418,7 +498,7 @@ func (x *RankRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RankRequest.ProtoReflect.Descriptor instead.
 func (*RankRequest) Descriptor() ([]byte, []int) {
-	return file_recloop_modelserver_v1_model_server_proto_rawDescGZIP(), []int{6}
+	return file_recloop_modelserver_v1_model_server_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *RankRequest) GetHistory() []int32 {
@@ -470,7 +550,7 @@ type RankResponse struct {
 
 func (x *RankResponse) Reset() {
 	*x = RankResponse{}
-	mi := &file_recloop_modelserver_v1_model_server_proto_msgTypes[7]
+	mi := &file_recloop_modelserver_v1_model_server_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -482,7 +562,7 @@ func (x *RankResponse) String() string {
 func (*RankResponse) ProtoMessage() {}
 
 func (x *RankResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_recloop_modelserver_v1_model_server_proto_msgTypes[7]
+	mi := &file_recloop_modelserver_v1_model_server_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -495,7 +575,7 @@ func (x *RankResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RankResponse.ProtoReflect.Descriptor instead.
 func (*RankResponse) Descriptor() ([]byte, []int) {
-	return file_recloop_modelserver_v1_model_server_proto_rawDescGZIP(), []int{7}
+	return file_recloop_modelserver_v1_model_server_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *RankResponse) GetModelVersion() string {
@@ -578,12 +658,21 @@ const file_recloop_modelserver_v1_model_server_proto_rawDesc = "" +
 	"\x05score\x18\x03 \x01(\x02R\x05score\"[\n" +
 	"\tCandidate\x12\x17\n" +
 	"\aitem_id\x18\x01 \x01(\x05R\x06itemId\x125\n" +
-	"\x04hits\x18\x02 \x03(\v2!.recloop.modelserver.v1.SourceHitR\x04hits\"W\n" +
+	"\x04hits\x18\x02 \x03(\v2!.recloop.modelserver.v1.SourceHitR\x04hits\"\x93\x01\n" +
 	"\vAdCandidate\x12\x17\n" +
 	"\aitem_id\x18\x01 \x01(\x05R\x06itemId\x12!\n" +
-	"\trelevance\x18\x02 \x01(\x02H\x00R\trelevance\x88\x01\x01B\f\n" +
+	"\trelevance\x18\x02 \x01(\x02H\x00R\trelevance\x88\x01\x01\x12:\n" +
+	"\x06counts\x18\x03 \x01(\v2\".recloop.modelserver.v1.ItemCountsR\x06countsB\f\n" +
 	"\n" +
-	"_relevance\"\xc2\x01\n" +
+	"_relevance\"\xa0\x01\n" +
+	"\n" +
+	"ItemCounts\x12)\n" +
+	"\x10impressions_hour\x18\x01 \x01(\rR\x0fimpressionsHour\x12\x1f\n" +
+	"\vclicks_hour\x18\x02 \x01(\rR\n" +
+	"clicksHour\x12'\n" +
+	"\x0fimpressions_day\x18\x03 \x01(\rR\x0eimpressionsDay\x12\x1d\n" +
+	"\n" +
+	"clicks_day\x18\x04 \x01(\rR\tclicksDay\"\xc2\x01\n" +
 	"\vRankRequest\x12\x18\n" +
 	"\ahistory\x18\x01 \x03(\x05R\ahistory\x12A\n" +
 	"\n" +
@@ -620,7 +709,7 @@ func file_recloop_modelserver_v1_model_server_proto_rawDescGZIP() []byte {
 	return file_recloop_modelserver_v1_model_server_proto_rawDescData
 }
 
-var file_recloop_modelserver_v1_model_server_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_recloop_modelserver_v1_model_server_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
 var file_recloop_modelserver_v1_model_server_proto_goTypes = []any{
 	(*RetrieveRequest)(nil),  // 0: recloop.modelserver.v1.RetrieveRequest
 	(*RetrieveResponse)(nil), // 1: recloop.modelserver.v1.RetrieveResponse
@@ -628,24 +717,26 @@ var file_recloop_modelserver_v1_model_server_proto_goTypes = []any{
 	(*SourceHit)(nil),        // 3: recloop.modelserver.v1.SourceHit
 	(*Candidate)(nil),        // 4: recloop.modelserver.v1.Candidate
 	(*AdCandidate)(nil),      // 5: recloop.modelserver.v1.AdCandidate
-	(*RankRequest)(nil),      // 6: recloop.modelserver.v1.RankRequest
-	(*RankResponse)(nil),     // 7: recloop.modelserver.v1.RankResponse
+	(*ItemCounts)(nil),       // 6: recloop.modelserver.v1.ItemCounts
+	(*RankRequest)(nil),      // 7: recloop.modelserver.v1.RankRequest
+	(*RankResponse)(nil),     // 8: recloop.modelserver.v1.RankResponse
 }
 var file_recloop_modelserver_v1_model_server_proto_depIdxs = []int32{
 	2, // 0: recloop.modelserver.v1.RetrieveResponse.organic:type_name -> recloop.modelserver.v1.Scored
 	2, // 1: recloop.modelserver.v1.RetrieveResponse.ads:type_name -> recloop.modelserver.v1.Scored
 	3, // 2: recloop.modelserver.v1.Candidate.hits:type_name -> recloop.modelserver.v1.SourceHit
-	4, // 3: recloop.modelserver.v1.RankRequest.candidates:type_name -> recloop.modelserver.v1.Candidate
-	5, // 4: recloop.modelserver.v1.RankRequest.ads:type_name -> recloop.modelserver.v1.AdCandidate
-	0, // 5: recloop.modelserver.v1.ModelServer.Retrieve:input_type -> recloop.modelserver.v1.RetrieveRequest
-	6, // 6: recloop.modelserver.v1.ModelServer.Rank:input_type -> recloop.modelserver.v1.RankRequest
-	1, // 7: recloop.modelserver.v1.ModelServer.Retrieve:output_type -> recloop.modelserver.v1.RetrieveResponse
-	7, // 8: recloop.modelserver.v1.ModelServer.Rank:output_type -> recloop.modelserver.v1.RankResponse
-	7, // [7:9] is the sub-list for method output_type
-	5, // [5:7] is the sub-list for method input_type
-	5, // [5:5] is the sub-list for extension type_name
-	5, // [5:5] is the sub-list for extension extendee
-	0, // [0:5] is the sub-list for field type_name
+	6, // 3: recloop.modelserver.v1.AdCandidate.counts:type_name -> recloop.modelserver.v1.ItemCounts
+	4, // 4: recloop.modelserver.v1.RankRequest.candidates:type_name -> recloop.modelserver.v1.Candidate
+	5, // 5: recloop.modelserver.v1.RankRequest.ads:type_name -> recloop.modelserver.v1.AdCandidate
+	0, // 6: recloop.modelserver.v1.ModelServer.Retrieve:input_type -> recloop.modelserver.v1.RetrieveRequest
+	7, // 7: recloop.modelserver.v1.ModelServer.Rank:input_type -> recloop.modelserver.v1.RankRequest
+	1, // 8: recloop.modelserver.v1.ModelServer.Retrieve:output_type -> recloop.modelserver.v1.RetrieveResponse
+	8, // 9: recloop.modelserver.v1.ModelServer.Rank:output_type -> recloop.modelserver.v1.RankResponse
+	8, // [8:10] is the sub-list for method output_type
+	6, // [6:8] is the sub-list for method input_type
+	6, // [6:6] is the sub-list for extension type_name
+	6, // [6:6] is the sub-list for extension extendee
+	0, // [0:6] is the sub-list for field type_name
 }
 
 func init() { file_recloop_modelserver_v1_model_server_proto_init() }
@@ -660,7 +751,7 @@ func file_recloop_modelserver_v1_model_server_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_recloop_modelserver_v1_model_server_proto_rawDesc), len(file_recloop_modelserver_v1_model_server_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   8,
+			NumMessages:   9,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

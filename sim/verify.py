@@ -10,7 +10,10 @@ exactly once:
     orders       one order per purchase event; stock went down by one per purchase
     Redis        hv went up by exactly the number of click / add-to-cart / purchase events;
                  every event has its dedup marker; purchases are in `bought`; each user's last
-                 clicked item is in the history
+                 clicked item is in the history; the item CTR buckets (serving/internal/itemctr)
+                 gained exactly one impression or click per ledger impression / click with an
+                 impression_id, per item, in the hourly buckets and (runs under an hour) in the
+                 5-minute buckets
 
 Usage: python -m sim.verify --run artifacts/sim/run   (after the consumers caught up)
 """
@@ -21,6 +24,7 @@ import argparse
 import json
 import os
 import subprocess
+import time
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -178,6 +182,7 @@ def verify(run: Path, database_url: str, redis_url: str) -> dict:
         pipe.exists(f"dedup:aggregator:{eid}")
     markers = sum(pipe.execute())
     checks.append(check("redis: dedup marker per event", len(events), markers))
+    checks += item_ctr_checks(r, events, before, started)
 
     return {
         "run": str(run.relative_to(ROOT)) if run.is_relative_to(ROOT) else str(run),
@@ -188,6 +193,54 @@ def verify(run: Path, database_url: str, redis_url: str) -> dict:
         "checks": checks,
         "ok": all(c["ok"] for c in checks),
     }
+
+
+def item_ctr_counts(r, granularity: str, first_key: str) -> Counter:
+    """Field counts (i:{item}, c:{item}) of the item CTR hashes of one granularity from the
+    bucket first_key on (the keys' times sort as strings)."""
+    out: Counter = Counter()
+    for key in r.scan_iter(match=f"ictr:{granularity}:*", count=1000):
+        k = key.decode()
+        if k >= first_key:
+            for f, v in r.hgetall(k).items():
+                out[f.decode()] += int(v)
+    return out
+
+
+def item_ctr_checks(r, events: dict, before: dict, started: float) -> list[dict]:
+    """Exactly once for the item CTR counts: each ledger impression / click with an
+    impression_id (a ledger event is unique; duplicates the faults sent share its event_id)
+    added 1 to its item's field, received after the run started, so in the bucket open at the
+    start or a later one."""
+    if "ictr_keys" not in before:
+        return []
+    want: Counter = Counter()
+    for e in events.values():
+        if e.get("impression_id") and e["type"] in ("impression", "click"):
+            want[f"{'i' if e['type'] == 'impression' else 'c'}:{e['item_id']}"] += 1
+    out = []
+    for g in ("1h", "5m"):
+        if g == "5m" and time.time() - started > 3600:
+            continue  # a 5-minute bucket expires 90 min after its start
+        got = item_ctr_counts(r, g, before["ictr_keys"][g])
+        got.subtract(Counter(before["ictr"][g]))
+        wrong = sorted(f for f in set(want) | set(got) if got[f] != want[f])
+        out.append(
+            check(
+                f"redis: item CTR counts, {g} buckets (fields off)",
+                0,
+                len(wrong),
+                ", ".join(f"{f}: {got[f]} vs {want[f]}" for f in wrong[:3]),
+            )
+        )
+        out.append(
+            check(
+                f"redis: item CTR events counted, {g} buckets",
+                sum(want.values()),
+                sum(v for v in got.values() if v > 0),
+            )
+        )
+    return out
 
 
 def print_report(rep: dict) -> None:

@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n)recloop/modelserver/v1/model_server.proto\x12\x16recloop.modelserver.v1\"z\n\x0fRetrieveRequest\x12\x18\n\x07history\x18\x01 \x03(\x05R\x07history\x12\x0c\n\x01k\x18\x02 \x01(\x05R\x01k\x12\x1e\n\x0b\x61\x64_item_ids\x18\x03 \x03(\x05R\tadItemIds\x12\x1f\n\x0bpin_version\x18\x04 \x01(\tR\npinVersion\"\xa3\x01\n\x10RetrieveResponse\x12#\n\rmodel_version\x18\x01 \x01(\tR\x0cmodelVersion\x12\x38\n\x07organic\x18\x02 \x03(\x0b\x32\x1e.recloop.modelserver.v1.ScoredR\x07organic\x12\x30\n\x03\x61\x64s\x18\x03 \x03(\x0b\x32\x1e.recloop.modelserver.v1.ScoredR\x03\x61\x64s\"7\n\x06Scored\x12\x17\n\x07item_id\x18\x01 \x01(\x05R\x06itemId\x12\x14\n\x05score\x18\x02 \x01(\x02R\x05score\"M\n\tSourceHit\x12\x16\n\x06source\x18\x01 \x01(\tR\x06source\x12\x12\n\x04rank\x18\x02 \x01(\x05R\x04rank\x12\x14\n\x05score\x18\x03 \x01(\x02R\x05score\"[\n\tCandidate\x12\x17\n\x07item_id\x18\x01 \x01(\x05R\x06itemId\x12\x35\n\x04hits\x18\x02 \x03(\x0b\x32!.recloop.modelserver.v1.SourceHitR\x04hits\"W\n\x0b\x41\x64\x43\x61ndidate\x12\x17\n\x07item_id\x18\x01 \x01(\x05R\x06itemId\x12!\n\trelevance\x18\x02 \x01(\x02H\x00R\trelevance\x88\x01\x01\x42\x0c\n\n_relevance\"\xc2\x01\n\x0bRankRequest\x12\x18\n\x07history\x18\x01 \x03(\x05R\x07history\x12\x41\n\ncandidates\x18\x02 \x03(\x0b\x32!.recloop.modelserver.v1.CandidateR\ncandidates\x12\x35\n\x03\x61\x64s\x18\x03 \x03(\x0b\x32#.recloop.modelserver.v1.AdCandidateR\x03\x61\x64s\x12\x1f\n\x0bpin_version\x18\x04 \x01(\tR\npinVersion\"\xfd\x01\n\x0cRankResponse\x12#\n\rmodel_version\x18\x01 \x01(\tR\x0cmodelVersion\x12#\n\rfeature_names\x18\x02 \x03(\tR\x0c\x66\x65\x61tureNames\x12\x1a\n\x08\x66\x65\x61tures\x18\x03 \x03(\x02R\x08\x66\x65\x61tures\x12\x16\n\x06scores\x18\x04 \x03(\x02R\x06scores\x12\x1f\n\x0b\x61\x64_features\x18\x05 \x03(\x02R\nadFeatures\x12\x17\n\x07\x61\x64_pctr\x18\x06 \x03(\x02R\x06\x61\x64Pctr\x12\x16\n\x06ranker\x18\x07 \x01(\tR\x06ranker\x12\x1d\n\npctr_model\x18\x08 \x01(\tR\tpctrModel2\xbf\x01\n\x0bModelServer\x12]\n\x08Retrieve\x12\'.recloop.modelserver.v1.RetrieveRequest\x1a(.recloop.modelserver.v1.RetrieveResponse\x12Q\n\x04Rank\x12#.recloop.modelserver.v1.RankRequest\x1a$.recloop.modelserver.v1.RankResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n)recloop/modelserver/v1/model_server.proto\x12\x16recloop.modelserver.v1\"z\n\x0fRetrieveRequest\x12\x18\n\x07history\x18\x01 \x03(\x05R\x07history\x12\x0c\n\x01k\x18\x02 \x01(\x05R\x01k\x12\x1e\n\x0b\x61\x64_item_ids\x18\x03 \x03(\x05R\tadItemIds\x12\x1f\n\x0bpin_version\x18\x04 \x01(\tR\npinVersion\"\xa3\x01\n\x10RetrieveResponse\x12#\n\rmodel_version\x18\x01 \x01(\tR\x0cmodelVersion\x12\x38\n\x07organic\x18\x02 \x03(\x0b\x32\x1e.recloop.modelserver.v1.ScoredR\x07organic\x12\x30\n\x03\x61\x64s\x18\x03 \x03(\x0b\x32\x1e.recloop.modelserver.v1.ScoredR\x03\x61\x64s\"7\n\x06Scored\x12\x17\n\x07item_id\x18\x01 \x01(\x05R\x06itemId\x12\x14\n\x05score\x18\x02 \x01(\x02R\x05score\"M\n\tSourceHit\x12\x16\n\x06source\x18\x01 \x01(\tR\x06source\x12\x12\n\x04rank\x18\x02 \x01(\x05R\x04rank\x12\x14\n\x05score\x18\x03 \x01(\x02R\x05score\"[\n\tCandidate\x12\x17\n\x07item_id\x18\x01 \x01(\x05R\x06itemId\x12\x35\n\x04hits\x18\x02 \x03(\x0b\x32!.recloop.modelserver.v1.SourceHitR\x04hits\"\x93\x01\n\x0b\x41\x64\x43\x61ndidate\x12\x17\n\x07item_id\x18\x01 \x01(\x05R\x06itemId\x12!\n\trelevance\x18\x02 \x01(\x02H\x00R\trelevance\x88\x01\x01\x12:\n\x06\x63ounts\x18\x03 \x01(\x0b\x32\".recloop.modelserver.v1.ItemCountsR\x06\x63ountsB\x0c\n\n_relevance\"\xa0\x01\n\nItemCounts\x12)\n\x10impressions_hour\x18\x01 \x01(\rR\x0fimpressionsHour\x12\x1f\n\x0b\x63licks_hour\x18\x02 \x01(\rR\nclicksHour\x12\'\n\x0fimpressions_day\x18\x03 \x01(\rR\x0eimpressionsDay\x12\x1d\n\nclicks_day\x18\x04 \x01(\rR\tclicksDay\"\xc2\x01\n\x0bRankRequest\x12\x18\n\x07history\x18\x01 \x03(\x05R\x07history\x12\x41\n\ncandidates\x18\x02 \x03(\x0b\x32!.recloop.modelserver.v1.CandidateR\ncandidates\x12\x35\n\x03\x61\x64s\x18\x03 \x03(\x0b\x32#.recloop.modelserver.v1.AdCandidateR\x03\x61\x64s\x12\x1f\n\x0bpin_version\x18\x04 \x01(\tR\npinVersion\"\xfd\x01\n\x0cRankResponse\x12#\n\rmodel_version\x18\x01 \x01(\tR\x0cmodelVersion\x12#\n\rfeature_names\x18\x02 \x03(\tR\x0c\x66\x65\x61tureNames\x12\x1a\n\x08\x66\x65\x61tures\x18\x03 \x03(\x02R\x08\x66\x65\x61tures\x12\x16\n\x06scores\x18\x04 \x03(\x02R\x06scores\x12\x1f\n\x0b\x61\x64_features\x18\x05 \x03(\x02R\nadFeatures\x12\x17\n\x07\x61\x64_pctr\x18\x06 \x03(\x02R\x06\x61\x64Pctr\x12\x16\n\x06ranker\x18\x07 \x01(\tR\x06ranker\x12\x1d\n\npctr_model\x18\x08 \x01(\tR\tpctrModel2\xbf\x01\n\x0bModelServer\x12]\n\x08Retrieve\x12\'.recloop.modelserver.v1.RetrieveRequest\x1a(.recloop.modelserver.v1.RetrieveResponse\x12Q\n\x04Rank\x12#.recloop.modelserver.v1.RankRequest\x1a$.recloop.modelserver.v1.RankResponseb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -41,12 +41,14 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_SOURCEHIT']._serialized_end=493
   _globals['_CANDIDATE']._serialized_start=495
   _globals['_CANDIDATE']._serialized_end=586
-  _globals['_ADCANDIDATE']._serialized_start=588
-  _globals['_ADCANDIDATE']._serialized_end=675
-  _globals['_RANKREQUEST']._serialized_start=678
-  _globals['_RANKREQUEST']._serialized_end=872
-  _globals['_RANKRESPONSE']._serialized_start=875
-  _globals['_RANKRESPONSE']._serialized_end=1128
-  _globals['_MODELSERVER']._serialized_start=1131
-  _globals['_MODELSERVER']._serialized_end=1322
+  _globals['_ADCANDIDATE']._serialized_start=589
+  _globals['_ADCANDIDATE']._serialized_end=736
+  _globals['_ITEMCOUNTS']._serialized_start=739
+  _globals['_ITEMCOUNTS']._serialized_end=899
+  _globals['_RANKREQUEST']._serialized_start=902
+  _globals['_RANKREQUEST']._serialized_end=1096
+  _globals['_RANKRESPONSE']._serialized_start=1099
+  _globals['_RANKRESPONSE']._serialized_end=1352
+  _globals['_MODELSERVER']._serialized_start=1355
+  _globals['_MODELSERVER']._serialized_end=1546
 # @@protoc_insertion_point(module_scope)
