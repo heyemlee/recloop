@@ -142,7 +142,10 @@ changes, cached in Redis) and its simulated A/B test.
 
 ## Run
 
-Needs Docker, Go, Node and [uv](https://docs.astral.sh/uv/).
+Needs Docker, Go, Node and [uv](https://docs.astral.sh/uv/). Built and measured on one Mac
+(Apple M4 Pro, 12 CPUs, 24 GB); CI runs the lint and the tests on Linux (Ubuntu 24.04), the Go
+integration tests against PostgreSQL + pgvector and Redis. MiniOneRec's generation needs Apple
+Silicon (MPS).
 
 ```
 make setup        # the stack (PostgreSQL, Redis, Redpanda, consumers, monitoring), data, catalog,
