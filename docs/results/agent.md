@@ -22,11 +22,17 @@ Hard constraints are price, stock and category (design §10.3); 'all' adds brand
 | oracle-bm25 | 428 | 100.0% | 100.0% | 100.0% | 100.0% | 100.0% | 0.00 | $0.0000 |
 | oracle-vector | 428 | 100.0% | 100.0% | 100.0% | 100.0% | 100.0% | 0.00 | $0.0000 |
 | oracle-noprefix | 428 | 100.0% | 100.0% | 100.0% | 100.0% | 100.0% | 0.00 | $0.0000 |
-| claude-opus-5-5 (×3) | not run |  |  |  |  |  |  |  |
-| claude-sonnet-5-5 (×3) | not run |  |  |  |  |  |  |  |
-| claude-haiku-5-5 (×3) | not run |  |  |  |  |  |  |  |
+| llm-claude-haiku-5-5-r1 | 428 | 100.0% | 100.0% | 100.0% | 97.3% | 97.3% | 1.99 | $0.0003 |
+| llm-claude-haiku-5-5-r2 | 428 | 100.0% | 100.0% | 100.0% | 98.0% | 98.0% | 1.99 | $0.0003 |
+| llm-claude-haiku-5-5-r3 | 428 | 100.0% | 100.0% | 100.0% | 98.0% | 98.0% | 1.99 | $0.0003 |
+| llm-claude-opus-5-5-r1 | 428 | 100.0% | 100.0% | 100.0% | 98.0% | 98.0% | 1.99 | $0.0100 |
+| llm-claude-opus-5-5-r2 | 428 | 100.0% | 100.0% | 100.0% | 98.0% | 98.0% | 1.99 | $0.0100 |
+| llm-claude-opus-5-5-r3 | 428 | 100.0% | 100.0% | 100.0% | 98.0% | 98.0% | 1.99 | $0.0100 |
+| llm-claude-sonnet-5-5-r1 | 428 | 100.0% | 100.0% | 100.0% | 98.0% | 98.0% | 1.99 | $0.0055 |
+| llm-claude-sonnet-5-5-r2 | 428 | 100.0% | 100.0% | 100.0% | 98.0% | 98.0% | 1.99 | $0.0054 |
+| llm-claude-sonnet-5-5-r3 | 428 | 100.0% | 100.0% | 100.0% | 98.0% | 98.0% | 1.99 | $0.0054 |
 
-Language-model agents (Opus 5.5 default; Sonnet 5.5 and Haiku 5.5 to compare; 3 runs each) have not been run: they need an API key and a spending cap.
+Language-model agents (`llm-<model>-r<run>`, 3 runs each, `make agent-eval-llm`): Claude parses the message (structured outputs, effort low), judges device compatibility only when the code confirmed fewer items than the reply shows, and writes the reasons; search, the checks and the rendering are the same code as the other agents'. Opus 5.5 is the default; Sonnet 5.5 and Haiku 5.5 compare.
 
 ## By template
 
@@ -102,7 +108,26 @@ Relevance beyond the constraints (is it the right kind of gel pen?) needs graded
 
 ## Relevance (language-model judge)
 
-Not run yet. `agent/eval/judge.py` grades each shown item 0 / 1 / 2 with Claude Sonnet 5.5 (`agent.eval.run --judge`, part of `make agent-eval-llm`); 50 cases (fixed seed) go to a person for the same grades, and the report gets exact agreement and Cohen's kappa.
+Graded by claude-sonnet-5-5: 167 calls, $0.97. Each (message, item) pair is graded once and shared by every agent that showed the item: 2 = what was asked for, 1 = acceptable, 0 = does not fit.
+
+| agent | items shown | graded | mean grade | graded 2 | graded 0 |
+|---|---|---|---|---|---|
+| baseline | 428 | 100.0% | 1.34 | 57.7% | 23.4% |
+| oracle | 428 | 100.0% | 1.48 | 61.9% | 13.8% |
+| oracle-bm25 | 428 | 100.0% | 1.46 | 60.7% | 14.7% |
+| oracle-vector | 428 | 100.0% | 1.50 | 63.1% | 12.9% |
+| oracle-noprefix | 428 | 100.0% | 1.47 | 61.4% | 14.0% |
+| llm-claude-haiku-5-5-r1 | 428 | 100.0% | 1.65 | 71.3% | 6.3% |
+| llm-claude-haiku-5-5-r2 | 428 | 100.0% | 1.64 | 71.0% | 6.5% |
+| llm-claude-haiku-5-5-r3 | 428 | 100.0% | 1.64 | 71.0% | 6.5% |
+| llm-claude-opus-5-5-r1 | 428 | 100.0% | 1.67 | 72.9% | 6.3% |
+| llm-claude-opus-5-5-r2 | 428 | 100.0% | 1.66 | 72.4% | 6.3% |
+| llm-claude-opus-5-5-r3 | 428 | 100.0% | 1.66 | 72.7% | 6.5% |
+| llm-claude-sonnet-5-5-r1 | 428 | 100.0% | 1.66 | 72.4% | 6.1% |
+| llm-claude-sonnet-5-5-r2 | 428 | 100.0% | 1.66 | 72.0% | 6.3% |
+| llm-claude-sonnet-5-5-r3 | 428 | 100.0% | 1.66 | 72.2% | 6.3% |
+
+Human check: not done yet (`judge.review_sample` writes 50 cases for a person, `judge.agreement` gives exact agreement and Cohen's kappa).
 
 ## Latency (this machine, varies between runs)
 
@@ -117,6 +142,15 @@ Wall time of a turn in the evaluation process: parsing, tools against the local 
 | oracle-bm25 | 2.3 ms | 4.6 ms | 0.0 ms | 1.4 ms | 0.6 ms | 0.0 ms |
 | oracle-vector | 10 ms | 13 ms | 0.0 ms | 9.5 ms | 0.7 ms | 0.0 ms |
 | oracle-noprefix | 9.9 ms | 12 ms | 0.0 ms | 9.0 ms | 0.6 ms | 0.0 ms |
+| llm-claude-haiku-5-5-r1 | 2157 ms | 3670 ms | 816 ms | 27 ms | 1.5 ms | 0.0 ms |
+| llm-claude-haiku-5-5-r2 | 2173 ms | 2761 ms | 822 ms | 26 ms | 1.4 ms | 0.0 ms |
+| llm-claude-haiku-5-5-r3 | 2193 ms | 3718 ms | 823 ms | 28 ms | 1.5 ms | 0.0 ms |
+| llm-claude-opus-5-5-r1 | 4476 ms | 8163 ms | 1546 ms | 29 ms | 1.4 ms | 0.0 ms |
+| llm-claude-opus-5-5-r2 | 4420 ms | 8240 ms | 1509 ms | 31 ms | 1.4 ms | 0.0 ms |
+| llm-claude-opus-5-5-r3 | 4481 ms | 8290 ms | 1723 ms | 32 ms | 1.5 ms | 0.0 ms |
+| llm-claude-sonnet-5-5-r1 | 3660 ms | 6625 ms | 1175 ms | 31 ms | 1.5 ms | 0.0 ms |
+| llm-claude-sonnet-5-5-r2 | 3737 ms | 6923 ms | 1180 ms | 28 ms | 1.5 ms | 0.0 ms |
+| llm-claude-sonnet-5-5-r3 | 3619 ms | 6728 ms | 1161 ms | 30 ms | 1.7 ms | 0.0 ms |
 
 ## Chat path (/v1/chat)
 
@@ -152,11 +186,9 @@ Cost per reply. The rules parser calls no model; with a language model the reply
 | parser | LLM calls / reply | input tokens / reply | output tokens / reply | cost / reply | model time P50 |
 |---|---|---|---|---|---|
 | `rules` (measured above) | 0 | 0 | 0 | $0 | – |
-| claude-opus-5-5 | not run |  |  |  |  |
-| claude-sonnet-5-5 | not run |  |  |  |  |
-| claude-haiku-5-5 | not run |  |  |  |  |
-
-Not run: the Claude rows need the user's `ANTHROPIC_API_KEY` in `.env`. The plan (design §19, 2026-11-08): Opus 5.5 by default, Sonnet 5.5 and Haiku 5.5 to compare, effort low; a smoke run capped at $1 (`make agent-eval-llm-smoke`), then the full run capped at $60 in total and per run at Opus $12, Sonnet $6, Haiku $1 (`make agent-eval-llm`), relevance graded by Sonnet 5.5.
+| claude-opus-5-5 (offline evaluation, 3 runs) | 1.99 | 4,832 | 296 | $0.0100 | 4436 ms |
+| claude-sonnet-5-5 (offline evaluation, 3 runs) | 1.99 | 4,830 | 295 | $0.0054 | 3636 ms |
+| claude-haiku-5-5 (offline evaluation, 3 runs) | 1.99 | 4,831 | 335 | $0.0003 | 2147 ms |
 
 ## Prices used for costs
 

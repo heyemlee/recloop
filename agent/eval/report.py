@@ -234,16 +234,26 @@ def render(runs: list[dict[str, Any]]) -> str:
         part = " (partial)" if r.get("partial") else ""
         rows.append([f"{r['agent']}{part}", str(s["shown"]), pct(s["hard"]), pct(s["all"]), pct(s["success"]),
                      pct(s["parse"]), pct(s["tools"]), f"{s['llm_calls']:.2f}", _usd(s["cost"])])  # fmt: skip
-    for m in PLANNED_MODELS:
-        if not any(r["spec"].get("model") == m for r in runs):
-            rows.append([f"{m} (×3)", "not run", "", "", "", "", "", "", ""])
+    missing = [m for m in PLANNED_MODELS if not any(r["spec"].get("model") == m for r in runs)]
+    for m in missing:
+        rows.append([f"{m} (×3)", "not run", "", "", "", "", "", "", ""])
     lines += _table(header, rows)
-    lines += [
-        "",
-        "Language-model agents (Opus 5.5 default; Sonnet 5.5 and Haiku 5.5 to compare; 3 runs "
-        "each) have not been run: they need an API key and a spending cap.",
-        "",
-    ]
+    if missing:
+        lines += [
+            "",
+            "Language-model agents (Opus 5.5 default; Sonnet 5.5 and Haiku 5.5 to compare; 3 runs "
+            f"each): {', '.join(missing)} not run yet; they need an API key and a spending cap.",
+        ]
+    else:
+        lines += [
+            "",
+            "Language-model agents (`llm-<model>-r<run>`, 3 runs each, `make agent-eval-llm`): "
+            "Claude parses the message (structured outputs, effort low), judges device "
+            "compatibility only when the code confirmed fewer items than the reply shows, and "
+            "writes the reasons; search, the checks and the rendering are the same code as the "
+            "other agents'. Opus 5.5 is the default; Sonnet 5.5 and Haiku 5.5 compare.",
+        ]
+    lines += [""]
 
     base, oracle = by_name.get("baseline"), by_name.get("oracle")
     if base and oracle:

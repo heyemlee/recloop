@@ -131,7 +131,7 @@ def main() -> None:
         from agent.eval import judge
         from agent.llm import ClaudeLLM
 
-        runs = [json.loads(f.read_text()) for f in sorted(runs_dir.glob("*.json"))]
+        runs = report.load_runs(runs_dir)  # the run files, not machine.json
         grades = judge.grade_runs(
             judge.ClaudeJudge(ClaudeLLM(args.judge)),
             runs,
