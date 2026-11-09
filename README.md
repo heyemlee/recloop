@@ -13,6 +13,38 @@ The store with the debug panel on: every request shows its recall sources, fusio
 model version and experiment groups. Two dataset users get different feeds; after a click on a
 binder, the next feed includes items recalled via that binder (outlined in the GIF).
 
+Key numbers (one laptop, simulated traffic; each links to its report):
+
+- **600 requests/s** within the SLO (P99 ≤ 100 ms, at most 1 % degraded) with the ranker on the
+  request path; P99 6.0 ms at that rate ([latency](docs/results/latency.md)).
+- **487 of 487** sponsored-click charges equal the simulator's truth after a 30-minute chaos
+  drill with 8 × `kill -9` of billing and 3 broker restarts ([billing](docs/results/billing.md)).
+- **NDCG@10 0.137** for the LightGBM ranker, against 0.119 for the fusion it reorders and 0.122
+  for SASRec alone, on the published test split ([offline](docs/results/offline.md)).
+- **1 of 67,482** requests failed during three rolling updates of the model server on
+  Kubernetes ([deploy](docs/results/deploy.md)).
+
+```mermaid
+flowchart LR
+  web["Next.js store<br/>debug panel, advertiser console, admin, chat"] -->|"/api/v1"| api
+  web -->|"/api/v1/chat"| agent["shopping assistant<br/>FastAPI, Claude"]
+  agent -->|"recommendations, sponsored item"| api
+  agent --> pg
+  api["Go api<br/>recall, fusion, filters, ad auction"] -->|"gRPC Retrieve, Rank"| ms["model server<br/>SASRec (ONNX) + FAISS,<br/>LightGBM, pCTR"]
+  api --> rs[("Redis: state<br/>user context, caps, spend")]
+  api --> rc[("Redis: cache<br/>pages, candidates")]
+  api --> pg[("PostgreSQL + pgvector<br/>catalog, campaigns, ledger")]
+  api -->|"events, served log"| rp[["Redpanda"]]
+  rp --> agg["aggregator"] --> rs
+  rp --> sink["log-sink"] --> pg
+  rp --> bill["billing"] --> pg
+  bill --> rs
+  pg -.->|"event log"| spark["Spark sample job"] -.-> ml["training: ml/"] -.->|"versioned bundle"| ms
+```
+
+The design, its decisions and the experiments: [docs/architecture.md](docs/architecture.md),
+[ADRs](docs/adr/) and [results](docs/results/).
+
 **Status: work in progress.** Milestones M0 to M5 are done:
 
 - a reproducible data pipeline, the catalog in PostgreSQL, and offline evaluation of Pop,
