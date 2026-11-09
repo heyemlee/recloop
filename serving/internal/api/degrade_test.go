@@ -212,6 +212,11 @@ func TestBreakerOpensAfterModelFailures(t *testing.T) {
 	model.fail.Store(true)
 	s := memServer(t, rdb, model, false)
 	s.Cands = nil
+	// Every call has to reach the model. A user-context read slower than its 5 ms (a busy CI
+	// runner) skips SASRec and breaks the count, so this test gives that stage more room: it
+	// tests the breaker, not Redis's timing.
+	s.Plan.Total += 100 * time.Millisecond
+	s.Plan.UserContext += 100 * time.Millisecond
 	seedHistory(t, rdb, 5)
 	// The default breaker opens after 10 failures in a row (or half of >= 20 calls in 10 s).
 	for i := 0; i < int(resilience.DefaultBreaker.Consecutive); i++ {
