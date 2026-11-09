@@ -332,7 +332,9 @@ class Worker:
         t_setup = time.monotonic()
         gen = GeneratorProcess(cmd, self.out / "generator.log")
         setup_seconds = time.monotonic() - t_setup
-        sampler = footprint.Sampler(gen.proc.pid, interval=1.0).start()
+        # The generator's own pid (the command may start it through `uv run`, a parent process
+        # that holds none of the model's memory).
+        sampler = footprint.Sampler(gen.ready.get("pid", gen.proc.pid), interval=1.0).start()
         self.version = gen.ready["version"]
         info = {"version": self.version, "pid": os.getpid(), "started": started}
         threads = [

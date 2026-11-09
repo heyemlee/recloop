@@ -3,7 +3,8 @@
 ml.nearline.worker starts this process (minionerec environment: the pinned torch and
 transformers) and talks JSON lines over stdin / stdout; logs go to stderr.
 
-  first line out: {"ready": true, "version": ..., "settings": {...}, "device": "mps", "setup_seconds": ...}
+  first line out: {"ready": true, "pid": ..., "version": ..., "settings": {...}, "device": "mps",
+                  "setup_seconds": ...}
   in:  {"id": 7, "histories": [["<a_1><b_2><c_3>", ...], ...]}      SID histories, oldest first
   out: {"id": 7, "sids": [[num_beams SIDs, best first], ...], "scores": [[...]], "seconds": 1.9,
         "batches": [{"size": 8, "seconds": 1.9, "mps_driver_allocated": ...}]}
@@ -20,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -91,7 +93,12 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--dtype", default="bfloat16", choices=generate.DTYPES)
     ap.add_argument("--per-beam", action="store_true", help="the unchanged first pass")
     ap.add_argument("--mps-memory-gb", type=float, default=8.0, help="0: no cap")
-    ap.add_argument("--base-model", type=Path, default=paths.HF_CKPT)
+    ap.add_argument(
+        "--base-model", type=Path, default=paths.HF_CKPT, help="model directory (tests only)"
+    )
+    ap.add_argument(
+        "--device", choices=("mps", "cpu"), default=None, help="default: mps when available"
+    )
     args = ap.parse_args(argv)
 
     import torch
@@ -101,7 +108,11 @@ def main(argv: list[str] | None = None) -> None:
         num_beams=args.num_beams,
         dtype=args.dtype,
         prefill_once=not args.per_beam,
+        device=args.device,
     )
+    ver = version(args.num_beams, not args.per_beam)
+    if args.base_model != paths.HF_CKPT:
+        ver += "-test"  # never mistaken for the checkpoint's results
     cap = None
     if gen.device == "mps" and args.mps_memory_gb > 0:
         limit = torch.mps.recommended_max_memory()
@@ -111,7 +122,8 @@ def main(argv: list[str] | None = None) -> None:
     _send(
         {
             "ready": True,
-            "version": version(args.num_beams, not args.per_beam),
+            "pid": os.getpid(),
+            "version": ver,
             "settings": {**gen.settings(), "max_batch": args.max_batch},
             "device": gen.device,
             "setup_seconds": gen.setup_seconds,

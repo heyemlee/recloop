@@ -100,3 +100,31 @@ def test_prompts_from_sid_lists_match_the_csv_path(tiny_model, subset_csv):  # n
     histories = [ast.literal_eval(h) for h in pd.read_csv(subset_csv).history_item_sid.tolist()]
     from_lists = [e["input_ids"] for e in gen.encode_histories(histories)]
     assert from_lists == from_csv
+
+
+def test_serve_gen_answers_over_the_pipe(tiny_model, subset_csv):  # noqa: F811
+    import subprocess
+    import sys
+
+    histories = [ast.literal_eval(h) for h in pd.read_csv(subset_csv).history_item_sid.tolist()[:3]]
+    cmd = [sys.executable, "-m", "minionerec.serve_gen", "--base-model", str(tiny_model)]
+    cmd += ["--device", "cpu", "--dtype", "float32", "--num-beams", "4", "--max-batch", "1"]
+    proc = subprocess.Popen(
+        cmd, cwd=paths.ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True
+    )
+    try:
+        ready = json.loads(proc.stdout.readline())
+        assert ready["ready"] and ready["device"] == "cpu" and ready["pid"] == proc.pid
+        assert ready["version"].endswith("-b4-test")  # not the checkpoint's version
+        proc.stdin.write(json.dumps({"id": 3, "histories": histories}) + "\n")
+        proc.stdin.flush()
+        reply = json.loads(proc.stdout.readline())
+    finally:
+        proc.stdin.close()
+        proc.wait(timeout=60)
+    assert reply["id"] == 3 and "error" not in reply
+    assert [len(s) for s in reply["sids"]] == [4, 4, 4]
+    assert [b["size"] for b in reply["batches"]] == [1, 1, 1]
+    once = engine.Generator(tiny_model, num_beams=4, dtype="float32", device="cpu")
+    want = [once.generate_encoded(once.encode_histories([h])).sids[0] for h in histories]
+    assert reply["sids"] == want  # request order kept after the length sort
