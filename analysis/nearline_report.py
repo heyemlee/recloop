@@ -21,6 +21,7 @@ Usage: python -m analysis.nearline_report
 
 from __future__ import annotations
 
+import argparse
 import json
 from collections import Counter
 from pathlib import Path
@@ -291,6 +292,11 @@ def _dist(p: dict, unit: str = "s") -> str:
     )
 
 
+def _cap(worker: dict) -> str:
+    cap = (worker.get("generator") or {}).get("mps_cap")
+    return f"MPS capped at {cap['gb']:g} GB" if cap else "no MPS cap"
+
+
 def render(run: dict, worker: dict, res: dict) -> str:
     exp = run["experiment"]
     L = [
@@ -424,13 +430,11 @@ def render(run: dict, worker: dict, res: dict) -> str:
         "",
         "## Worker",
         "",
-        f"- {worker['generated_users']:,} users generated in {worker['batches']:,} rounds, "
+        f"- {worker['generated_users']:,} users generated in {worker['batches']:,} batches, "
         f"{_s(worker['seconds_per_user'] or float('nan'), 2)} s per user of generation; generator "
-        f"setup {worker['generator_setup_seconds']:.0f} s; peak footprint "
-        f"{worker['memory']['lifetime_max_footprint'] / 2**30:.1f} GiB (MPS cap "
-        f"{worker['settings']['mps_memory_gb']:.0f} GB); job statuses: "
-        + ", ".join(f"{k} {v:,}" for k, v in f["job_statuses"].items())
-        + ".",
+        f"setup {worker['generator_setup_seconds']:.0f} s; peak footprint of the generator "
+        f"{worker['memory']['lifetime_max_footprint'] / 2**30:.1f} GiB ({_cap(worker)}); job "
+        "statuses: " + ", ".join(f"{k} {v:,}" for k, v in f["job_statuses"].items()) + ".",
         f"- 1-minute load {worker['loadavg_start'][0]:.1f} at the start, {worker['loadavg_end'][0]:.1f} "
         f"at the end; swapped out while it ran: {_gib(worker.get('swapped_out_bytes'))}.",
         "",
@@ -487,11 +491,16 @@ def build(ab_dir: Path = AB, impressions: Path = IMPRESSIONS) -> tuple[dict, dic
     return run, worker, res
 
 
-def main() -> None:
-    run, worker, res = build()
-    OUT.write_text(render(run, worker, res))
-    (AB / "report.json").write_text(json.dumps(res, indent=2, default=str) + "\n")
-    print(f"wrote {OUT.relative_to(ROOT)}")
+def main(argv: list[str] | None = None) -> None:
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument("--ab", type=Path, default=AB, help="the A/B run (default: %(default)s)")
+    p.add_argument("--impressions", type=Path, default=IMPRESSIONS)
+    p.add_argument("--out", type=Path, default=OUT, help="the report (default: %(default)s)")
+    args = p.parse_args(argv)
+    run, worker, res = build(args.ab, args.impressions)
+    args.out.write_text(render(run, worker, res))
+    (args.ab / "report.json").write_text(json.dumps(res, indent=2, default=str) + "\n")
+    print(f"wrote {args.out}")
 
 
 if __name__ == "__main__":
