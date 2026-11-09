@@ -25,7 +25,9 @@ write-ups in `docs/results/`.
   agent-latency` adds its chat-path section; `make release-drill` writes `release.md`, `make
   release-report` re-renders it from `artifacts/release/drill.json`; `make ab-report` writes
   `ab.md` from `artifacts/ab/` and the sample job's impressions; `make pctr-report` writes
-  `pctr.md` from `artifacts/models/pctr/eval/`); change the generator, not the file. The committed `offline.md` is `make setup`, then `make paper-sasrec`,
+  `pctr.md` from `artifacts/models/pctr/eval/`; `make deploy-runs` and `make deploy-drill` write
+  `deploy.md`, `make deploy-report` re-renders it from `artifacts/deploy/`); change the
+  generator, not the file. The committed `offline.md` is `make setup`, then `make paper-sasrec`,
   then `make eval` (`make setup` includes `make train-ranker`). `make eval` re-runs give the same
   bytes; `make train` runs on the CPU with fixed seeds, and two runs with the same worker / thread
   counts gave identical weights; `make train-ranker` (one thread) gives the same model. The committed

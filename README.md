@@ -13,7 +13,7 @@ The store with the debug panel on: every request shows its recall sources, fusio
 model version and experiment groups. Two dataset users get different feeds; after a click on a
 binder, the next feed includes items recalled via that binder (outlined in the GIF).
 
-**Status: work in progress.** Milestones M0 to M4 are done:
+**Status: work in progress.** Milestones M0 to M5 are done:
 
 - a reproducible data pipeline, the catalog in PostgreSQL, and offline evaluation of Pop,
   ItemCF and SASRec with bootstrap intervals and a comparison with the published SASRec
@@ -31,10 +31,13 @@ binder, the next feed includes items recalled via that binder (outlined in the G
   with duplicate deliveries, `kill -9` of the consumers and a broker restart ends with every
   event applied exactly once. A traffic simulator drives the load tests and an SRM check of the
   experiment split. Prometheus, Grafana and OpenTelemetry traces (Jaeger) show it per stage.
-  On a laptop (8-vCPU Docker VM, api and model server limited to 2 CPUs each) every run met
-  the SLO (P99 ≤ 100 ms, at most 1 % degraded) up to 1,200 requests/s, and the median P99 stays
-  under 10 ms up to 1,500/s, the top of the test ladder; with the model server disconnected the
-  API still answers every request (degraded), where the naive version fails 83 % of them
+  On a laptop (8-vCPU Docker VM, api and model server limited to 2 CPUs each), with M4's
+  ranker called on every candidate-cache miss, every run met the SLO (P99 ≤ 100 ms, at most
+  1 % degraded) up to 600 requests/s. From 1,000/s on, a run that starts with an empty cache
+  never fills it: the misses' calls queue at the model server past their deadlines, its
+  breakers keep reopening, and a degraded list is not cached. With the cache filled first,
+  1,000/s met the SLO in 2 of 3 runs. With the model server disconnected the API still answers
+  every request (degraded), where the naive version fails all of them
   ([results](docs/results/latency.md),
   [ADR-0003](docs/adr/0003-when-to-add-a-message-queue.md)).
 - sponsored products and billing: slots 3 and 9 of the home feed go to a second-price (GSP)
@@ -54,12 +57,24 @@ binder, the next feed includes items recalled via that binder (outlined in the G
   the validation split with features the dataset period has (click rates from the logs would
   leak the simulator's test targets), beats RRF offline: NDCG@10 +0.0186 [+0.0144, +0.0233],
   all of it on targets reviewed the same day as the last history item. Sponsored slots get a
-  pCTR from a logistic regression on samples that Spark joins from the event log. A model
+  pCTR from a logistic regression on samples that Spark joins from the event log. The item's
+  click rate over the last hour and day, counted once per event from the stream and logged
+  with each impression (equal to Spark's recount for all 276,510 impressions of a check run),
+  adds AUC +0.005 [+0.001, +0.010] on simulated traffic ([pCTR](docs/results/pctr.md)). A model
   bundle goes live through validation, a 5 % canary with guardrails and a full rollout, and a
   rollback switches a pointer back; under simulated traffic every switch took effect within
   0.07 s. The A/A test passes, and the ranker's CTR change on simulated traffic, +0.0001
   [−0.0005, +0.0006], is not significant: the simulator clicks by text relevance and has no
   same-day effect ([release](docs/results/release.md), [A/B](docs/results/ab.md)).
+- a local Kubernetes deployment: one kind node, the infrastructure from official charts
+  (CloudNativePG, Redpanda, KEDA, metrics-server, kube-prometheus-stack) and Helm charts for
+  RecLoop's services, with images built locally and loaded into the node. Under 150 page
+  views/s, three rolling updates of the model server kept at least 2 pods ready and failed 1 of
+  67,482 requests; a bundle that fails its golden queries never becomes ready and its rollout
+  is undone. The api's autoscaler had a new pod ready 46 s after a step from 100 to 500 page
+  views/s, KEDA scaled billing on its consumer lag, and a 30-minute billing drill with
+  billing's pod deleted 8 times and Redpanda's 3 times left the ledger equal to the truth
+  charge by charge ([results](docs/results/deploy.md)).
 
 Ahead of M4, an ANN benchmark compares exact search with IVF, HNSW and IVF-PQ on synthetic
 catalogs of up to 1M items, and studies incremental index updates against full rebuilds. Exact
@@ -87,7 +102,8 @@ gold constraints reach 100 %, so the misses are parsing errors; a reply takes 15
 without a model. The runs with Claude (Opus 5.5 by default, against Sonnet 5.5 and Haiku 5.5)
 wait for an API key ([results](docs/results/agent.md)).
 
-Next up: a local Kubernetes deployment (M5).
+Next up: MiniOneRec as a fourth, near-line recall source (generated when a user's history
+changes, cached in Redis) and its simulated A/B test.
 
 ## Run
 
@@ -106,6 +122,8 @@ make load         # latency experiments on CPU-limited containers -> docs/result
 make billing      # ad over-delivery study + billing chaos drill -> docs/results/billing.md
 make release-drill  # canary, full rollout and rollback under traffic -> docs/results/release.md
 make ab           # A/A + A/B of the ranker on simulated traffic -> docs/results/ab.md
+make kind-up      # a one-node kind cluster with the services (Helm charts; compose stopped)
+make deploy-runs  # rolling updates, HPA and KEDA on the cluster -> docs/results/deploy.md
 ```
 
 Grafana (dashboard "RecLoop") is at http://localhost:13001, Jaeger at http://localhost:16686,
