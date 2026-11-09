@@ -39,6 +39,7 @@ flowchart LR
   rp --> sink["log-sink"] --> pg
   rp --> bill["billing"] --> pg
   bill --> rs
+  rs -.->|"history changes"| gen["near-line worker<br/>MiniOneRec on the GPU"] -.->|"generated items"| rs
   pg -.->|"event log"| spark["Spark sample job"] -.-> ml["training: ml/"] -.->|"versioned bundle"| ms
 ```
 
