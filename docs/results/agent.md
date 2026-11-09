@@ -32,7 +32,7 @@ Hard constraints are price, stock and category (design §10.3); 'all' adds brand
 | llm-claude-sonnet-5-5-r2 | 428 | 100.0% | 100.0% | 100.0% | 98.0% | 98.0% | 1.99 | $0.0054 |
 | llm-claude-sonnet-5-5-r3 | 428 | 100.0% | 100.0% | 100.0% | 98.0% | 98.0% | 1.99 | $0.0054 |
 
-Language-model agents (Opus 5.5 default; Sonnet 5.5 and Haiku 5.5 to compare; 3 runs each) have not been run: they need an API key and a spending cap.
+Language-model agents (`llm-<model>-r<run>`, 3 runs each, `make agent-eval-llm`): Claude parses the message (structured outputs, effort low), judges device compatibility only when the code confirmed fewer items than the reply shows, and writes the reasons; search, the checks and the rendering are the same code as the other agents'. Opus 5.5 is the default; Sonnet 5.5 and Haiku 5.5 compare.
 
 ## By template
 
