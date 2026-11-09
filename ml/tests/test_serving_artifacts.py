@@ -89,15 +89,19 @@ def test_bundle_manifest_and_tables():
         "itemcf.json",
         "pop.json",
         "golden.json",
-        "features.json",  # M4: the ranking features' item tables
     }
-    if "ranker" in m["ranking"]:
+    # M4 bundles carry the ranking features' item tables (and the ranker when it was trained);
+    # a bundle built before M4 has no "ranking" section and still serves (RRF order).
+    ranking = m.get("ranking", {})
+    if ranking:
+        expected |= {"features.json"}
+    if "ranker" in ranking:
         expected |= {"ranker.onnx", "ranker.txt", "rank_golden.json"}
     if "pctr" in m:
         expected |= {"pctr.json"}
     assert set(m["files"]) == expected
-    if "ranker" in m["ranking"]:
-        assert m["ranking"]["ranker"]["onnx_max_abs_diff"] < build.RANKER_TOLERANCE
+    if "ranker" in ranking:
+        assert ranking["ranker"]["onnx_max_abs_diff"] < build.RANKER_TOLERANCE
     for name, f in m["files"].items():
         assert sha256_file(BUNDLE / name) == f["sha256"], name
     assert m["num_items"] == 3459 and m["index"]["ntotal"] == 3459
