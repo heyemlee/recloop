@@ -1,0 +1,62 @@
+{{- if .Values.monitoring.enabled }}
+{{- /* Scrapes of compose's deploy/prometheus/prometheus.yml as ServiceMonitors; the job label
+       is the Service name (api, model-server, aggregator, billing, log-sink), as in compose. */ -}}
+{{- $targets := list
+  (dict "name" "api" "port" "http")
+  (dict "name" "model-server" "port" "admin")
+  (dict "name" "aggregator" "port" "metrics")
+  (dict "name" "billing" "port" "metrics")
+  (dict "name" "log-sink" "port" "http")
+-}}
+{{- range $i, $t := $targets }}
+{{- $ctx := dict "root" $ "name" $t.name -}}
+{{- if $i }}
+---
+{{- end }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ $t.name }}
+  labels:
+    {{- include "recloop.labels" $ctx | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "recloop.selector" $ctx | nindent 6 }}
+  endpoints:
+    - port: {{ $t.port }}
+      path: /metrics
+      interval: {{ $.Values.monitoring.interval }}
+{{- end }}
+{{- end }}
+{{- if .Values.grafana.dashboard }}
+---
+# compose's Grafana dashboard ("RecLoop"); kube-prometheus-stack's Grafana sidecar loads every
+# ConfigMap labelled grafana_dashboard=1. Its panels use the datasource uid "prometheus", the
+# uid of the stack's default datasource too.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: recloop-dashboard
+  labels:
+    {{- include "recloop.labels" (dict "root" . "name" "dashboard") | nindent 4 }}
+    grafana_dashboard: "1"
+data:
+  recloop.json: |-
+    {{- .Values.grafana.dashboard | nindent 4 }}
+{{- end }}
+{{- if .Values.grafana.alerts }}
+---
+# compose's Grafana alert rules (the Redis alerts: evictions, refused writes, memory, stalled
+# reconciliation), loaded by the Grafana sidecar from ConfigMaps labelled grafana_alert=1.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: recloop-alerts
+  labels:
+    {{- include "recloop.labels" (dict "root" . "name" "alerts") | nindent 4 }}
+    grafana_alert: "1"
+data:
+  recloop-alerts.yaml: |-
+    {{- .Values.grafana.alerts | nindent 4 }}
+{{- end }}

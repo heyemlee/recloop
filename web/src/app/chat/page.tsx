@@ -145,6 +145,20 @@ export default function ChatPage() {
     router.push(`/items/${card.item_id}`);
   }
 
+  // Built without an assistant (the Kubernetes image, next.config.ts): say so instead of
+  // sending messages that cannot be answered.
+  if (process.env.NEXT_PUBLIC_CHAT_BACKEND === "off") {
+    return (
+      <main className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-4 px-4 py-6">
+        <h1 className="text-2xl font-semibold tracking-tight">Shopping assistant</h1>
+        <p className="text-sm text-muted-foreground" data-testid="chat-unavailable">
+          The shopping assistant is not part of this deployment. It runs with the local compose setup;
+          this store runs on the Kubernetes deployment, which has the recommendation services only.
+        </p>
+      </main>
+    );
+  }
+
   return (
     <main className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-4 px-4 py-6">
       <div>

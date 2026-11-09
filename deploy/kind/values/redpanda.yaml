@@ -1,0 +1,127 @@
+# Redpanda (official chart, versions.lock) for the kind cluster: one broker, sized like the
+# compose service (deploy/docker-compose.yml: 1 CPU, 1 GiB). Release "redpanda" in namespace
+# "redpanda"; in-cluster clients use redpanda.redpanda.svc.cluster.local:9093, processes on the
+# host localhost:31092 (NodePort, mapped by deploy/kind/cluster.yaml).
+image:
+  # The image compose runs (Docker Hub), at the chart's appVersion.
+  repository: redpandadata/redpanda
+  tag: v26.2.6
+
+statefulset:
+  replicas: 1
+  # No sidecar: the config / rpk-profile watchers manage SASL users and cluster config changes,
+  # neither of which this cluster has (one broker, no auth); it would be one more image and
+  # ~100 MB.
+  sideCars:
+    configWatcher:
+      enabled: false
+    rpkProfileWatcher:
+      enabled: false
+  # A thread-per-core broker sharing one node with everything else: no busy polling or CPU
+  # pinning (compose runs --mode=dev-container, which implies it). Unlike compose, fsync stays
+  # on: the drill restarts the broker by deleting its pod.
+  additionalRedpandaCmdFlags:
+    - --overprovisioned
+  podTemplate:
+    spec:
+      terminationGracePeriodSeconds: 30
+      # Merged by name into the chart's containers (README, "Merging Semantics"): the sidecar
+      # only runs the broker readiness probe now, the configurator is a short init step. The
+      # sidecar (the operator binary) was OOM-killed at 128 Mi while starting.
+      containers:
+        - name: sidecar
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: 200m, memory: 384Mi}
+      initContainers:
+        - name: redpanda-configurator
+          resources:
+            requests: {cpu: 100m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+
+resources:
+  # requests / limits mode: --smp 1, --memory = 90 % of the memory request.
+  requests:
+    cpu: "1"
+    memory: 1Gi
+  limits:
+    cpu: "1"
+    memory: 1280Mi
+
+# Raises fs.aio-max-nr from a privileged init container, a setting of the Docker VM's kernel,
+# not of the node: not needed for one core (compose runs without it).
+tuning:
+  tune_aio_events: false
+
+storage:
+  persistentVolume:
+    enabled: true
+    size: 4Gi
+
+# No cert-manager, no auth: plaintext listeners, as in compose.
+tls:
+  enabled: false
+
+external:
+  enabled: true
+  type: NodePort
+  # The address the external listener advertises: the host reaches the NodePort through the
+  # kind port mapping on 127.0.0.1.
+  addresses:
+    - localhost
+
+listeners:
+  kafka:
+    external:
+      default:
+        port: 9094
+        advertisedPorts:
+          - 31092
+        tls:
+          enabled: false
+  admin:
+    external:
+      default:
+        enabled: false
+  # Not used by RecLoop (and their NodePorts would take 30081 / 30082).
+  schemaRegistry:
+    enabled: false
+    external:
+      default:
+        enabled: false
+  http:
+    enabled: false
+    external:
+      default:
+        enabled: false
+
+config:
+  cluster:
+    # As compose's redpanda-init: a typo in a topic name fails instead of creating a topic; the
+    # recloop-infra chart creates `events` (6 partitions, 7 days).
+    auto_create_topics_enabled: false
+
+# The chart's own hook Job (applies the cluster config above after install / upgrade); merged
+# by container name, as above.
+post_install_job:
+  podTemplate:
+    spec:
+      containers:
+        - name: post-install
+          resources:
+            requests: {cpu: 100m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+
+console:
+  enabled: false
+
+logging:
+  usageStats:
+    enabled: false
+
+# A ServiceMonitor for kube-prometheus-stack (label release: kube-prometheus-stack).
+monitoring:
+  enabled: true
+  scrapeInterval: 10s
+  labels:
+    release: kube-prometheus-stack

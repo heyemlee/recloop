@@ -94,7 +94,9 @@ TOOL_PKGS := github.com/bufbuild/buf/cmd/buf google.golang.org/protobuf/cmd/prot
 	fmt sim-world sim srm drill load load-smoke latency-report billing overdelivery billing-drill \
 	billing-report minionerec-gen minionerec-cost minionerec agent-cases agent-eval agent-eval-llm \
 	agent-eval-llm-smoke serve-agent agent-latency train-ranker spark-image samples test-samples \
-	train-pctr pctr-report collect release-drill release-report ab ab-report clean-processed clean-artifacts
+	train-pctr pctr-report collect release-drill release-report ab ab-report clean-processed \
+	clean-artifacts kind-tools kind-up kind-images kind-data deploy kind-status deploy-runs \
+	deploy-rollout deploy-hpa deploy-keda deploy-drill deploy-report deploy-smoke kind-down lint-deploy
 
 help: ## List targets
 	@grep -E '^[a-z0-9-]+:.*## ' $(MAKEFILE_LIST) \
@@ -344,6 +346,74 @@ ab: sim-world build-aggregator ## A/A, then the A/B of the ranker (RRF vs LightG
 ab-report: ## docs/results/ab.md from artifacts/ab/run.json and the sample job's impressions
 	$(PY) -m analysis.ab_report
 
+# ---------------------------------------------------------------- M5: local Kubernetes (kind)
+
+# A one-node kind cluster in Docker Desktop's VM (deploy/kind, design §23.2): the infrastructure
+# from official charts, RecLoop's services from deploy/helm/recloop, reached from the host on
+# 127.0.0.1:30xxx (deploy/kind/cluster.yaml). The cluster needs the machine to itself: stop the
+# compose stack first (`make down`), Docker Desktop's VM needs about 8 GB for it.
+KIND_SH := deploy/kind/cluster.sh
+
+kind-tools: ## kind, kubectl, helm (pinned, sha256-checked: deploy/kind/versions.lock) -> .cache/bin
+	$(KIND_SH) tools
+
+kind-up: sim-world build-aggregator build-billing ## Cluster + infrastructure, RecLoop's images, data and services (~15 min)
+	$(KIND_SH) up
+	$(KIND_SH) images
+	$(KIND_SH) data
+	$(KIND_SH) deploy
+
+kind-images: ## Build RecLoop's images (compose's definitions + deploy/web.Dockerfile) and load them into the node
+	$(KIND_SH) images
+
+kind-data: ## Migrations, catalog, users and the Redis seed on the cluster (NodePorts)
+	$(KIND_SH) data
+
+deploy: kind-images ## helm upgrade --install RecLoop's chart with the freshly loaded images
+	$(KIND_SH) deploy
+
+kind-status: ## Pods, autoscalers and resource use on the cluster
+	$(KIND_SH) status
+
+# The runs: k6 and the checks on the host, against the cluster; artifacts/deploy/, then
+# docs/results/deploy.md. Measurements: idle machine and the coordinator's go-ahead.
+DEPLOY_FLAGS ?=
+deploy-runs: k6 sim-world build-aggregator ## Rolling update, HPA and KEDA runs (3 repeats each, ~90 min) -> deploy.md
+	$(PY) -m kube.run $(DEPLOY_FLAGS)
+	$(PY) -m kube.report
+
+deploy-rollout: k6 sim-world build-aggregator ## Model server rolling updates under load (gated / no probe / broken bundle)
+	$(PY) -m kube.run --only rollout $(DEPLOY_FLAGS)
+	$(PY) -m kube.report
+
+deploy-hpa: k6 sim-world build-aggregator ## The api's HPA under a step in load
+	$(PY) -m kube.run --only hpa $(DEPLOY_FLAGS)
+	$(PY) -m kube.report
+
+deploy-keda: k6 sim-world build-aggregator ## KEDA: billing behind a slow database, the aggregator after an outage
+	$(PY) -m kube.run --only keda $(DEPLOY_FLAGS)
+	$(PY) -m kube.report
+
+deploy-drill: sim-world build-aggregator build-billing ## The 30-minute billing drill with billing's pods deleted -> deploy.md
+	$(PY) -m kube.drill $(DEPLOY_DRILL_FLAGS)
+	$(PY) -m kube.report
+
+deploy-report: ## Re-render docs/results/deploy.md from artifacts/deploy/
+	$(PY) -m kube.report
+
+deploy-smoke: k6 sim-world build-aggregator build-billing ## One short run of each kind + a 5-min drill -> artifacts/deploy/smoke.md (trying the cluster out)
+	$(PY) -m kube.run --smoke $(DEPLOY_FLAGS)
+	$(PY) -m kube.drill --minutes 5 --out artifacts/deploy/drill-smoke
+	$(PY) -m kube.report --results artifacts/deploy/smoke.json \
+		--drill artifacts/deploy/drill-smoke/verify.json --out artifacts/deploy/smoke.md
+
+kind-down: ## Delete the kind cluster (its volumes go with it)
+	$(KIND_SH) down
+
+lint-deploy: kind-tools ## helm lint + render both charts and the infrastructure values; bash -n of the script
+	bash -n $(KIND_SH)
+	$(KIND_SH) lint
+
 # ---------------------------------------------------------------- M6: shopping assistant
 
 # Claude only where it is used, and only from the environment or .env (never on a command line):
@@ -385,8 +455,8 @@ agent-eval-llm: ## Paid: 3 models x 3 runs (caps $12 / $6 / $1 per run) + Sonnet
 
 test: lint test-ml test-model-server test-minionerec test-agent test-go ## Lint and run the Python and Go tests (DB / Redis tests skip when the stack is down)
 
-PYDIRS := ml sim loadtest analysis minionerec
-lint: ## ruff check + format check (ml, sim, loadtest, analysis, minionerec, model_server, agent)
+PYDIRS := ml sim loadtest analysis minionerec kube
+lint: ## ruff check + format check (ml, sim, loadtest, analysis, minionerec, kube, model_server, agent)
 	$(UV) ruff check $(PYDIRS)
 	$(UV) ruff format --check $(PYDIRS)
 	$(MS) ruff check model_server

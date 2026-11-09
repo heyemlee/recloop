@@ -1,0 +1,120 @@
+# kube-prometheus-stack (official chart, versions.lock), namespace monitoring: Prometheus
+# Operator, Prometheus, Grafana, kube-state-metrics. Prometheus on NodePort 30090, Grafana on
+# 30001 (deploy/kind/cluster.yaml maps both to 127.0.0.1).
+#
+# Lighter than the chart's defaults, because the whole cluster shares Docker Desktop's 12 GB VM
+# with the machine's other work:
+#   - no Alertmanager: nothing here sends alerts (rules still evaluate, Grafana shows them);
+#   - no node-exporter: the "node" is a container in Docker's VM; per-pod CPU and memory come
+#     from the kubelet (cAdvisor), which is what the autoscaling runs need;
+#   - no scrapes of etcd, controller-manager, scheduler, kube-proxy: in kind they listen on
+#     the node's localhost only, so those targets would just be down;
+#   - Prometheus keeps 2 days in an emptyDir, with 1 GiB of memory.
+alertmanager:
+  enabled: false
+nodeExporter:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+
+defaultRules:
+  rules:
+    alertmanager: false
+    etcd: false
+    kubeControllerManager: false
+    kubeProxy: false
+    kubeSchedulerAlerting: false
+    kubeSchedulerRecording: false
+    nodeExporterAlerting: false
+    nodeExporterRecording: false
+    windows: false
+
+kubelet:
+  serviceMonitor:
+    # cAdvisor's per-container CPU: deploy.md reads it for the autoscaling runs.
+    interval: 10s
+
+prometheusOperator:
+  resources:
+    requests: {cpu: 50m, memory: 96Mi}
+    limits: {cpu: 500m, memory: 256Mi}
+  # The two short hook Jobs that make the operator's webhook certificate.
+  admissionWebhooks:
+    patch:
+      resources:
+        requests: {cpu: 10m, memory: 32Mi}
+        limits: {cpu: 200m, memory: 64Mi}
+  prometheusConfigReloader:
+    resources:
+      requests: {cpu: 10m, memory: 32Mi}
+      limits: {cpu: 100m, memory: 64Mi}
+
+prometheus:
+  service:
+    type: NodePort
+    nodePort: 30090
+  prometheusSpec:
+    # Same as compose's Prometheus (deploy/prometheus/prometheus.yml uses 5 s for its jobs;
+    # RecLoop's ServiceMonitors set 5 s themselves).
+    scrapeInterval: 10s
+    evaluationInterval: 10s
+    retention: 2d
+    resources:
+      requests: {cpu: 200m, memory: 512Mi}
+      limits: {cpu: "1", memory: 1Gi}
+    # Pick up every ServiceMonitor / PodMonitor / rule in the cluster, not only this release's.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+    scrapeConfigSelectorNilUsesHelmValues: false
+
+kube-state-metrics:
+  resources:
+    requests: {cpu: 20m, memory: 64Mi}
+    limits: {cpu: 200m, memory: 128Mi}
+  prometheus:
+    monitor:
+      # Replica counts of the autoscaled workloads, every 5 s.
+      interval: 5s
+
+grafana:
+  # The image compose runs (deploy/docker-compose.yml), instead of the chart's -distroless one.
+  image:
+    tag: 13.2.4
+  service:
+    type: NodePort
+    nodePort: 30001
+  # Local development only, as in compose: anonymous viewers, no telemetry.
+  adminPassword: recloop-dev-only
+  grafana.ini:
+    auth.anonymous:
+      enabled: true
+      org_role: Viewer
+    analytics:
+      reporting_enabled: false
+      check_for_updates: false
+      check_for_plugin_updates: false
+    security:
+      allow_embedding: true
+  # RecLoop's dashboard (deploy/grafana/dashboards/recloop.json) arrives as a ConfigMap of the
+  # recloop chart, in namespace recloop.
+  sidecar:
+    dashboards:
+      searchNamespace: ALL
+    # Alert rules from ConfigMaps labelled grafana_alert=1 (the recloop chart's).
+    alerts:
+      enabled: true
+      searchNamespace: ALL
+    resources:
+      requests: {cpu: 10m, memory: 64Mi}
+      limits: {cpu: 200m, memory: 128Mi}
+  resources:
+    requests: {cpu: 50m, memory: 192Mi}
+    limits: {cpu: 500m, memory: 384Mi}

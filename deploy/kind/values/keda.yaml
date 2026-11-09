@@ -1,0 +1,24 @@
+# KEDA (official chart, versions.lock), namespace keda: scales aggregator and billing on their
+# consumer group lag (ScaledObjects in deploy/helm/recloop). Defaults are 1 CPU / 1000Mi limits
+# per pod; three small pods are enough for two ScaledObjects.
+resources:
+  operator:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: 500m, memory: 256Mi}
+  metricServer:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: 500m, memory: 256Mi}
+  webhooks:
+    requests: {cpu: 20m, memory: 32Mi}
+    limits: {cpu: 200m, memory: 128Mi}
+
+# The operator's metrics (keda_scaler_metrics_value: the lag each trigger sees) for
+# kube-prometheus-stack; deploy.md plots them next to the replica counts.
+prometheus:
+  operator:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+      interval: 5s
+      additionalLabels:
+        release: kube-prometheus-stack

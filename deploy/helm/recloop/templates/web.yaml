@@ -1,0 +1,78 @@
+{{- $c := .Values.web -}}
+{{- $ctx := dict "root" . "name" "web" -}}
+# The Next.js store (deploy/web.Dockerfile: a standalone production build). Its /api/v1/*
+# rewrite to the api (http://api:18080) is fixed at build time.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  labels:
+    {{- include "recloop.labels" $ctx | nindent 4 }}
+spec:
+  replicas: {{ $c.replicas }}
+  selector:
+    matchLabels:
+      {{- include "recloop.selector" $ctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "recloop.selector" $ctx | nindent 8 }}
+    spec:
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: web
+          image: {{ include "recloop.image" .Values.images.web }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          env:
+            - name: PORT
+              value: "3000"
+            - name: HOSTNAME
+              value: "0.0.0.0"
+          ports:
+            - name: http
+              containerPort: 3000
+          # A static file: the pages themselves call the api.
+          readinessProbe:
+            httpGet: {path: /favicon.ico, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /favicon.ico, port: http}
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            {{- toYaml $c.resources | nindent 12 }}
+          securityContext:
+            {{- include "recloop.containerSecurity" . | nindent 12 }}
+          volumeMounts:
+            # Next.js writes its cache under .next/cache; the root file system is read-only.
+            - name: cache
+              mountPath: /app/.next/cache
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: cache
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  labels:
+    {{- include "recloop.labels" $ctx | nindent 4 }}
+spec:
+  type: NodePort
+  selector:
+    {{- include "recloop.selector" $ctx | nindent 4 }}
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
+      nodePort: {{ $c.nodePort }}
