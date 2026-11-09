@@ -267,7 +267,7 @@ srm: sim-world build-aggregator ## Simulated traffic, then the SRM check of ever
 drill: sim-world build-aggregator ## Duplicate delivery + consumer kill -9 + broker restart under traffic, then verify (~2 min)
 	$(PY) -m sim.drill $(DRILL_FLAGS)
 
-load: bench-up k6 sim-world build-aggregator ## Latency experiments (bench profile) -> docs/results/latency.md (~90 min; idle machine)
+load: bench-up k6 sim-world build-aggregator ## Latency experiments (bench profile) -> docs/results/latency.md (~2 h; idle machine)
 	$(PY) -m loadtest.run --plan full $(LOAD_FLAGS)
 	$(PY) -m loadtest.report
 

@@ -46,8 +46,10 @@ var DefaultBreaker = BreakerConfig{
 }
 
 // ParseWindow reads a window spec onto DefaultBreaker: "time:10s:20" (the last 10 seconds, at
-// least 20 calls), optionally ":C" for the consecutive-failure trip (default 10, 0 = off), or
-// "calls:20" (the last 20 calls, no consecutive trip: §5.1 as first written).
+// least 20 calls), optionally ":C" for the consecutive-failure trip (default 10, 0 = off) and
+// then ":P" for the half-open probes (default 5: that many successes in a row close it again),
+// or "calls:20" (the last 20 calls, no consecutive trip: §5.1 as first written). The api reads
+// it from BREAKER_WINDOW for every breaker (model server, rank, PostgreSQL text recall).
 func ParseWindow(spec string) (BreakerConfig, error) {
 	c := DefaultBreaker
 	parts := strings.Split(spec, ":")
@@ -59,7 +61,7 @@ func ParseWindow(spec string) (BreakerConfig, error) {
 		}
 		c.Window, c.Period, c.MinCalls, c.Consecutive = n, 0, 0, 0
 		return c, nil
-	case (len(parts) == 3 || len(parts) == 4) && parts[0] == "time":
+	case len(parts) >= 3 && len(parts) <= 5 && parts[0] == "time":
 		d, err := time.ParseDuration(parts[1])
 		if err != nil || d <= 0 {
 			return c, fmt.Errorf("breaker window %q: bad period", spec)
@@ -69,22 +71,34 @@ func ParseWindow(spec string) (BreakerConfig, error) {
 			return c, fmt.Errorf("breaker window %q: bad minimum call count", spec)
 		}
 		c.Window, c.Period, c.MinCalls = 0, d, n
-		if len(parts) == 4 {
+		if len(parts) >= 4 {
 			k, err := strconv.ParseUint(parts[3], 10, 32)
 			if err != nil {
 				return c, fmt.Errorf("breaker window %q: bad consecutive-failure count", spec)
 			}
 			c.Consecutive = uint32(k)
 		}
+		if len(parts) == 5 {
+			p, err := strconv.ParseUint(parts[4], 10, 32)
+			if err != nil || p == 0 {
+				return c, fmt.Errorf("breaker window %q: bad half-open probe count", spec)
+			}
+			c.HalfOpenProbes = uint32(p)
+		}
 		return c, nil
 	}
-	return c, fmt.Errorf("breaker window %q: want time:DURATION:N[:C] or calls:N", spec)
+	return c, fmt.Errorf("breaker window %q: want time:DURATION:N[:C[:P]] or calls:N", spec)
 }
 
-// String describes the window ("time:10s:20:10", "calls:20").
+// String describes the window ("time:10s:20:10", "calls:20"); the half-open probes only when
+// they differ from the default ("time:10s:20:25:2").
 func (c BreakerConfig) String() string {
 	if c.Period > 0 {
-		return fmt.Sprintf("time:%s:%d:%d", c.Period, c.MinCalls, c.Consecutive)
+		s := fmt.Sprintf("time:%s:%d:%d", c.Period, c.MinCalls, c.Consecutive)
+		if c.HalfOpenProbes != DefaultBreaker.HalfOpenProbes {
+			s += fmt.Sprintf(":%d", c.HalfOpenProbes)
+		}
+		return s
 	}
 	return fmt.Sprintf("calls:%d", c.Window)
 }

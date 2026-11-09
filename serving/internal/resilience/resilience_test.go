@@ -162,6 +162,44 @@ func TestTimeWindowBreaker(t *testing.T) {
 	}
 }
 
+// ":P" sets the half-open probes: that many successes in a row close an open breaker again
+// (the comparison rule of make load: 25 failures in a row, 2 probes).
+func TestHalfOpenProbes(t *testing.T) {
+	cfg, err := ParseWindow("time:10s:20:25:2")
+	if err != nil || cfg.Consecutive != 25 || cfg.HalfOpenProbes != 2 || cfg.String() != "time:10s:20:25:2" {
+		t.Fatalf("%+v %v", cfg, err)
+	}
+	if c, _ := ParseWindow("time:10s:20:10:5"); c.String() != "time:10s:20:10" {
+		t.Fatalf("the default probe count is left out: %s", c.String())
+	}
+	for _, bad := range []string{"time:10s:20:25:0", "time:10s:20:25:x", "time:10s:20:25:2:1"} {
+		if _, err := ParseWindow(bad); err == nil {
+			t.Errorf("window %q accepted", bad)
+		}
+	}
+	ctx := context.Background()
+	fail := func() error { return context.DeadlineExceeded }
+	ok := func() error { return nil }
+	for _, probes := range []string{"2", "5"} {
+		cfg, _ := ParseWindow("time:10s:20:3:" + probes)
+		cfg.OpenFor = 20 * time.Millisecond
+		b := NewBreaker("dep", cfg, nil)
+		for i := 0; i < 3; i++ {
+			_ = b.Do(ctx, fail)
+		}
+		if b.State() != Open {
+			t.Fatalf("probes %s: not open after 3 failures in a row", probes)
+		}
+		time.Sleep(30 * time.Millisecond)
+		for i := 0; i < 2; i++ {
+			_ = b.Do(ctx, ok)
+		}
+		if closed := b.State() == Closed; closed != (probes == "2") {
+			t.Fatalf("probes %s: closed after 2 successes = %v", probes, closed)
+		}
+	}
+}
+
 func TestConsecutiveFailuresOpenTheBreakerAtLowTraffic(t *testing.T) {
 	cfg, _ := ParseWindow("time:10s:20:5")
 	cfg.OpenFor = time.Minute

@@ -38,7 +38,8 @@
 //	ADS_FIXED_PCTR         the stub pCTR every ad gets (0.01); ADS_MIN_PCTR the floor (0.001)
 //	BREAKER_WINDOW         time:10s:20:10 (default, design §5.1: >= 50 % of the calls of the
 //	                       last 10 s with at least 20 calls, or 10 failures in a row) or
-//	                       calls:20 (the last 20 calls); open 10 s, 5 half-open probes
+//	                       calls:20 (the last 20 calls); open 10 s, 5 half-open probes. A fifth
+//	                       field sets the probes: time:10s:20:25:2 (make load's comparison rule)
 //	SASREC_TIMEOUT_MS      SASRec recall timeout, capped by the recall budget (35)
 //	TEXT_TIMEOUT_MS        text-similarity recall timeout (35)
 //	ACCESS_LOG             1 (default): one log line per request; 0 for load tests
