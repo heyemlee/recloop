@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"github.com/heyemlee/recloop/serving/internal/itemctr"
 )
 
 const (
@@ -161,6 +163,11 @@ type Change struct {
 	// FreqKey, on the impression of a sponsored slot, is the frequency-cap counter it adds to
 	// (FreqKey(...)); empty for every other event.
 	FreqKey string
+	// CTR, on an impression or a click that carries an impression_id, is the counter it adds to
+	// in the item's CTR buckets (itemctr.Impression or itemctr.Click; empty: not counted), in the
+	// buckets of Received, when the api accepted the event (events_raw.server_ts).
+	CTR      string
+	Received time.Time
 }
 
 func (s Store) scriptArgs(c Change, now time.Time) ([]string, []any) {
@@ -169,12 +176,21 @@ func (s Store) scriptArgs(c Change, now time.Time) ([]string, []any) {
 		BoughtKey(c.UserID), SeenKey(c.UserID),
 		GenWorkerKey, GenQueueKey, GenPendingKey(c.UserID),
 	}
+	fc := "0"
 	if c.FreqKey != "" {
 		keys = append(keys, c.FreqKey)
+		fc = "1"
+	}
+	field, exp5, exp1h := "", int64(0), int64(0)
+	if c.CTR != "" {
+		t := itemctr.TargetOf(c.Received)
+		keys = append(keys, t.Key5m, t.Key1h)
+		field, exp5, exp1h = itemctr.Field(c.CTR, c.ItemID), t.Expire5m.UnixMilli(), t.Expire1h.UnixMilli()
 	}
 	args := []any{
 		c.Kind, c.ItemID, c.At.UnixMilli(), now.UnixMilli(),
 		HistoryMax, SeenWindow.Milliseconds(), DedupTTL.Milliseconds(), FreqTTL.Milliseconds(),
+		fc, field, exp5, exp1h,
 		c.UserID, GenDebounce.Milliseconds(), GenMaxWait.Milliseconds(), GenPendingTTL.Milliseconds(),
 	}
 	return keys, args

@@ -14,9 +14,12 @@ value, for a different history.
   * demo:users     a short list of dataset users for the web app's user switcher: the user with
                    the longest training history in each of the largest categories, plus one user
                    with no training history (cold start).
+  * state:seeded_at  when this ran (Unix ms): the flush emptied the items' CTR buckets
+                   (ictr:*, serving/internal/itemctr), so their windows start here; a rebuild
+                   from the log (`make rebuild-redis`) deletes it.
 
-hv, seen and the dedup markers start empty. Events stored in PostgreSQL are not replayed here;
-rebuilding Redis from the event log comes with the aggregator in M2.
+hv, seen, the frequency caps, the CTR buckets and the dedup markers start empty. Events stored in
+PostgreSQL are not replayed here; `make rebuild-redis` replays them (aggregator rebuild-from-db).
 
 Usage: REDIS_URL=redis://... CACHE_REDIS_URL=redis://... python -m ml.data.seed_redis
 """
@@ -36,6 +39,7 @@ from ml import paths
 DEFAULT_REDIS_URL = "redis://localhost:16390/0"
 DEFAULT_CACHE_REDIS_URL = "redis://localhost:16391/0"
 HISTORY_MAX = 50  # serving/internal/userstate.HistoryMax
+SEEDED_AT_KEY = "state:seeded_at"  # serving/internal/itemctr.SeededAtKey
 DEMO_CATEGORIES = 8
 CHUNK = 500
 
@@ -109,6 +113,7 @@ def main() -> None:
     r = redis.Redis.from_url(url)
     r.ping()
     r.flushdb()
+    r.set(SEEDED_AT_KEY, int(time.time() * 1000))
     pipe = r.pipeline(transaction=False)
     n_users = n_hist = 0
     for uid, g in train.groupby("user_id", sort=True):

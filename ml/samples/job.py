@@ -21,7 +21,19 @@ For the impressions of one UTC day D (`make samples DAY=YYYY-MM-DD`):
      the export's newest event), it is `final = false` and stays out of the training samples;
   7. negatives are downsampled: kept when a hash of the impression id falls below the rate,
      with weight 1 / rate; positives are kept with weight 1. The rate and the counts before and
-     after are written next to the samples.
+     after are written next to the samples;
+  8. the item CTR counts of the pCTR (serving/internal/itemctr): impression and click events
+     with an impression_id, one per event_id, counted in the 5-minute and hourly buckets of
+     their receive time (server_ts), from the impressions and clicks of D-2 .. D+1; each
+     impression with features gets the counts of its item in the windows of its served record
+     (12 complete 5-minute buckets before the api's table time `ictr_asof`, 24 complete hours
+     before that time's hour, none that starts before the seed `ictr_since`; a record served
+     before the api logged them: the table it would have had, 15 s before serving, no seed).
+     A sample keeps the counts its served record logged (`ictr_source` served: what serving
+     saw) and those recomputed here otherwise (log); meta's item_ctr compares the two for
+     every logged row: the online / offline consistency check. An event whose UUIDv7 day
+     (the partition) is outside D-2 .. D+1 while it was received inside the windows (a client
+     clock off by a day or more) is missed here and shows up as a difference.
 
 Outputs, partitioned by day (day=YYYY-MM-DD, Parquet):
   artifacts/samples/impressions/   every attributed impression: the A/B analysis reads these
@@ -54,14 +66,25 @@ TRAIN_SURFACE = "home"
 EXP = "struct<bucket:int,exp_id:string,variant:string>"
 ITEM = (
     "struct<item_id:int,pos:int,slot:string,source:string,score:double,ranks:map<string,int>,"
-    "campaign_id:bigint,price:int,pctr_ppm:bigint,ad_token:string,f:array<float>,lgbm:double>"
+    "campaign_id:bigint,price:int,pctr_ppm:bigint,ad_token:string,f:array<float>,lgbm:double,"
+    "ictr:array<bigint>>"
 )
 SERVED = (
     f"struct<surface:string,seed_item:int,offset:int,model_ver:string,exp:map<string,{EXP}>,"
     "config_version:int,degraded:array<string>,backfill_count:int,candidate_cache:string,"
-    f"hv:bigint,items:array<{ITEM}>,features:array<string>,ranker:string,pctr_model:string>"
+    f"hv:bigint,items:array<{ITEM}>,features:array<string>,ranker:string,pctr_model:string,"
+    "ictr_asof:bigint,ictr_since:bigint>"
 )
 LAYERS = ("recall", "rank", "ads", "agent")
+
+# Item CTR windows (serving/internal/itemctr): bucket widths and how many complete buckets the
+# hour and the day sum; the api builds its table GRACE after the table time.
+CTR_5M_MS = 300_000
+CTR_1H_MS = 3_600_000
+CTR_WINDOW_5M = 12
+CTR_WINDOW_1H = 24
+CTR_GRACE_MS = 15_000
+CTR_KEYS = ["item_id", "asof_ms", "since_ms"]
 
 
 SHUFFLE_PARTITIONS = 64
@@ -126,6 +149,86 @@ def _arrow_schema_ddl() -> str:
     )
 
 
+def ctr_events(imp, click):
+    """The counted events: impressions and clicks with an impression_id (one row per event_id
+    already), each at its receive time in microseconds (server_ts; the event time when missing)."""
+    from pyspark.sql import functions as F
+
+    def part(df, kind):
+        return df.filter(F.col("impression_id").isNotNull()).select(
+            "item_id",
+            F.lit(kind).alias("kind"),
+            F.unix_micros(F.coalesce("server_ts", "event_ts")).alias("rt_us"),
+        )
+
+    return part(imp, "i").unionByName(part(click, "c"))
+
+
+def bucket_counts(events):
+    """Impressions and clicks per (item, 5-minute bucket) and per (item, hourly bucket)."""
+    from pyspark.sql import functions as F
+
+    def per(width_ms, name):
+        return (
+            events.withColumn(name, F.expr(f"rt_us div {width_ms * 1000}"))
+            .groupBy("item_id", name)
+            .agg(
+                F.sum(F.when(F.col("kind") == "i", 1).otherwise(0)).alias("imp"),
+                F.sum(F.when(F.col("kind") == "c", 1).otherwise(0)).alias("clk"),
+            )
+        )
+
+    return per(CTR_5M_MS, "b5"), per(CTR_1H_MS, "bh")
+
+
+def window_counts(keys, counts5, counts1h):
+    """keys (item_id, asof_ms, since_ms) -> the same with imp_1h, clk_1h, imp_24h, clk_24h: the
+    sums over the windows of a table at asof_ms after a seed at since_ms (bucket numbers are
+    the receive time divided by the width; a seed inside a bucket leaves that bucket out)."""
+    from pyspark.sql import functions as F
+
+    k = keys.select(
+        *CTR_KEYS,
+        F.expr(f"asof_ms div {CTR_5M_MS}").alias("e5"),
+        F.expr(f"asof_ms div {CTR_1H_MS}").alias("eh"),
+        F.expr(f"(since_ms + {CTR_5M_MS - 1}) div {CTR_5M_MS}").alias("s5"),
+        F.expr(f"(since_ms + {CTR_1H_MS - 1}) div {CTR_1H_MS}").alias("sh"),
+    )
+
+    def window(lo, hi, name, counts, imp, clk):
+        empty = F.array().cast("array<bigint>")
+        rows = k.select(
+            *CTR_KEYS, F.explode(F.when(lo <= hi, F.sequence(lo, hi)).otherwise(empty)).alias(name)
+        )
+        return (
+            rows.join(counts, ["item_id", name], "left")
+            .groupBy(*CTR_KEYS)
+            .agg(
+                F.sum(F.coalesce("imp", F.lit(0))).alias(imp),
+                F.sum(F.coalesce("clk", F.lit(0))).alias(clk),
+            )
+        )
+
+    w5 = window(
+        F.greatest(F.col("e5") - CTR_WINDOW_5M, F.col("s5")),
+        F.col("e5") - 1,
+        "b5",
+        counts5,
+        "imp_1h",
+        "clk_1h",
+    )
+    w1 = window(
+        F.greatest(F.col("eh") - CTR_WINDOW_1H, F.col("sh")),
+        F.col("eh") - 1,
+        "bh",
+        counts1h,
+        "imp_24h",
+        "clk_24h",
+    )
+    out = keys.select(*CTR_KEYS).join(w5, CTR_KEYS, "left").join(w1, CTR_KEYS, "left")
+    return out.fillna(0, subset=["imp_1h", "clk_1h", "imp_24h", "clk_24h"])
+
+
 def first_by(df, key: str, order: str):
     """One row per `key`, the one with the smallest `order` (then event_id)."""
     from pyspark.sql import Window
@@ -168,6 +271,13 @@ def build(
     unique = {t: df.count() for t, df in ev.items()}
     meta["events_read"] = read
     meta["technical_duplicates"] = {t: read[t] - unique[t] for t in read}
+    # 8. (inputs) the item CTR counts read the impressions and clicks of D-2 .. D+1.
+    ctr_in = read_events(
+        spark, raw, {t: [day - 2 * one, day - one, day, day + one] for t in ("impression", "click")}
+    )
+    ctr_in = {t: first_by(df, "event_id", "server_ts") for t, df in ctr_in.items()}
+    counts5, counts1h = bucket_counts(ctr_events(ctr_in["impression"], ctr_in["click"]))
+    counts5, counts1h = counts5.cache(), counts1h.cache()
     if complete_through is None:
         newest = [df.agg(F.max("event_ts")).first()[0] for df in ev.values()]
         newest = [x for x in newest if x is not None]
@@ -221,11 +331,14 @@ def build(
             "p.pctr_model",
             F.col("p.features").alias("feature_names"),
             F.col("p.exp").alias("exp"),
+            F.col("p.ictr_asof").alias("ictr_asof"),
+            F.col("p.ictr_since").alias("ictr_since"),
             F.explode("p.items").alias("it"),
         )
         .select("*", "it.*")
         .drop("it")
         .withColumnRenamed("item_id", "served_item_id")
+        .withColumnRenamed("ictr", "ictr_served")
     )
     # A page rendered twice (a client fetching the same cursor again) logs its positions twice.
     served_items = (
@@ -283,6 +396,38 @@ def build(
             name, F.coalesce(F.col(name), F.lit(0))
         )
 
+    # 8. item CTR counts of every impression with features: the served record's table, or the
+    # one the api would have had (15 s before serving, no seed) for records from before.
+    has_f = F.col("f").isNotNull()
+    backfill = F.expr(f"div(unix_millis(t_served) - {CTR_GRACE_MS}, {CTR_5M_MS})") * F.lit(
+        CTR_5M_MS
+    )
+    att = att.withColumn("asof_ms", F.when(has_f, F.coalesce("ictr_asof", backfill))).withColumn(
+        "since_ms", F.when(has_f, F.coalesce("ictr_since", F.lit(0)).cast("bigint"))
+    )
+    keys = (
+        att.filter(has_f)
+        .select(F.col("imp_item_id").alias("item_id"), "asof_ms", "since_ms")
+        .distinct()
+    )
+    wc = window_counts(keys, counts5, counts1h).withColumnRenamed("item_id", "imp_item_id")
+    att = (
+        att.join(wc, ["imp_item_id", "asof_ms", "since_ms"], "left")
+        .withColumn(
+            "ictr_log",
+            F.when(has_f, F.array("imp_1h", "clk_1h", "imp_24h", "clk_24h").cast("array<int>")),
+        )
+        .withColumn("ictr_served", F.col("ictr_served").cast("array<int>"))
+        .withColumn(
+            "ictr_source",
+            F.when(~has_f, F.lit(None).cast("string"))
+            .when(F.col("ictr_served").isNotNull(), F.lit("served"))
+            .otherwise(F.lit("log")),
+        )
+        .withColumn("ictr", F.when(has_f, F.coalesce("ictr_served", "ictr_log")))
+        .drop("imp_1h", "clk_1h", "imp_24h", "clk_24h")
+    )
+
     # 6. label delay.
     att = att.withColumn(
         "final", F.col("t_impression") + window <= F.lit(complete_through.astimezone(dt.UTC))
@@ -326,6 +471,12 @@ def build(
         "feature_names",
         F.col("f").alias("features"),
         "lgbm",
+        "ictr",
+        "ictr_source",
+        "ictr_served",
+        "ictr_log",
+        F.col("asof_ms").alias("ictr_asof"),
+        F.col("since_ms").alias("ictr_since"),
         "clicked",
         "clicks",
         "late_clicks",
@@ -362,6 +513,8 @@ def build(
             "exp_rank",
             "feature_names",
             "features",
+            "ictr",
+            "ictr_source",
             F.col("clicked").alias("label"),
             "weight",
         )
@@ -392,7 +545,49 @@ def build(
             F.col("final") & (F.col("surface") == TRAIN_SURFACE) & F.col("features").isNull()
         ).count(),
     }
+    meta["item_ctr"] = item_ctr_check(eligible)
     return impressions, samples, meta
+
+
+def item_ctr_check(eligible) -> dict:
+    """Logged counts against the recomputed ones, for the eligible impressions whose served
+    record logged them (fields: hour impressions, hour clicks, day impressions, day clicks)."""
+    from pyspark.sql import functions as F
+
+    logged = eligible.filter(F.col("ictr_source") == "served")
+    diffs = [F.col("ictr_served")[k] - F.col("ictr_log")[k] for k in range(4)]
+    row = logged.agg(
+        F.count("*").alias("n"),
+        F.sum(F.when(F.col("ictr_served") == F.col("ictr_log"), 1).otherwise(0)).alias("equal"),
+        F.sum(
+            F.when(
+                F.greatest(*[F.col("ictr_log")[k] - F.col("ictr_served")[k] for k in range(4)]) > 0,
+                1,
+            ).otherwise(0)
+        ).alias("below"),
+        F.sum(F.when(F.greatest(*diffs) > 0, 1).otherwise(0)).alias("above"),
+        *[F.max(F.abs(d)).alias(f"max{k}") for k, d in enumerate(diffs)],
+    ).first()
+    n = row["n"] or 0
+    return {
+        "eligible": eligible.count(),
+        "logged": n,
+        "recomputed_only": eligible.filter(F.col("ictr_source") == "log").count(),
+        "equal": row["equal"] or 0,
+        "differ": n - (row["equal"] or 0),
+        # served below the log: events the api's table had not seen yet (applied late);
+        # above: counts the log does not have (e.g. an event outside the exported days)
+        "logged_below_log": row["below"] or 0,
+        "logged_above_log": row["above"] or 0,
+        "max_abs_diff": [row[f"max{k}"] or 0 for k in range(4)],
+        "fields": ["impressions_hour", "clicks_hour", "impressions_day", "clicks_day"],
+        "windows": {
+            "hour": f"{CTR_WINDOW_5M} x 5 min",
+            "day": f"{CTR_WINDOW_1H} x 1 h",
+            "grace_seconds": CTR_GRACE_MS // 1000,
+            "bucketed_by": "server_ts",
+        },
+    }
 
 
 def write(df, out: Path, day: dt.date) -> None:

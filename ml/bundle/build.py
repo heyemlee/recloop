@@ -265,24 +265,44 @@ def pctr_file(stage: Path, valid_x: np.ndarray) -> dict | None:
     if not path.exists():
         return None
     m = json.loads(path.read_text())
-    if tuple(m["features"]) != feat.FEATURES or tuple(m["columns"]) != pctr_mod.COLUMNS:
+    if tuple(m["features"]) != feat.FEATURES or tuple(m["columns"]) not in (
+        pctr_mod.COLUMNS,
+        pctr_mod.COLUMNS_CTR,
+    ):
         raise SystemExit(f"{path}: other features than the ranker's; run `make train-pctr` again")
     rng = np.random.default_rng(GOLDEN_SEED + 3)
     rows = valid_x[rng.choice(len(valid_x), size=48, replace=False)]
     pos = np.tile(np.asarray([1, 3, 9, 15, 25, 40], dtype=np.int64), 8)
     sponsored = np.tile(np.asarray([0, 1], dtype=np.int64), 24)
-    p = pctr_mod.predict_json(m, rows, pos, sponsored)
+    # Item CTR counts [impressions, clicks] of the hour and the day; every sixth row has none
+    # (the api had no table: the prior), and some have more clicks than impressions (clicks of
+    # impressions counted in an earlier bucket).
+    imp_h = rng.integers(0, 400, 48)
+    imp_d = imp_h + rng.integers(0, 6000, 48)
+    clk_h = rng.binomial(imp_h + 2, 0.02)
+    clk_d = clk_h + rng.binomial(imp_d - imp_h + 2, 0.02)
+    counts = np.stack([imp_h, clk_h, imp_d, clk_d], axis=1).astype(np.float64)
+    counts[::6] = np.nan
+    p = pctr_mod.predict_json(m, rows, pos, sponsored, counts)
     m["golden"] = {
         "tolerance": 1e-6,
         "rows": [
-            {"features": _nan_to_none(r), "pos": int(q), "sponsored": int(sp), "pctr": float(v)}
-            for r, q, sp, v in zip(rows, pos, sponsored, p, strict=True)
+            {
+                "features": _nan_to_none(r),
+                "pos": int(q),
+                "sponsored": int(sp),
+                "counts": None if np.isnan(c).any() else [int(v) for v in c],
+                "pctr": float(v),
+            }
+            for r, q, sp, c, v in zip(rows, pos, sponsored, counts, p, strict=True)
         ],
     }
     _write_json(stage / "pctr.json", m)
     return {
         "file": "pctr.json",
         "model": m["model"],
+        "variant": m.get("variant", "base"),
+        **({"ctr": {k: m["ctr"][k] for k in ("prior", "strength")}} if "ctr" in m else {}),
         "reference_position": m["reference_position"],
         "C": m["C"],
         "days": m["training"]["days"],

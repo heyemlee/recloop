@@ -1,0 +1,9 @@
+apiVersion: v2
+name: recloop
+description: >-
+  RecLoop's own services on the kind cluster (docs/design.md §23.2): api (HPA on CPU),
+  model-server (readiness = bundle loaded and validated), aggregator and billing (KEDA on their
+  consumer lag), log-sink (Redpanda Connect), web, and pg-proxy for the billing drill.
+type: application
+version: 0.1.0
+kubeVersion: ">=1.34.0-0"

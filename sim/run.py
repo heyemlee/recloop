@@ -343,8 +343,19 @@ class Simulator:
         return total
 
 
+def ctr_bucket_keys(at: float) -> dict[str, str]:
+    """The item CTR hashes (serving/internal/itemctr) of the buckets that hold time `at`."""
+    t = time.gmtime(at)
+    return {
+        "5m": f"ictr:5m:{time.strftime('%Y%m%d%H', t)}{t.tm_min // 5 * 5:02d}",
+        "1h": f"ictr:1h:{time.strftime('%Y%m%d%H', t)}",
+    }
+
+
 def snapshot(user_ids: list[int]) -> dict:
-    """hv of every simulated user, stock of every item and the order count, before a run."""
+    """hv of every simulated user, stock of every item and the order count, before a run; and
+    the item CTR buckets that are open (sim.verify counts the run's impressions and clicks into
+    them and every later bucket)."""
     import psycopg
     import redis
 
@@ -353,13 +364,21 @@ def snapshot(user_ids: list[int]) -> dict:
     for u in user_ids:
         pipe.get(f"u:{u}:hv")
     hv = {str(u): int(v or 0) for u, v in zip(user_ids, pipe.execute(), strict=True)}
+    keys = ctr_bucket_keys(time.time())
+    ictr = {g: {f.decode(): int(v) for f, v in r.hgetall(k).items()} for g, k in keys.items()}
     url = os.environ.get(
         "DATABASE_URL", "postgres://recloop:recloop@localhost:15432/recloop?sslmode=disable"
     )
     with psycopg.connect(url) as conn:
         stock = dict(conn.execute("SELECT item_id, stock FROM items").fetchall())
         orders = conn.execute("SELECT count(*) FROM orders").fetchone()[0]
-    return {"hv": hv, "stock": {str(k): v for k, v in stock.items()}, "orders": orders}
+    return {
+        "hv": hv,
+        "stock": {str(k): v for k, v in stock.items()},
+        "orders": orders,
+        "ictr_keys": keys,
+        "ictr": ictr,
+    }
 
 
 def run_main(args, on_start=None) -> dict:

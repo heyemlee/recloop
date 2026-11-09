@@ -6,6 +6,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/heyemlee/recloop/serving/internal/itemctr"
 	"github.com/heyemlee/recloop/serving/internal/store"
 	"github.com/heyemlee/recloop/serving/internal/store/db"
 	"github.com/heyemlee/recloop/serving/internal/userstate"
@@ -98,9 +99,30 @@ func Changes(evs []Event, freqKey func(Event) string) []userstate.Change {
 		if freqKey != nil && kind == userstate.KindImpression && ev.AdToken != "" {
 			c.FreqKey = freqKey(ev)
 		}
+		c.CTR, c.Received = CTRCounter(ev)
 		out = append(out, c)
 	}
 	return out
+}
+
+// CTRCounter is the rule of the items' recent CTR counts (package itemctr): an impression or a
+// click with an impression_id counts, in the buckets of the time the api received it (the event
+// time when that is unknown, as ml/samples/job.py reads a missing server_ts). Anything else: "".
+func CTRCounter(ev Event) (string, time.Time) {
+	if ev.ImpressionID == "" {
+		return "", time.Time{}
+	}
+	at := ev.Received
+	if at.IsZero() {
+		at = ev.Time
+	}
+	switch ev.Type {
+	case TypeImpression:
+		return itemctr.Impression, at
+	case TypeClick:
+		return itemctr.Click, at
+	}
+	return "", time.Time{}
 }
 
 // KindOf maps an event type to its effect on user state ("" for none).

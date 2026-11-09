@@ -1,0 +1,9 @@
+# CloudNativePG operator (official chart, versions.lock), namespace cnpg-system. RecLoop's
+# PostgreSQL cluster itself (a `Cluster` resource) is in deploy/helm/recloop-infra.
+resources:
+  requests: {cpu: 50m, memory: 128Mi}
+  limits: {cpu: 500m, memory: 256Mi}
+
+# The operator's own metrics, for kube-prometheus-stack (installed first: PodMonitor CRD).
+monitoring:
+  podMonitorEnabled: true

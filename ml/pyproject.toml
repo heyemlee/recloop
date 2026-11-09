@@ -56,5 +56,5 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM", "NPY"]
 ignore = ["E501"]
 
 [tool.ruff.lint.isort]
-# The repo-level packages that run in this environment (sim/, analysis/, loadtest/).
-known-first-party = ["ml", "sim", "analysis", "loadtest", "model_server"]
+# The repo-level packages that run in this environment (sim/, analysis/, loadtest/, kube/).
+known-first-party = ["ml", "sim", "analysis", "loadtest", "model_server", "kube"]

@@ -19,6 +19,7 @@ import (
 	"github.com/heyemlee/recloop/serving/internal/cache"
 	"github.com/heyemlee/recloop/serving/internal/events"
 	"github.com/heyemlee/recloop/serving/internal/experiment"
+	"github.com/heyemlee/recloop/serving/internal/itemctr"
 	"github.com/heyemlee/recloop/serving/internal/metrics"
 	"github.com/heyemlee/recloop/serving/internal/mixer"
 	"github.com/heyemlee/recloop/serving/internal/ranking"
@@ -136,6 +137,9 @@ type servedItem struct {
 	// null = missing) and its LightGBM score, logged for both rank variants.
 	F    ranking.Features `json:"f,omitempty"`
 	LGBM *float64         `json:"lgbm,omitempty"`
+	// The item's impressions and clicks of the last hour and day at serving time
+	// (itemctr.Counts.Array), logged with F: the pCTR's CTR inputs (design §7.5, §9.2 step 3).
+	ICTR *[4]uint32 `json:"ictr,omitempty"`
 }
 
 type servedPayload struct {
@@ -161,6 +165,10 @@ type servedPayload struct {
 	PCTRModel string   `json:"pctr_model,omitempty"`
 	// M7: the nearline generation result the request saw (arms with the gen source only).
 	Gen *genServed `json:"gen,omitempty"`
+	// The item CTR table the items' ictr come from: its as-of time and the seed it starts
+	// after (Unix ms; package itemctr), so the sample job can recompute the same windows.
+	ICTRAsOf  int64 `json:"ictr_asof,omitempty"`
+	ICTRSince int64 `json:"ictr_since,omitempty"`
 }
 
 // genServed is what a home request of an arm with the gen source saw of the user's nearline
@@ -301,6 +309,24 @@ type request struct {
 	bundle    *bundle.Bundle
 	history   []int32
 	relevance map[int32]float32
+	// The item CTR table of the request, read once (itemCTR) so the pCTR and the served event
+	// use the same one.
+	ictr      *itemctr.Table
+	ictrTaken bool
+}
+
+// itemCTR is the request's item CTR table: nil without ads, before the first build, or when
+// the current one is older than itemctr.MaxAge.
+func (q *request) itemCTR() *itemctr.Table {
+	if !q.ictrTaken {
+		q.ictrTaken = true
+		if a := q.s.Ads; a != nil && a.ItemCTR != nil {
+			if t := a.ItemCTR.Current(); t.Fresh(q.now) {
+				q.ictr = t
+			}
+		}
+	}
+	return q.ictr
 }
 
 // errFatal ends a naive-mode request with 503: without degradation a failed dependency is a
@@ -698,7 +724,7 @@ func (s *Server) recommend(q *request, specs []mixer.Spec, limit int, debugOn bo
 	if q.surface == recall.SurfaceHome && b.Ranking != nil {
 		served.Ranker = rk.ranker
 	}
-	addRanking(&served, rk, page.Sponsored)
+	addRanking(&served, rk, page.Sponsored, q.itemCTR())
 	if ad != nil {
 		served.PCTRModel = ad.pctrModel
 	}

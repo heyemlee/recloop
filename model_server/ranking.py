@@ -7,9 +7,11 @@ ml/ranking/features.py (one row per candidate, float32, NaN = missing):
     pop_log, n_sources, price_bucket, cat2_overlap, leaf_overlap      from the tables + history
 
 ranker.onnx scores organic candidates; pctr.json is a logistic regression over a fixed design of
-those features plus the slot and the position (ml/models/pctr.py). Both are checked at load:
-rank_golden.json replays validation queries (features from the hits, then scores) and pctr.json
-carries golden rows; a bundle that disagrees is refused.
+those features plus the slot and the position (ml/models/pctr.py) and, when it has the CTR
+columns, the item's recent impressions and clicks (the api's item CTR table, sent with each ad
+candidate): a smoothed CTR in log-odds and log(1 + impressions), for the last hour and day. Both
+are checked at load: rank_golden.json replays validation queries (features from the hits, then
+scores) and pctr.json carries golden rows; a bundle that disagrees is refused.
 """
 
 from __future__ import annotations
@@ -34,6 +36,27 @@ FEATURES = (
     "leaf_overlap",
 )
 SOURCES = ("sasrec", "itemcf", "pop")  # the home feed's sources; n_sources counts these
+# The pCTR's CTR columns (ml.models.pctr.CTR_COLUMNS) from the counts [impressions, clicks] of
+# the hour, then of the day; missing counts are 0, which is the prior.
+CTR_COLUMNS = ("ictr_1h_logit", "ictr_1h_imp_log", "ictr_24h_logit", "ictr_24h_imp_log")
+CTR_RATE_CLIP = 1e-6
+
+
+def ctr_columns(counts: np.ndarray, prior: float, strength: float) -> dict[str, np.ndarray]:
+    """ml.models.pctr.ctr_columns: (clicks + strength x prior) / (impressions + strength) in
+    log-odds (clipped away from 0 and 1), and log(1 + impressions), per window."""
+    c = np.nan_to_num(np.asarray(counts, dtype=np.float64).reshape(-1, 4), nan=0.0)
+    out = {}
+    for name, i in (("1h", 0), ("24h", 2)):
+        imp, clk = c[:, i], c[:, i + 1]
+        rate = np.clip(
+            (clk + strength * prior) / (imp + strength), CTR_RATE_CLIP, 1 - CTR_RATE_CLIP
+        )
+        out[f"ictr_{name}_logit"] = np.log(rate) - np.log1p(-rate)
+        out[f"ictr_{name}_imp_log"] = np.log1p(imp)
+    return out
+
+
 ZERO_THRESHOLD = 1e-35  # LightGBM reads |x| <= 1e-35 as 0 (ml/ranking/onnx_trees.py)
 
 
@@ -51,6 +74,8 @@ class PCTRModel:
     intercept: float
     reference_position: int
     name: str
+    ctr_prior: float | None = None  # the CTR columns' prior and its strength (impressions)
+    ctr_strength: float | None = None
 
     @classmethod
     def from_json(cls, m: dict) -> PCTRModel:
@@ -58,6 +83,9 @@ class PCTRModel:
             raise RankingError(
                 f"pctr.json is over {m['features']}, this server computes {FEATURES}"
             )
+        ctr = m.get("ctr")
+        if any(c in CTR_COLUMNS for c in m["columns"]) and ctr is None:
+            raise RankingError("pctr.json has CTR columns but no CTR prior")
         return cls(
             tuple(m["columns"]),
             frozenset(m["continuous"]),
@@ -67,12 +95,25 @@ class PCTRModel:
             float(m["intercept"]),
             int(m["reference_position"]),
             str(m["model"]),
+            None if ctr is None else float(ctr["prior"]),
+            None if ctr is None else float(ctr["strength"]),
         )
 
-    def design(self, x: np.ndarray, pos: np.ndarray, sponsored: np.ndarray) -> np.ndarray:
-        """The model's columns from feature rows (ml.models.pctr.design, by column name)."""
+    @property
+    def uses_ctr(self) -> bool:
+        return self.ctr_prior is not None
+
+    def design(
+        self, x: np.ndarray, pos: np.ndarray, sponsored: np.ndarray, counts=None
+    ) -> np.ndarray:
+        """The model's columns from feature rows (ml.models.pctr.design, by column name); counts
+        (n, 4) are the items' [impressions, clicks] of the hour and the day, NaN or None when
+        missing."""
         x = np.asarray(x, dtype=np.float64)
         col = {f: x[:, i] for i, f in enumerate(FEATURES)}
+        if self.uses_ctr:
+            c = np.full((len(x), 4), np.nan) if counts is None else counts
+            col.update(ctr_columns(c, self.ctr_prior, self.ctr_strength))
         pos = np.asarray(pos, dtype=np.int64)
         bucket = np.where(pos <= 10, pos - 1, np.where(pos <= 20, 10, 11))
         price = col["price_bucket"]
@@ -98,11 +139,11 @@ class PCTRModel:
                 raise RankingError(f"pctr.json: unknown column {name!r}")
         return out
 
-    def predict(self, x: np.ndarray, pos=None, sponsored=None) -> np.ndarray:
+    def predict(self, x: np.ndarray, pos=None, sponsored=None, counts=None) -> np.ndarray:
         n = len(x)
         pos = np.full(n, self.reference_position) if pos is None else pos
         sponsored = np.ones(n) if sponsored is None else sponsored
-        z = (self.design(x, pos, sponsored) - self.mean) / self.scale
+        z = (self.design(x, pos, sponsored, counts) - self.mean) / self.scale
         return 1.0 / (1.0 + np.exp(-(z @ self.coef + self.intercept)))
 
 
@@ -248,8 +289,12 @@ def golden_ranker(r: Ranking, golden: dict) -> dict:
 def golden_pctr(m: PCTRModel, golden: dict) -> dict:
     rows = golden["rows"]
     x = np.asarray([_nan(g["features"]) for g in rows])
+    counts = np.asarray([_nan(g.get("counts") or [None] * 4) for g in rows])
     got = m.predict(
-        x, np.asarray([g["pos"] for g in rows]), np.asarray([g["sponsored"] for g in rows])
+        x,
+        np.asarray([g["pos"] for g in rows]),
+        np.asarray([g["sponsored"] for g in rows]),
+        counts,
     )
     worst = float(np.abs(got - np.asarray([g["pctr"] for g in rows])).max(initial=0.0))
     if worst > golden["tolerance"]:

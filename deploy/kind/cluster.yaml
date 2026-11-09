@@ -1,0 +1,32 @@
+# kind cluster for RecLoop (M5, docs/design.md §23.2): one node in Docker Desktop's VM.
+# `deploy/kind/cluster.sh up` creates it with the node image pinned in versions.lock and
+# replaces @REPO@ with the repository's absolute path.
+#
+# Access from the host: kind's port mappings to NodePort Services (no Ingress), on 127.0.0.1
+# only and in the NodePort range, so they cannot clash with compose's 1xxxx ports:
+#
+#   30000 web            30080 api           30090 Prometheus     30001 Grafana
+#   30432 PostgreSQL     30379 Redis (state) 30380 Redis (cache)
+#   31092 Redpanda (Kafka, advertised as localhost)
+#   30474 pg-proxy's Toxiproxy API (the billing drill slows billing's PostgreSQL with it)
+#
+# The model bundles: the host's artifacts/bundles (read-only), so the api and the model server
+# see the same versions and `current` link as in compose (../artifacts/bundles:/bundles:ro).
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    extraMounts:
+      - hostPath: "@REPO@/artifacts/bundles"
+        containerPath: /recloop/bundles
+        readOnly: true
+    extraPortMappings:
+      - {containerPort: 30000, hostPort: 30000, listenAddress: 127.0.0.1, protocol: TCP}
+      - {containerPort: 30080, hostPort: 30080, listenAddress: 127.0.0.1, protocol: TCP}
+      - {containerPort: 30090, hostPort: 30090, listenAddress: 127.0.0.1, protocol: TCP}
+      - {containerPort: 30001, hostPort: 30001, listenAddress: 127.0.0.1, protocol: TCP}
+      - {containerPort: 30432, hostPort: 30432, listenAddress: 127.0.0.1, protocol: TCP}
+      - {containerPort: 30379, hostPort: 30379, listenAddress: 127.0.0.1, protocol: TCP}
+      - {containerPort: 30380, hostPort: 30380, listenAddress: 127.0.0.1, protocol: TCP}
+      - {containerPort: 31092, hostPort: 31092, listenAddress: 127.0.0.1, protocol: TCP}
+      - {containerPort: 30474, hostPort: 30474, listenAddress: 127.0.0.1, protocol: TCP}

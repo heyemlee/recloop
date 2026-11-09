@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/heyemlee/recloop/serving/internal/itemctr"
 )
 
 func historyChange(id string, uid int64, item int32, at time.Time) Change {
@@ -114,6 +116,30 @@ func TestPurchaseQueuesAndSponsoredImpressionKeepsItsCounter(t *testing.T) {
 	}
 	if v, _ := mr.Get(fk); v != "1" {
 		t.Fatalf("frequency counter %q", v)
+	}
+	// So did the item's CTR buckets: a sponsored impression with both, and a click with CTR only.
+	recv := time.Date(2026, 11, 8, 10, 6, 0, 0, time.UTC)
+	mr.SetTime(recv)
+	both := Change{EventID: "s2", UserID: 8, ItemID: 4, Kind: KindImpression, At: now, FreqKey: fk, CTR: itemctr.Impression, Received: recv}
+	click := Change{EventID: "c2", UserID: 8, ItemID: 4, Kind: KindHistory, At: now, CTR: itemctr.Click, Received: recv}
+	if _, err := s.ApplyBatch(ctx, []Change{both, click}, recv); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := mr.Get(fk); v != "2" {
+		t.Fatalf("frequency counter %q after the second sponsored impression", v)
+	}
+	for _, c := range []struct{ key, field, want string }{
+		{"ictr:5m:202611081005", "i:4", "1"},
+		{"ictr:5m:202611081005", "c:4", "1"},
+		{"ictr:1h:2026110810", "i:4", "1"},
+		{"ictr:1h:2026110810", "c:4", "1"},
+	} {
+		if got := mr.HGet(c.key, c.field); got != c.want {
+			t.Errorf("%s %s = %q, want %q", c.key, c.field, got, c.want)
+		}
+	}
+	if n, _ := mr.List(GenPendingKey(8)); len(n) != 2 {
+		t.Fatalf("pending changes %v: the purchase and the click", n)
 	}
 }
 

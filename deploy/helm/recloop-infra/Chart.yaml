@@ -1,0 +1,9 @@
+apiVersion: v2
+name: recloop-infra
+description: >-
+  RecLoop's own infrastructure objects on the kind cluster (docs/design.md §23.2): the
+  PostgreSQL cluster (CloudNativePG Cluster with pgvector), Redis (StatefulSet) and the Redpanda
+  topics. The operators and Redpanda itself come from their official charts (deploy/kind).
+type: application
+version: 0.1.0
+kubeVersion: ">=1.34.0-0"

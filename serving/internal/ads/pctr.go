@@ -14,6 +14,10 @@ type PCTRRequest struct {
 	History   []int32           // the user's recent items, oldest first
 	Relevance map[int32]float32 // SASRec relevance from the request's Retrieve call, if it made one
 	Version   string            // the bundle version serving the request (a canary pins its own)
+	// Counts: each item's impressions and clicks of the last hour and day (itemctr.Counts.Array:
+	// hour impressions, hour clicks, day impressions, day clicks); nil when the api has no
+	// current table, and the model then uses its prior.
+	Counts map[int32][4]uint32
 }
 
 // PCTRResult has one rate per requested item, at the reference position.

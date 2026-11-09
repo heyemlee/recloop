@@ -108,36 +108,36 @@ Not run yet. `agent/eval/judge.py` grades each shown item 0 / 1 / 2 with Claude 
 
 Wall time of a turn in the evaluation process: parsing, tools against the local PostgreSQL (Docker), checks, rendering; the query encoder (bge-small, CPU) is part of `search_items`.
 
-1-minute load average 2.46 at the start, 2.5 at the end; other Docker containers running (outside the compose project `recloop-m6`): 25.
+1-minute load average 2.16 at the start, 3.22 at the end; other Docker containers running (outside the compose project `recloop-m6`): 0.
 
 | agent | P50 | P95 | parse P50 | search P50 | details P50 | compat P50 |
 |---|---|---|---|---|---|---|
-| baseline | 10 ms | 14 ms | 0.1 ms | 9.3 ms | 0.7 ms | 0.0 ms |
-| oracle | 9.8 ms | 12 ms | 0.0 ms | 8.9 ms | 0.7 ms | 0.0 ms |
-| oracle-bm25 | 1.9 ms | 3.4 ms | 0.0 ms | 1.2 ms | 0.6 ms | 0.0 ms |
-| oracle-vector | 9.8 ms | 13 ms | 0.0 ms | 8.9 ms | 0.7 ms | 0.0 ms |
-| oracle-noprefix | 9.4 ms | 12 ms | 0.0 ms | 8.5 ms | 0.6 ms | 0.0 ms |
+| baseline | 12 ms | 18 ms | 0.1 ms | 11 ms | 0.7 ms | 0.0 ms |
+| oracle | 11 ms | 13 ms | 0.0 ms | 9.6 ms | 0.7 ms | 0.0 ms |
+| oracle-bm25 | 2.3 ms | 4.6 ms | 0.0 ms | 1.4 ms | 0.6 ms | 0.0 ms |
+| oracle-vector | 10 ms | 13 ms | 0.0 ms | 9.5 ms | 0.7 ms | 0.0 ms |
+| oracle-noprefix | 9.9 ms | 12 ms | 0.0 ms | 9.0 ms | 0.6 ms | 0.0 ms |
 
 ## Chat path (/v1/chat)
 
-Measured 2026-11-08 10:21 UTC (commit `6f57df3`): 450 replies (150 messages × 3), one at a time after 30 warm-up replies, through the agent service's HTTP endpoint with the `rules` parser. Senders: 150 dataset users with >= 3 training-period interactions (seed 20261108). The agent service, the Go api and the model server run on this machine (12 CPUs), the stack in Docker; 1-minute load average 1.43 at the start, 2.29 at the end.
+Measured 2026-11-08 22:45 UTC (commit `adc1834`): 450 replies (150 messages × 3), one at a time after 30 warm-up replies, through the agent service's HTTP endpoint with the `rules` parser. Senders: 150 dataset users with >= 3 training-period interactions (seed 20261108). The agent service, the Go api and the model server run on this machine (12 CPUs), the stack in Docker; 1-minute load average 1.67 at the start, 2.18 at the end.
 
-Other Docker containers running during the measurement (outside the stack's compose project `recloop-m6`): 25.
+Other Docker containers running during the measurement (outside the stack's compose project `recloop-m6`): 0.
 
 | stage | what | P50 | P95 |
 |---|---|---|---|
 | parse | parse the message | 0.1 ms | 0.2 ms |
 | history | get_purchase_history (when the message refers to it) (not called in this run) | – | – |
-| search | search_items: BM25, bge query encoding, pgvector KNN, SQL filters | 9.6 ms | 12 ms |
+| search | search_items: BM25, bge query encoding, pgvector KNN, SQL filters | 9.9 ms | 12 ms |
 | details | get_item_details | 0.7 ms | 1.0 ms |
 | check | code checks of every constraint | 0.1 ms | 0.2 ms |
-| compat | device matching (code) | 0.0 ms | 1.3 ms |
+| compat | device matching (code) | 0.0 ms | 1.2 ms |
 | personalize | get_recommendations: the api's chat surface (HTTP) (95% of replies) | 2.0 ms | 2.6 ms |
 | reasons | reasons | 0.0 ms | 0.0 ms |
 | ads | the sponsored item: the api's /internal/ads/select (HTTP) (95% of replies) | 0.7 ms | 1.1 ms |
 | render | reply rendering | 0.0 ms | 0.0 ms |
-| **service total** |  | 14 ms | 18 ms |
-| **client: reply event** |  | 15 ms | 19 ms |
+| **service total** |  | 14 ms | 17 ms |
+| **client: reply event** |  | 15 ms | 18 ms |
 | **client: end of stream** |  | 15 ms | 19 ms |
 
 - Replies: ok 429, no_results 21.

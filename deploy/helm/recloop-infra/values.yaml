@@ -1,0 +1,73 @@
+# RecLoop's infrastructure objects (namespace recloop). Sizes follow the compose services
+# (deploy/docker-compose.yml); every container has requests and limits.
+
+# PostgreSQL: a CloudNativePG Cluster. Services: recloop-pg-rw (primary, in-cluster) and
+# recloop-pg-nodeport (30432, for migrations, ingest and the run checks from the host).
+postgres:
+  name: recloop-pg
+  instances: 1
+  # CloudNativePG's "standard" image (Debian trixie + PGDG packages) includes pgvector; pinned by
+  # digest. Dated tag of 2026-10-19 (PostgreSQL 18.6).
+  image: ghcr.io/cloudnative-pg/postgresql:18.6-202610190957-standard-trixie@sha256:d72ace96f5803b12c341bb5dac48532e8c1f92f69e8a717a59d779bfc038dea9
+  database: recloop
+  user: recloop
+  password: recloop  # local development only, as in compose
+  storage: 4Gi
+  nodePort: 30432
+  parameters:
+    # api x4, billing x3, aggregator x3, log-sink: pgxpool's default is max(4, CPUs) = 8 each.
+    max_connections: "200"
+    shared_buffers: 256MB
+  # Extensions the migrations create (serving/migrations): created here as the superuser, so
+  # the migrations' CREATE EXTENSION IF NOT EXISTS find them (the app user is not a superuser).
+  extensions: [vector, btree_gist]
+  resources:
+    requests: {cpu: 250m, memory: 1Gi}
+    limits: {cpu: "2", memory: 1Gi}
+
+# Redis: derived state and caches, no persistence (rebuilt from the event log, design §7.2), as
+# in compose; split into a state and a cache instance (the Redis hardening of 2026-11-08, §19:
+# state must never be evicted silently). Service <name> in-cluster, NodePort for the host
+# (seed, rebuild, the run checks).
+redis:
+  image: redis:8.10.3-alpine
+  instances:
+    # REDIS_URL: user history, seen, bought, dedup markers, frequency caps, spend.
+    - name: redis
+      role: state
+      maxmemory: 1gb
+      policy: noeviction
+      nodePort: 30379
+      resources:
+        requests: {cpu: 100m, memory: 256Mi}
+        limits: {cpu: "1", memory: 1536Mi}
+    # CACHE_REDIS_URL: page:* and cand:* (the api only).
+    - name: redis-cache
+      role: cache
+      maxmemory: 384mb
+      policy: allkeys-lru
+      nodePort: 30380
+      resources:
+        requests: {cpu: 50m, memory: 128Mi}
+        limits: {cpu: "1", memory: 512Mi}
+  # Memory, evictions and errors by prefix (OOM refusals) per instance; the version compose's
+  # redis-exporter runs (one sidecar per instance here, one multi-target exporter there: the
+  # same metrics, job "redis", label redis="state" / "cache", so the alert rules apply as is).
+  exporter:
+    image: oliver006/redis_exporter:v1.95.0
+    resources:
+      requests: {cpu: 10m, memory: 16Mi}
+      limits: {cpu: 100m, memory: 64Mi}
+
+# Topics (design §12.3), created once by a hook Job; auto-creation is off in the broker
+# (deploy/kind/values/redpanda.yaml).
+redpanda:
+  image: redpandadata/redpanda:v26.2.6
+  brokers: redpanda-0.redpanda.redpanda.svc.cluster.local.:9093
+  topics:
+    - name: events
+      partitions: 6
+      replicas: 1
+      config:
+        retention.ms: "604800000"
+        cleanup.policy: delete

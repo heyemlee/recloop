@@ -79,6 +79,61 @@ def pctr_model():
     )
 
 
+def ctr_pctr_doc() -> dict:
+    """pctr.json of a model with the CTR columns: only the day's log-odds and the position."""
+    base = pctr_model()
+    columns = (*base.columns[:5], *rk.CTR_COLUMNS, *base.columns[5:])
+    coef = np.zeros(len(columns))
+    coef[columns.index("ictr_24h_logit")] = 1.0
+    coef[columns.index("pos_3")] = 0.2
+    return {
+        "model": "logreg",
+        "features": list(rk.FEATURES),
+        "columns": list(columns),
+        "continuous": [*columns[:5], *rk.CTR_COLUMNS],
+        "mean": [0.0] * len(columns),
+        "scale": [1.0] * len(columns),
+        "coef": coef.tolist(),
+        "intercept": 0.0,
+        "reference_position": 3,
+        "ctr": {"prior": 0.01, "strength": 100.0},
+    }
+
+
+def test_pctr_ctr_columns_follow_the_counts_and_the_golden_rows():
+    m = rk.PCTRModel.from_json(ctr_pctr_doc())
+    assert m.uses_ctr
+    x = np.full((3, len(rk.FEATURES)), np.nan)
+    counts = np.asarray([[0, 0, 0, 0], [50, 2, 4000, 200], [np.nan] * 4])
+    p = m.predict(x, counts=counts)
+    # No impressions: the prior (logit 0.01 + 0.2 at position 3); 200 clicks of 4000: about 0.05.
+    expected0 = 1 / (1 + np.exp(-(np.log(0.01 / 0.99) + 0.2)))
+    assert p[0] == pytest.approx(expected0) and p[2] == pytest.approx(expected0)
+    r1 = (200 + 1.0) / (4000 + 100)
+    assert p[1] == pytest.approx(1 / (1 + np.exp(-(np.log(r1 / (1 - r1)) + 0.2))))
+    golden = {
+        "tolerance": 1e-9,
+        "rows": [
+            {
+                "features": [None] * len(rk.FEATURES),
+                "pos": 3,
+                "sponsored": 1,
+                "counts": c,
+                "pctr": v,
+            }
+            for c, v in ((None, float(p[0])), ([50, 2, 4000, 200], float(p[1])))
+        ],
+    }
+    assert rk.golden_pctr(m, golden)["rows"] == 2
+    golden["rows"][1]["counts"] = [50, 2, 4000, 201]
+    with pytest.raises(rk.RankingError):
+        rk.golden_pctr(m, golden)
+    doc = ctr_pctr_doc()
+    del doc["ctr"]
+    with pytest.raises(rk.RankingError):
+        rk.PCTRModel.from_json(doc)
+
+
 def toy(version="v1", seed=0, ranker=True, pctr=True):
     vectors = np.random.default_rng(seed).normal(size=(N, DIM)).astype(np.float32)
     index = faiss.IndexFlatIP(DIM)
@@ -203,6 +258,35 @@ def test_grpc_rank_and_ad_relevance():
             )  # computed here
             assert math.isnan(xa[0, F["sasrec_rank"]]) and xa[0, F["n_sources"]] == 0
             assert len(resp.ad_pctr) == 2 and all(0 < p < 1 for p in resp.ad_pctr)
+    finally:
+        server.stop(None)
+
+
+def test_grpc_rank_passes_the_item_counts_to_the_pctr():
+    b, _ = toy()
+    b.ranking.pctr = rk.PCTRModel.from_json(ctr_pctr_doc())
+    server, port = start(b)
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as ch:
+            s = pb_grpc.ModelServerStub(ch)
+            counts = pb.ItemCounts(
+                impressions_hour=50, clicks_hour=2, impressions_day=4000, clicks_day=200
+            )
+            req = pb.RankRequest(
+                history=[1, 2],
+                ads=[
+                    pb.AdCandidate(item_id=5, relevance=0.25, counts=counts),
+                    pb.AdCandidate(item_id=6, relevance=0.25),
+                ],
+            )
+            resp = s.Rank(req, timeout=5)
+            r1 = (200 + 1.0) / (4000 + 100)
+            assert resp.ad_pctr[0] == pytest.approx(
+                1 / (1 + np.exp(-(np.log(r1 / (1 - r1)) + 0.2))), rel=1e-6
+            )
+            assert resp.ad_pctr[1] == pytest.approx(
+                1 / (1 + np.exp(-(np.log(0.01 / 0.99) + 0.2))), rel=1e-6
+            )  # no counts: the prior
     finally:
         server.stop(None)
 

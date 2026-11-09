@@ -38,7 +38,8 @@
 //	ADS_FIXED_PCTR         the stub pCTR every ad gets (0.01); ADS_MIN_PCTR the floor (0.001)
 //	BREAKER_WINDOW         time:10s:20:10 (default, design §5.1: >= 50 % of the calls of the
 //	                       last 10 s with at least 20 calls, or 10 failures in a row) or
-//	                       calls:20 (the last 20 calls); open 10 s, 5 half-open probes
+//	                       calls:20 (the last 20 calls); open 10 s, 5 half-open probes. A fifth
+//	                       field sets the probes: time:10s:20:25:2 (make load's comparison rule)
 //	SASREC_TIMEOUT_MS      SASRec recall timeout, capped by the recall budget (35)
 //	TEXT_TIMEOUT_MS        text-similarity recall timeout (35)
 //	ACCESS_LOG             1 (default): one log line per request; 0 for load tests
@@ -78,6 +79,7 @@ import (
 	"github.com/heyemlee/recloop/serving/internal/catalog"
 	"github.com/heyemlee/recloop/serving/internal/events"
 	"github.com/heyemlee/recloop/serving/internal/experiment"
+	"github.com/heyemlee/recloop/serving/internal/itemctr"
 	"github.com/heyemlee/recloop/serving/internal/metrics"
 	"github.com/heyemlee/recloop/serving/internal/mixer"
 	"github.com/heyemlee/recloop/serving/internal/ranking"
@@ -441,6 +443,14 @@ func run(log *slog.Logger) error {
 		full := &userstate.Fullness{R: rdb, Log: log}
 		go full.Run(bg, ads.RefreshEvery)
 		adSrv.State = full
+		// The pCTR's recent item CTR: a table of the aggregator's buckets, rebuilt in the
+		// background after every 5-minute boundary (never on the request path).
+		ctr := &itemctr.Refresher{R: rdb, Log: log, Now: time.Now}
+		if _, err := ctr.Refresh(ctx); err != nil {
+			log.Warn("item CTR table not built yet; the pCTR uses its prior until it is", "err", err)
+		}
+		go ctr.Run(bg)
+		adSrv.ItemCTR = ctr
 	}
 
 	srv := &api.Server{

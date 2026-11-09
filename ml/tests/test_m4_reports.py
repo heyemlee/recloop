@@ -393,3 +393,54 @@ def test_release_report_renders(tmp_path, monkeypatch):
         and "| 50.0 | next_page | 503 | 52.0 | pages_timeout 3 |" in md
         and "| user_state_timeout 2 |" in md
     )
+
+
+def test_pctr_report_renders_both_variants_and_the_check(tmp_path, monkeypatch):
+    pytest.importorskip("sklearn")
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from analysis import pctr_report
+    from ml.models import pctr
+    from ml.tests.test_pctr import ctr_samples
+
+    df = ctr_samples(6000)
+    d = tmp_path / "samples" / "train" / "day=2026-11-08"
+    d.mkdir(parents=True)
+    pq.write_table(pa.Table.from_pandas(df, preserve_index=False), d / "part-0.parquet")
+    meta = tmp_path / "samples" / "meta"
+    meta.mkdir()
+    check = {
+        "eligible": 900,
+        "logged": 800,
+        "recomputed_only": 100,
+        "equal": 796,
+        "differ": 4,
+        "logged_below_log": 4,
+        "logged_above_log": 0,
+        "max_abs_diff": [1, 0, 2, 0],
+        "fields": ["impressions_hour", "clicks_hour", "impressions_day", "clicks_day"],
+    }
+    (meta / "2026-11-08.json").write_text(json.dumps({"item_ctr": check}))
+    monkeypatch.setattr(pctr, "SAMPLES", tmp_path / "samples" / "train")
+    monkeypatch.setattr(pctr, "OUT", tmp_path / "model")
+    monkeypatch.setattr(pctr, "BOOTSTRAP", 40)
+    pctr.main(["--label", "synthetic"])
+    evals, model, checks = pctr_report.load(tmp_path / "model", meta)
+    assert checks == {"2026-11-08": check}
+    md = pctr_report.render(evals, model, checks)
+    assert "## synthetic" in md and "With item CTR" in md and "the AUC is higher" in md
+    assert f"| synthetic | {evals[0]['rows']:,} | logged |" in md
+    assert "## Online against offline" in md and "of 900 eligible impressions" in md
+    assert "796 (99.50%) equal" in md and "4 logged below the log" in md
+    assert "100 were served before the api logged counts" in md
+    # Without the meta files: the copies the evaluation took at training time.
+    assert pctr_report.render(evals, model) == md
+    assert "100.0% in its day window" in md and "served from" not in md
+    assert "Known limitations" in md and "not validated" in md
+    assert "/Users/" not in md and str(tmp_path) not in md
+    # Without counts in the samples: the base model only, and the report says so.
+    ev = dict(evals[0])
+    ev["variants"] = {"base": ev["variants"]["base"]}
+    ev.pop("comparison")
+    assert "carry no counts" in pctr_report.render([ev], None)

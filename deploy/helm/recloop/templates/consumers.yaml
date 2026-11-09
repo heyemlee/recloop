@@ -1,0 +1,135 @@
+{{- /*
+The event-log consumers: aggregator (events -> Redis state) and billing (sponsored clicks ->
+ledger). StatefulSets rather than Deployments: both join their consumer group as static members
+(group.instance.id = AGGREGATOR_INSTANCE_ID / BILLING_INSTANCE_ID, M2), which must be unique per
+replica and the same across restarts. A StatefulSet's pod names (billing-0, billing-1, ...) are
+both, so a deleted or crashed pod comes back under its old member id and takes its partitions
+back at once instead of waiting 15 s for the old session to expire. Parallel pod management:
+KEDA's scale-ups start all new pods together. KEDA scales them on the group's lag.
+*/ -}}
+{{- $consumers := list
+  (dict "name" "aggregator" "port" 18090 "metricsEnv" "AGGREGATOR_METRICS_ADDR" "idEnv" "AGGREGATOR_INSTANCE_ID" "group" "aggregator" "pg" "")
+  (dict "name" "billing" "port" 18092 "metricsEnv" "BILLING_METRICS_ADDR" "idEnv" "BILLING_INSTANCE_ID" "group" "billing" "pg" (ternary "pg-proxy:15433" "" (and .Values.pgProxy.enabled .Values.billing.viaPgProxy)))
+-}}
+{{- range $i, $k := $consumers }}
+{{- $c := index $.Values $k.name -}}
+{{- $ctx := dict "root" $ "name" $k.name "pg" $k.pg -}}
+{{- if $i }}
+---
+{{- end }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $k.name }}
+  labels:
+    {{- include "recloop.labels" $ctx | nindent 4 }}
+spec:
+  serviceName: {{ $k.name }}
+  podManagementPolicy: Parallel
+  {{- if not $c.keda.enabled }}
+  replicas: {{ $c.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "recloop.selector" $ctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "recloop.selector" $ctx | nindent 8 }}
+    spec:
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        {{- include "recloop.goPodSecurity" $ | nindent 8 }}
+      containers:
+        - name: {{ $k.name }}
+          image: {{ include "recloop.image" $.Values.images.go }}
+          imagePullPolicy: {{ $.Values.images.pullPolicy }}
+          command: ["/usr/local/bin/{{ $k.name }}"]
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef: {fieldPath: metadata.name}
+            - name: {{ $k.idEnv }}
+              value: "$(POD_NAME)"
+            - name: {{ $k.metricsEnv }}
+              value: "0.0.0.0:{{ $k.port }}"
+            {{- include "recloop.goEnv" $ctx | nindent 12 }}
+            {{- include "recloop.envMap" $c.env | trim | nindent 12 }}
+          ports:
+            - name: metrics
+              containerPort: {{ $k.port }}
+          # /healthz is served once PostgreSQL answered (billing retries it for 30 s at start; its
+          # connection goes through pg-proxy): liveness waits for it.
+          startupProbe:
+            httpGet: {path: /healthz, port: metrics}
+            periodSeconds: 2
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: {path: /healthz, port: metrics}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: metrics}
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            {{- toYaml $c.resources | nindent 12 }}
+          securityContext:
+            {{- include "recloop.containerSecurity" $ | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $k.name }}
+  labels:
+    {{- include "recloop.labels" $ctx | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "recloop.selector" $ctx | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ $k.port }}
+      targetPort: metrics
+{{- if $c.keda.enabled }}
+---
+# Replicas from the consumer group's lag on `events` (KEDA's Kafka scaler asks the broker for
+# the group's committed offsets and the partitions' end offsets): ceil(lag / lagThreshold),
+# between minReplicas and maxReplicas, never more than the topic's 6 partitions.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ $k.name }}
+  labels:
+    {{- include "recloop.labels" $ctx | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: {{ $k.name }}
+  minReplicaCount: {{ $c.keda.minReplicas }}
+  maxReplicaCount: {{ $c.keda.maxReplicas }}
+  pollingInterval: {{ $c.keda.pollingInterval }}
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          policies:
+            - {type: Pods, value: 2, periodSeconds: 15}
+        scaleDown:
+          stabilizationWindowSeconds: {{ $c.keda.scaleDownStabilizationSeconds }}
+          policies:
+            - {type: Pods, value: 1, periodSeconds: 30}
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: {{ $.Values.endpoints.kafkaBrokers | quote }}
+        consumerGroup: {{ $k.group }}
+        topic: events
+        lagThreshold: {{ $c.keda.lagThreshold | quote }}
+        offsetResetPolicy: earliest
+        allowIdleConsumers: "false"
+        scaleToZeroOnInvalidOffset: "false"
+{{- end }}
+{{- end }}
