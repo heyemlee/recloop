@@ -25,6 +25,8 @@ MiniOneRec does not run on the request path: one 50-beam request takes 3.1 s on 
 | CTR of sponsored slots | 0.0089 | 0.0105 | +0.0016 (+18.5%) | [-0.0002, +0.0035] | [-0.0001, +0.0033] | 0.076 |
 | Ad revenue per 1,000 home impressions (cents) | 64.6 | 76.5 | +11.9 (+18.5%) | [-0.8, +24.7] | [-1.2, +25.0] | 0.065 |
 
+The simulator's users click by examination × relevance to their test-period items, the offline split's targets (sim/world.py). The A/B checks the nearline path and the experiment pipeline end to end; its CTR difference follows the offline gain (minionerec.md, As a fourth recall source) and says nothing about real users.
+
 ## Coverage
 
 Organic home-feed impressions; distinct items compared at 212,538 impressions per arm (the larger arm subsampled, mean of 20 seeded draws).
@@ -46,7 +48,7 @@ The gen arm reads its result in the same Redis round trip as the rest of the use
 ## Freshness
 
 - History change applied → result written: P50 31.0 s, P90 32.1 s, P99 48.3 s, max 80.3 s (3,804).
-- The event itself → result written: P50 31.0 s, P90 32.1 s, P99 48.3 s, max 80.3 s (3,804).
+- Event (its UUIDv7 time) → history change applied by the aggregator: P50 0.0 ms, P90 1.0 ms, P99 3.0 ms, max 8.0 ms (3,804), so from the event itself the times above are the same.
 - Changes answered per generation: P50 1.0 changes, P90 3.0 changes, P99 6.0 changes, max 10.0 changes (2,283); due → claimed (time in the queue after the debounce): P50 0.2 s, P90 0.6 s, P99 1.2 s, max 2.7 s (2,283).
 - Queue: at most 58 users queued and 3 due at once during the traffic; 1 due at the end.
 - The gen arm's home first pages: fresh 80.6%, missing 9.3%, stale 9.8%, unavailable 0.3% of 31,957; stale by 1 version: 2,179, 2 versions: 542, 3 versions: 233, 4 versions: 107, 5 versions: 29, 6 versions: 22, 7 versions: 3, 10 versions: 1. Age of the result when served: P50 827.8 s, P90 2,316.9 s, P99 3,564.2 s, max 4,029.6 s (28,881).

@@ -226,7 +226,7 @@ def freshness(
     """Per history change answered during the traffic: written - applied, written - event time
     (seconds); jobs per round; the queue over time; what the gen arm's requests saw."""
     lo, hi = t0 * 1000, t1 * 1000 + 3_600_000  # changes applied during the traffic, answered later
-    applied, event, per_job, waits = [], [], [], []
+    applied, event, pipeline, per_job, waits = [], [], [], [], []
     statuses = Counter(j.get("status") for j in jobs)
     for j in jobs:
         if j.get("status") != "written":
@@ -239,6 +239,7 @@ def freshness(
         for ev, ap in changes:
             applied.append((j["written_ms"] - ap) / 1000)
             event.append((j["written_ms"] - ev) / 1000)
+            pipeline.append(ap - ev)
     q = [r for r in queue if lo <= r["t"] <= t1 * 1000]
     gen_served = [s for s in served if s["arm"] == "gen" and s.get("gen")]
     seen = Counter(s["gen"]["status"] for s in gen_served)
@@ -248,6 +249,7 @@ def freshness(
         "job_statuses": dict(statuses),
         "since_applied_s": _pcts(applied),
         "since_event_s": _pcts(event),
+        "event_to_applied_ms": _pcts(pipeline),
         "changes_per_job": _pcts(per_job),
         "queue_wait_s": _pcts(waits),
         "queue_max": max((r["queued"] for r in q), default=0),
@@ -365,6 +367,13 @@ def render(run: dict, worker: dict, res: dict) -> str:
     L.append(
         _metric_row("Ad revenue per 1,000 home impressions (cents)", res["effect"]["rpm"], d=1)
     )
+    L += [
+        "",
+        "The simulator's users click by examination × relevance to their test-period items, the "
+        "offline split's targets (sim/world.py). The A/B checks the nearline path and the "
+        "experiment pipeline end to end; its CTR difference follows the offline gain "
+        "(minionerec.md, As a fourth recall source) and says nothing about real users.",
+    ]
     L += ["", "## Coverage", ""]
     c = res["coverage"]
     L.append(
@@ -408,7 +417,9 @@ def render(run: dict, worker: dict, res: dict) -> str:
     f = res["freshness"]
     L += [
         f"- History change applied → result written: {_dist(f['since_applied_s'])}.",
-        f"- The event itself → result written: {_dist(f['since_event_s'])}.",
+        f"- Event (its UUIDv7 time) → history change applied by the aggregator: "
+        f"{_dist(f['event_to_applied_ms'], 'ms')}, so from the event itself the times above are "
+        "the same.",
         f"- Changes answered per generation: {_dist(f['changes_per_job'], 'changes')}; due → claimed "
         f"(time in the queue after the debounce): {_dist(f['queue_wait_s'])}.",
         f"- Queue: at most {f['queue_max']:,} users queued and {f['due_max']:,} due at once during the "

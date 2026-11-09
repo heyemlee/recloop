@@ -26,7 +26,9 @@ write-ups in `docs/results/`.
   release-report` re-renders it from `artifacts/release/drill.json`; `make ab-report` writes
   `ab.md` from `artifacts/ab/` and the sample job's impressions; `make pctr-report` writes
   `pctr.md` from `artifacts/models/pctr/eval/`; `make deploy-runs` and `make deploy-drill` write
-  `deploy.md`, `make deploy-report` re-renders it from `artifacts/deploy/`); change the
+  `deploy.md`, `make deploy-report` re-renders it from `artifacts/deploy/`; `make minionerec`
+  writes `minionerec.md` from `artifacts/minionerec/`; `make nearline-report` writes
+  `nearline.md` from `artifacts/nearline/ab/` and the sample job's impressions); change the
   generator, not the file. The committed `offline.md` is `make setup`, then `make paper-sasrec`,
   then `make eval` (`make setup` includes `make train-ranker`). `make eval` re-runs give the same
   bytes; `make train` runs on the CPU with fixed seeds, and two runs with the same worker / thread

@@ -154,6 +154,7 @@ def test_freshness_counts_each_change_once_from_apply_and_from_the_event():
     assert f["since_applied_s"]["n"] == 2
     assert f["since_applied_s"]["max"] == pytest.approx(39.0)
     assert f["since_event_s"]["max"] == pytest.approx(40.0)
+    assert f["event_to_applied_ms"]["max"] == pytest.approx(1000.0)
     assert f["queue_wait_s"]["p50"] == pytest.approx(1.0)
     assert f["served"]["requests"] == 3
     assert f["served"]["fresh"] == pytest.approx(1 / 3)
