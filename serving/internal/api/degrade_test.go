@@ -70,6 +70,17 @@ func (nopPublisher) Publish(_ context.Context, evs []events.Event) (events.Resul
 	return events.Result{Accepted: len(evs)}, nil
 }
 
+// memPlan is the design's request budget with 100 ms more for the user context (and for the
+// request, so every later stage keeps its own budget). These tests check what comes after that
+// stage: the model's 35 ms, the breaker, the caches. A CI runner can take longer than the
+// design's 5 ms for a round trip to miniredis, and a user context that times out skips the model.
+var memPlan = func() resilience.Plan {
+	p := resilience.DefaultPlan
+	p.UserContext += 100 * time.Millisecond
+	p.Total += 100 * time.Millisecond
+	return p
+}()
+
 func memServer(t *testing.T, rdb redis.UniversalClient, model *fakeModel, naive bool) *api.Server {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -97,7 +108,7 @@ func memServer(t *testing.T, rdb redis.UniversalClient, model *fakeModel, naive 
 		Catalog: catalog.New(items, stock), Bundle: b, Users: userstate.Store{R: rdb}, Pages: cache.Pages{R: rdb},
 		Cands: &cache.CandidateCache{R: rdb}, Exps: exps, Events: nopPublisher{}, Served: served, Redis: rdb,
 		Weights: map[string]map[string]float64{recall.SurfaceHome: {"sasrec": 1, "itemcf": 1, "pop": 0.3}},
-		Plan:    resilience.DefaultPlan, Naive: naive, Log: log, Now: time.Now,
+		Plan:    memPlan, Naive: naive, Log: log, Now: time.Now,
 	}
 	var msBreaker *resilience.Breaker
 	if !naive {
@@ -212,11 +223,6 @@ func TestBreakerOpensAfterModelFailures(t *testing.T) {
 	model.fail.Store(true)
 	s := memServer(t, rdb, model, false)
 	s.Cands = nil
-	// Every call has to reach the model. A user-context read slower than its 5 ms (a busy CI
-	// runner) skips SASRec and breaks the count, so this test gives that stage more room: it
-	// tests the breaker, not Redis's timing.
-	s.Plan.Total += 100 * time.Millisecond
-	s.Plan.UserContext += 100 * time.Millisecond
 	seedHistory(t, rdb, 5)
 	// The default breaker opens after 10 failures in a row (or half of >= 20 calls in 10 s).
 	for i := 0; i < int(resilience.DefaultBreaker.Consecutive); i++ {
