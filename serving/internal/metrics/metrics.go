@@ -71,6 +71,11 @@ var (
 	CandidateCache = reg(prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "recloop_candidate_cache_total", Help: "Candidate cache lookups by result.",
 	}, []string{"surface", "result"}))
+	// GenResults: home requests of an arm with the nearline gen source, by what the user's
+	// generation result was (fresh, stale, missing, invalid, unavailable; design §11 step 5).
+	GenResults = reg(prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "recloop_gen_results_total", Help: "Nearline generation results seen by home requests, by status.",
+	}, []string{"status"}))
 	// BreakerState: 0 closed, 1 half-open, 2 open.
 	BreakerState = reg(prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "recloop_breaker_state", Help: "Circuit breaker state: 0 closed, 1 half-open, 2 open.",

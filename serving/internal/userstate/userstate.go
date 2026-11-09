@@ -29,6 +29,13 @@ const (
 	DedupGroup = "aggregator"
 	// FreqTTL keeps a frequency-cap counter (design §12.2: two days).
 	FreqTTL = 48 * time.Hour
+	// Nearline generation (design §11 step 5): a history change queues its user for the
+	// generation worker, due once the history has been quiet for GenDebounce, at the latest
+	// GenMaxWait after the first change not picked up yet. GenPendingTTL bounds the list of
+	// unanswered changes if no worker comes back for it. ml/nearline/keys.py has the same values.
+	GenDebounce   = 30 * time.Second
+	GenMaxWait    = 120 * time.Second
+	GenPendingTTL = 24 * time.Hour
 )
 
 // Keys of one user.
@@ -56,6 +63,9 @@ type Context struct {
 	HV      int64   // history version: bumped by every history change
 	Bought  map[int32]bool
 	Seen    map[int32]bool // impressions in the last SeenWindow
+	// Gen is the nearline generation result, when ReadWith asked for it and there is one.
+	Gen        *Generated
+	GenInvalid bool // there was a value, but it did not decode
 }
 
 // Store reads and updates user state. Group is the dedup group (DedupGroup when empty).
@@ -73,6 +83,18 @@ func (s Store) group() string {
 
 // Read fetches the user's context in one pipeline round trip.
 func (s Store) Read(ctx context.Context, uid int64, now time.Time) (Context, error) {
+	return s.ReadWith(ctx, uid, now, ReadOptions{})
+}
+
+// ReadOptions adds optional keys to the context's pipeline.
+type ReadOptions struct {
+	// GenVersion, when set, also reads the user's nearline generation result of that generator
+	// version (gen:{uid}:{ver}) in the same round trip: Context.Gen.
+	GenVersion string
+}
+
+// ReadWith is Read plus the keys opts asks for, still one pipeline round trip.
+func (s Store) ReadWith(ctx context.Context, uid int64, now time.Time, opts ReadOptions) (Context, error) {
 	pipe := s.R.Pipeline()
 	hist := pipe.ZRangeArgs(ctx, redis.ZRangeArgs{Key: HistKey(uid), Start: 0, Stop: -1})
 	hv := pipe.Get(ctx, HVKey(uid))
@@ -80,10 +102,24 @@ func (s Store) Read(ctx context.Context, uid int64, now time.Time) (Context, err
 	seen := pipe.ZRangeByScore(ctx, SeenKey(uid), &redis.ZRangeBy{
 		Min: strconv.FormatInt(now.Add(-SeenWindow).UnixMilli(), 10), Max: "+inf",
 	})
+	var gen *redis.StringCmd
+	if opts.GenVersion != "" {
+		gen = pipe.Get(ctx, GenKey(uid, opts.GenVersion))
+	}
 	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
 		return Context{}, err
 	}
 	c := Context{Bought: map[int32]bool{}, Seen: map[int32]bool{}}
+	if gen != nil {
+		if raw, err := gen.Bytes(); err == nil {
+			// A payload that does not decode is no reason to fail the request: no result.
+			if g, err := DecodeGenerated(raw); err == nil {
+				c.Gen = &g
+			} else {
+				c.GenInvalid = true
+			}
+		}
+	}
 	for _, m := range hist.Val() {
 		if id, err := strconv.ParseInt(m, 10, 32); err == nil {
 			c.History = append(c.History, int32(id))
@@ -138,6 +174,7 @@ func (s Store) scriptArgs(c Change, now time.Time) ([]string, []any) {
 	keys := []string{
 		DedupKey(s.group(), c.EventID), HistKey(c.UserID), HVKey(c.UserID),
 		BoughtKey(c.UserID), SeenKey(c.UserID),
+		GenWorkerKey, GenQueueKey, GenPendingKey(c.UserID),
 	}
 	fc := "0"
 	if c.FreqKey != "" {
@@ -154,6 +191,7 @@ func (s Store) scriptArgs(c Change, now time.Time) ([]string, []any) {
 		c.Kind, c.ItemID, c.At.UnixMilli(), now.UnixMilli(),
 		HistoryMax, SeenWindow.Milliseconds(), DedupTTL.Milliseconds(), FreqTTL.Milliseconds(),
 		fc, field, exp5, exp1h,
+		c.UserID, GenDebounce.Milliseconds(), GenMaxWait.Milliseconds(), GenPendingTTL.Milliseconds(),
 	}
 	return keys, args
 }

@@ -99,7 +99,9 @@ def fuse(
         hit = np.zeros((m, num_items), dtype=bool)
         best = np.full((m, num_items), big, dtype=np.int64)
         rank_of, score_of = {}, {}
-        for s in SOURCES:  # Go sums the contributions in the sources' order
+        # Go sums the contributions in the sources' order: the home spec's three, then any
+        # other source in the order given (M7: gen, after pop, as in serving/cmd/api).
+        for s in (*SOURCES, *(x for x in lists if x not in SOURCES)):
             if s not in lists or weights.get(s, 0.0) <= 0:
                 continue
             items, scores = lists[s][0][lo:hi], lists[s][1][lo:hi]

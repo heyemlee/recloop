@@ -70,6 +70,23 @@ Paired differences (same bootstrap replicates for both models):
 
 LightGBM (M4) is added to this table when it exists.
 
+## As a fourth recall source
+
+The home feed's weighted RRF (SASRec, ItemCF and Pop, each its top 200; ml/ranking/candidates.py replays the api's fusion) against the same with MiniOneRec's top 50 items of the main run as a fourth source (`gen`), on its 4,866 samples; weights sasrec 1, itemcf 1, pop 0.3, gen 1. The gen weight was fixed beforehand (SASRec's and ItemCF's), not tuned on any split. This is what the nearline A/B ([nearline.md](nearline.md)) serves to its gen arm, apart from freshness.
+
+| Model | HR@3 | HR@5 | HR@10 | NDCG@3 | NDCG@5 | NDCG@10 |
+|---|---|---|---|---|---|---|
+| RRF, three sources (item rule) | 0.1223 [0.1116, 0.1332] | 0.1373 [0.1257, 0.1482] | 0.1671 [0.1541, 0.1792] | 0.1031 [0.0942, 0.1125] | 0.1092 [0.1002, 0.1184] | 0.1188 [0.1096, 0.1283] |
+| RRF + gen (item rule) | 0.1338 [0.1218, 0.1455] | 0.1582 [0.1459, 0.1698] | 0.1913 [0.1784, 0.2045] | 0.1154 [0.1054, 0.1253] | 0.1256 [0.1152, 0.1351] | 0.1363 [0.1257, 0.1462] |
+| Difference (item rule) | +0.0115 [+0.0058, +0.0167] | +0.0210 [+0.0153, +0.0269] | +0.0242 [+0.0182, +0.0306] | +0.0123 [+0.0082, +0.0165] | +0.0163 [+0.0126, +0.0203] | +0.0174 [+0.0140, +0.0209] |
+| RRF, three sources (sid rule) | 0.1223 [0.1116, 0.1332] | 0.1373 [0.1257, 0.1482] | 0.1671 [0.1541, 0.1792] | 0.1031 [0.0942, 0.1125] | 0.1092 [0.1002, 0.1184] | 0.1188 [0.1096, 0.1283] |
+| RRF + gen (sid rule) | 0.1338 [0.1218, 0.1455] | 0.1582 [0.1459, 0.1698] | 0.1917 [0.1787, 0.2049] | 0.1154 [0.1054, 0.1253] | 0.1256 [0.1152, 0.1351] | 0.1364 [0.1258, 0.1462] |
+| Difference (sid rule) | +0.0115 [+0.0058, +0.0167] | +0.0210 [+0.0153, +0.0269] | +0.0247 [+0.0185, +0.0311] | +0.0123 [+0.0082, +0.0165] | +0.0163 [+0.0126, +0.0203] | +0.0176 [+0.0142, +0.0211] |
+
+In the fused top 10, 79.4% of the items are among gen's and 0.0% come from gen alone.
+
+Gen brings 21.6 items per sample that none of the three sources returned into the 300 fused candidates, but the highest of them is at position 13: an item only one source returned scores at most w / (60 + 1), less than an item two sources rank within their top 50. The gain at 10 comes from the order: gen lifts the items it agrees with.
+
 ## Which users it helps
 
 Item rule, intervals from a user-level bootstrap inside each group (the same replicates
@@ -138,6 +155,8 @@ One test sample per user, 96 random users; MiniOneRec on the 16-core GPU (MPS) i
 | MiniOneRec, 20 beams | 8 | 11,679 ms | 11,766 ms | 12,568 ms | 0.71 | 8.3 GiB | 1.5 / 1.3 |
 | MiniOneRec, 50 beams | 1 | 3,110 ms | 3,787 ms | 3,827 ms | 0.31 | 6.4 GiB | 1.9 / 1.3 |
 | MiniOneRec, 50 beams | 8 | 29,104 ms | 29,719 ms | 30,128 ms | 0.28 | 15.2 GiB | 1.1 / 0.8 |
+| MiniOneRec, 50 beams, prompt once | 1 | 639 ms | 708 ms | 876 ms | 1.52 | 6.4 GiB | 1.0 / 1.4 |
+| MiniOneRec, 50 beams, prompt once | 8 | 4,315 ms | 4,337 ms | 4,354 ms | 1.89 | 14.8 GiB | 1.4 / 1.3 |
 | SASRec, PyTorch CPU, 1 thread | 1 | 0.15 ms | 0.17 ms | 0.19 ms | 6,274 | 0.2 GiB | 1.1 / 1.1 |
 | SASRec, PyTorch CPU, 8 threads | 1 | 0.35 ms | 0.40 ms | 0.48 ms | 2,832 | 0.2 GiB | 1.1 / 1.1 |
 | SASRec, PyTorch CPU, 8 threads | 8 | 0.64 ms | 0.70 ms | 0.75 ms | 12,356 | 0.2 GiB | 1.1 / 1.1 |
@@ -147,8 +166,11 @@ One test sample per user, 96 random users; MiniOneRec on the 16-core GPU (MPS) i
 - `beam10_batch1`: 1.4 GiB swapped out while it ran (vm_stat), so its times include paging.
 - `beam50_batch1`: 506 MiB swapped out while it ran (vm_stat), so its times include paging.
 - `beam50_batch8`: 7.8 GiB swapped out while it ran (vm_stat), so its times include paging.
+- `beam50_batch8_once`: 945 MiB swapped out while it ran (vm_stat), so its times include paging.
 
 - **Where the time goes.** With one new token instead of five, a 50-beam request takes 2,676 ms (P50) of its 3,110 ms: 86% is the first forward pass. Hugging Face's beam search copies the prompt (76-121 tokens) once per beam before that pass, so the model encodes the same prompt 50 times. The beams differ only in what they generate: encoding the prompt once and sharing its attention cache across the beams would remove most of that work.
+- **Prompt encoded once, batch 1.** minionerec.engine encodes each prompt once and repeats its attention cache for the 50 beams (the rest of the beam search is transformers' own): 639 ms per call (P50) instead of 3,110 ms, 4.9 times faster, 1.52 users per second, peak memory 6.4 GiB, the same as per beam.
+- **Prompt encoded once, batch 8.** minionerec.engine encodes each prompt once and repeats its attention cache for the 50 beams (the rest of the beam search is transformers' own): 4,315 ms per call (P50) instead of 29,104 ms, 6.7 times faster, 1.89 users per second, peak memory 14.8 GiB instead of 15.2 GiB.
 - **Against SASRec.** A 50-beam MiniOneRec request is 20,091 times a single-threaded SASRec request at the median (3,110 ms vs 0.15 ms). Online, the model server runs the same SASRec encoder in ONNX Runtime and searches FAISS.
 
 ## Other settings on the same samples
@@ -159,10 +181,34 @@ Each run against the main run (test: 50 beams, batch 8, bfloat16), and two runs 
 |---|---|---|---|---|---|---|---|---|
 | bf16-8-b4 | 50 / 4 / bfloat16 | test | 17 | 52.9% | 98.2% | 0.1765 [0.0000, 0.3750] | 0.1765 [0.0000, 0.3750] | +0.0000 [+0.0000, +0.0000] |
 | fp32-8-b4 | 50 / 4 / float32 | test | 17 | 0.0% | 87.6% | 0.1765 [0.0000, 0.3750] | 0.1765 [0.0000, 0.3750] | +0.0000 [+0.0000, +0.0000] |
+| once | 50 / 8 / bfloat16, prompt once | test | 4,866 | >99.9% | 100.0% | 0.1570 [0.1443, 0.1686] | 0.1570 [0.1443, 0.1686] | +0.0000 [+0.0000, +0.0000] |
+| once-trial | 50 / 8 / bfloat16, prompt once | test | 200 | 100.0% | 100.0% | 0.2300 [0.1694, 0.2917] | 0.2300 [0.1694, 0.2917] | +0.0000 [+0.0000, +0.0000] |
 | trial-200 | 50 / 8 / bfloat16 | test | 434 | 57.1% | 98.1% | 0.1359 [0.1034, 0.1695] | 0.1359 [0.1034, 0.1695] | +0.0000 [+0.0000, +0.0000] |
 | fp32-8-b4 | 50 / 4 / float32 | bf16-8-b4 | 17 | 0.0% | 88.2% | 0.1765 [0.0000, 0.3750] | 0.1765 [0.0000, 0.3750] | +0.0000 [+0.0000, +0.0000] |
 
 - `trial-200` has the settings of `test`; only the batches differ: a subset forms its batches from its own samples, so most batches hold other prompts with other left padding, and the kernels round differently. That alone changes 42.9% of the top-10 lists, while 98.1% of the top-10 SIDs stay; HR@10 differs by +0.0000 [+0.0000, +0.0000].
+
+- `once` replays `test`'s batches through minionerec.engine with each prompt encoded once and its attention cache shared by the beams: **5 of 4,866 samples differ from `test`** (4,864 have the same top 10).
+
+  Item rule on the same samples, `once` against `test`:
+
+| Run | HR@3 | HR@5 | HR@10 | NDCG@3 | NDCG@5 | NDCG@10 |
+|---|---|---|---|---|---|---|
+| `test` | 0.1247 | 0.1391 | 0.1570 | 0.1102 | 0.1161 | 0.1219 |
+| `once` | 0.1247 | 0.1391 | 0.1570 | 0.1102 | 0.1161 | 0.1219 |
+
+  Neither run kept its beam scores, so `minionerec.replay diff` generated the 5 batches that hold a differing sample once more both ways, with the beam scores (transformers' sequences_scores; mps, bfloat16): per beam, 26 of 26 samples gave the reference's SIDs again; with the prompt once, 26 of 26 the replay's. Over all 1,295 SIDs both paths returned for those 26 samples, the two paths move one SID's score by 0 (median), 0.0022 (P90), 0.495 (max). Per differing sample: its batch size, the first beam position where the lists part, the SID each has there, the gap between those two SIDs' scores on each path (the reference's SID minus the replay's on the per-beam path, the other way round with the prompt once), and how far the paths move that sample's shared SIDs (median / max). A near tie = both gaps measured and neither larger than that max:
+
+| Test sample | Batch | First differing position | Reference's SID there | Replay's SID there | Gap, per beam | Gap, prompt once | Score moves | Near tie |
+|---|---|---|---|---|---|---|---|---|
+| 624 | 8 | 19 | `<a_34><b_168><c_142>` | `<a_238><b_224><c_170>` | not among its beams | 0.343 | 0.0011 / 0.0614 | **no** |
+| 2,432 | 1 | 4 | `<a_187><b_182><c_143>` | `<a_187><b_147><c_149>` | 0.139 | 0.248 | 0.148 / 0.495 | yes |
+| 3,516 | 8 | 24 | `<a_250><b_174><c_0>` | `<a_11><b_137><c_43>` | 0.0596 | 0.00292 | 0.00209 / 0.0604 | yes |
+| 4,425 | 8 | 26 | `<a_160><b_221><c_201>` | `<a_101><b_239><c_124>` | 0.015 | 0.0475 | 0.0022 / 0.0603 | yes |
+| 4,865 | 1 | 6 | `<a_117><b_130><c_189>` | `<a_221><b_43><c_179>` | 0.0962 | 0.108 | 0.0542 / 0.252 | yes |
+
+  So 4 of the 5 swaps are near ties, consistent with rounding; for the other 1 the cause is not known (sample 624: the replay's SID at position 19 is not among the reference's beams, so its gap on the per-beam path cannot be measured). The largest gap is 0.343.
+- `once-trial` replays `test`'s batches through minionerec.engine with each prompt encoded once and its attention cache shared by the beams: all 200 samples have `test`'s 50 SIDs in the same order.
 
 ## Runs
 
@@ -170,6 +216,8 @@ Each run against the main run (test: 50 beams, batch 8, bfloat16), and two runs 
 |---|---|---|---|---|---|---|---|---|
 | bf16-8-b4 | 17 / 8 | 50 / 4 | bfloat16 | 2026-11-07 02:30 | 1 min | 2.3 | 0.1765 | match |
 | fp32-8-b4 | 17 / 8 | 50 / 4 | float32 | 2026-11-07 02:31 | 1 min | 2.2 | 0.1765 | match |
+| once | 4,866 / 2,024 | 50 / 8, prompt once | bfloat16 | 2026-11-08 19:40 | 43 min | 1.3 | 0.1570 | match |
+| once-trial | 200 / 94 | 50 / 8, prompt once | bfloat16 | 2026-11-08 19:35 | 2 min | 1.3 | 0.2300 | match |
 | test (main) | 4,866 / 2,024 | 50 / 8 | bfloat16 | 2026-11-07 09:12 | 5.1 h | 2.6 | 0.1570 | match |
 | trial-200 | 434 / 200 | 50 / 8 | bfloat16 | 2026-11-07 02:03 | 26 min | 1.5 | 0.1359 | match |
 

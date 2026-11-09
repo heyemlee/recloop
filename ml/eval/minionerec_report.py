@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from ml.eval import metrics
 from ml.eval.machine import BUSY_LOAD
-from ml.eval.minionerec import NAME, REFERENCES, SEGMENT_METRICS, SETTINGS_COMPARED
+from ml.eval.minionerec import NAME, REFERENCES, SEGMENT_METRICS, SETTINGS_COMPARED, setting
 from ml.eval.report import _ci, _signed, _table
 
 METRIC_NAMES = [f"HR@{k}" for k in metrics.KS] + [f"NDCG@{k}" for k in metrics.KS]
@@ -61,6 +61,7 @@ def render(out: dict) -> str:
     lines += _setup_section(out, main)
     lines += _repro_section(out, main)
     lines += _comparison_section(out, main)
+    lines += _rrf_gen_section(out)
     if "segments" in main:
         lines += _segment_section(out, main)
     lines += _cost_section(out)
@@ -269,6 +270,62 @@ def _comparison_section(out: dict, main: dict) -> list[str]:
     return lines
 
 
+def _rrf_gen_section(out: dict) -> list[str]:
+    """RRF of the three home sources with and without MiniOneRec as a fourth (offline)."""
+    r = out.get("rrf_gen")
+    if not r:
+        return []
+    w = ", ".join(f"{k} {v:g}" for k, v in r["weights"].items())
+    rows = []
+    for rule in ("item", "sid"):
+        rows.append(
+            [f"RRF, three sources ({rule} rule)"] + [_ci(r["rrf"][rule][m]) for m in METRIC_NAMES]
+        )
+        rows.append(
+            [f"RRF + gen ({rule} rule)"] + [_ci(r["rrf_gen"][rule][m]) for m in METRIC_NAMES]
+        )
+        rows.append(
+            [f"Difference ({rule} rule)"]
+            + [_signed(r["difference"][rule][m]) for m in METRIC_NAMES]
+        )
+    return [
+        "## As a fourth recall source",
+        "",
+        "The home feed's weighted RRF (SASRec, ItemCF and Pop, each its top 200; "
+        "ml/ranking/candidates.py replays the api's fusion) against the same with MiniOneRec's "
+        f"top {r['gen_k']} items of the main run as a fourth source (`gen`), on its "
+        f"{r['samples']:,} samples; weights {w}. The gen weight was fixed beforehand (SASRec's "
+        "and ItemCF's), not tuned on any split. This is what the nearline A/B "
+        "([nearline.md](nearline.md)) serves to its gen arm, apart from freshness.",
+        "",
+        *_table(["Model"] + METRIC_NAMES, rows),
+        "",
+        f"In the fused top 10, {r['top10_from_gen']:.1%} of the items are among gen's and "
+        f"{r['top10_only_gen']:.1%} come from gen alone.",
+        "",
+        *_only_gen_notes(r),
+    ]
+
+
+def _only_gen_notes(r: dict) -> list[str]:
+    if "only_gen_per_sample" not in r:
+        return []
+    best = r["only_gen_best_position"]
+    where = (
+        f"the highest of them is at position {best}"
+        if best is not None
+        else "none of them is among the candidates"
+    )
+    return [
+        f"Gen brings {r['only_gen_per_sample']:.1f} items per sample that none of the three "
+        f"sources returned into the {r['candidates']} fused candidates, but {where}: an item "
+        "only one source returned scores at most w / (60 + 1), less than an item two sources "
+        "rank within their top 50. The gain at 10 comes from the order: gen lifts the items it "
+        "agrees with.",
+        "",
+    ]
+
+
 def _segment_section(out: dict, main: dict) -> list[str]:
     seg, info = main["segments"], out["segment_info"]
     lines = [
@@ -451,11 +508,17 @@ def _cost_section(out: dict) -> list[str]:
     ]
     rows = []
     generate = [c for c in cost["configs"].values() if c["max_new_tokens"] > 1]
-    for c in sorted(generate, key=lambda c: (c["num_beams"], c["batch_size"])):
+    once = {"once": 1}
+    for c in sorted(
+        generate,
+        key=lambda c: (c["num_beams"], once.get(c.get("prefill"), 0), c["batch_size"]),
+    ):
         pc = c["per_call"]
         rows.append(
             [
-                f"{NAME}, {c['num_beams']} beams" + (" †" if _disturbed(c) else ""),
+                f"{NAME}, {c['num_beams']} beams"
+                + (", prompt once" if c.get("prefill") == "once" else "")
+                + (" †" if _disturbed(c) else ""),
                 str(c["batch_size"]),
                 _ms(pc["p50"]),
                 _ms(pc["p90"]),
@@ -510,6 +573,7 @@ def _cost_section(out: dict) -> list[str]:
             "what they generate: encoding the prompt once and sharing its attention cache "
             "across the beams would remove most of that work.",
         ]
+        lines += _prompt_once_notes(cost, full)
     if sasrec and full:
         one = next((r for r in sasrec["runs"] if r["batch_size"] == 1 and r["threads"] == 1), None)
         if one:
@@ -522,6 +586,29 @@ def _cost_section(out: dict) -> list[str]:
             )
     lines.append("")
     return lines
+
+
+def _prompt_once_notes(cost: dict, full: dict) -> list[str]:
+    """The measured effect of encoding the prompt once (minionerec.engine), at batch 1 and 8."""
+    out = []
+    for bs in (1, 8):
+        once = cost["configs"].get(f"beam50_batch{bs}_once")
+        ref = full if bs == 1 else cost["configs"].get("beam50_batch8")
+        if not once or not ref:
+            continue
+        out.append(
+            f"- **Prompt encoded once, batch {bs}.** minionerec.engine encodes each prompt once "
+            "and repeats its attention cache for the 50 beams (the rest of the beam search is "
+            f"transformers' own): {_ms(once['per_call']['p50'])} per call (P50) instead of "
+            f"{_ms(ref['per_call']['p50'])}, {ref['per_call']['p50'] / once['per_call']['p50']:.1f} "
+            f"times faster, {once['samples_per_second']:.2f} users per second, peak memory "
+            + (
+                f"{_gib(once['peak_footprint'])}, the same as per beam."
+                if _gib(once["peak_footprint"]) == _gib(ref["peak_footprint"])
+                else f"{_gib(once['peak_footprint'])} instead of {_gib(ref['peak_footprint'])}."
+            )
+        )
+    return out
 
 
 FULL_RUN_SHARDS = 8  # evaluate.sh's shards: one process, one model load each
@@ -626,11 +713,11 @@ def _agreement_section(out: dict) -> list[str]:
         rows.append(
             [
                 a["run"],
-                f"{s['num_beams']} / {s['batch_size']} / {s['dtype']}",
+                f"{s['num_beams']} / {s['batch_size']} / {s['dtype']}" + _prefill(s),
                 a["reference"],
                 f"{a['samples']:,}",
-                f"{a['identical_top10']:.1%}",
-                f"{a['top10_overlap']:.1%}",
+                _share(a["identical_top10"]),
+                _share(a["top10_overlap"]),
                 _ci(a["reference_values"]["HR@10"]),
                 _ci(a["run_values"]["HR@10"]),
                 _signed(a["difference"]["HR@10"]),
@@ -662,6 +749,7 @@ def _agreement_section(out: dict) -> list[str]:
         ),
         "",
         *_same_settings_notes(out),
+        *_replay_notes(out),
     ]
 
 
@@ -672,7 +760,7 @@ def _same_settings_notes(out: dict) -> list[str]:
     notes = []
     for a in out["agreement"]:
         s, r = a["settings"], a["reference_settings"]
-        if any(s.get(k) != r.get(k) for k in SETTINGS_COMPARED):
+        if any(setting(s, k) != setting(r, k) for k in SETTINGS_COMPARED):
             continue
         n_run = out["runs"][a["run"]]["summary"]["samples"]
         n_ref = out["runs"][a["reference"]]["summary"]["samples"]
@@ -691,6 +779,150 @@ def _same_settings_notes(out: dict) -> list[str]:
     return [*notes, ""] if notes else []
 
 
+def _prefill(s: dict) -> str:
+    return ", prompt once" if setting(s, "prefill") == "once" else ""
+
+
+def _replay_notes(out: dict) -> list[str]:
+    """Runs of minionerec.replay: the main run's own batches, each prompt encoded once."""
+    notes = []
+    for name, r in out["runs"].items():
+        rep = r["summary"].get("replay")
+        if not rep:
+            continue
+        ref = r["summary"]["selection"].get("replay_of", out["main_run"])
+        verdict = (
+            f"all {rep['samples']:,} samples have `{ref}`'s {r['summary']['settings']['num_beams']} "
+            "SIDs in the same order"
+            if rep["all_identical"]
+            else f"**{rep['samples'] - rep['identical_sequences']:,} of {rep['samples']:,} samples "
+            f"differ from `{ref}`** ({rep['identical_top10']:,} have the same top 10)"
+        )
+        notes.append(
+            f"- `{name}` replays `{ref}`'s batches through minionerec.engine with each prompt "
+            f"encoded once and its attention cache shared by the beams: {verdict}."
+        )
+        if r.get("replay_metrics"):
+            notes += ["", *_replay_metrics_table(name, ref, r["replay_metrics"])]
+        if r["summary"].get("replay_diff"):
+            notes += ["", *_replay_diff_notes(r["summary"]["replay_diff"])]
+    return [*notes, ""] if notes else []
+
+
+def _replay_metrics_table(name: str, ref: str, m: dict) -> list[str]:
+    """A replay whose top 10 differs somewhere: HR / NDCG per K next to the main run's."""
+    keys = [k for metric in ("HR", "NDCG") for k in m if k.startswith(metric + "@")]
+    return [
+        f"  Item rule on the same samples, `{name}` against `{ref}`:",
+        "",
+        *_table(
+            ["Run", *keys],
+            [
+                [f"`{ref}`", *(f"{m[k]['reference']:.4f}" for k in keys)],
+                [f"`{name}`", *(f"{m[k]['replay']:.4f}" for k in keys)],
+            ],
+        ),
+    ]
+
+
+def _share(v: float) -> str:
+    """A share as a percentage that never rounds a shortfall up to 100.0%."""
+    return ">99.9%" if 0.999 <= v < 1 else f"{v:.1%}"
+
+
+def _gap(v: float | None) -> str:
+    return "not among its beams" if v is None else f"{v:.3g}"
+
+
+def _why_not_near_tie(x: dict) -> str:
+    """Why a differing sample's swap is not a near tie, from its own numbers."""
+    if x.get("gap_reference") is None:
+        return (
+            f"sample {x['sample']:,}: the replay's SID at position {x['position']} is not among "
+            "the reference's beams, so its gap on the per-beam path cannot be measured"
+        )
+    if x.get("gap_replay") is None:
+        return (
+            f"sample {x['sample']:,}: the reference's SID at position {x['position']} is not "
+            "among the replay's beams, so its gap with the prompt once cannot be measured"
+        )
+    return (
+        f"sample {x['sample']:,}: a gap of {max(x['gap_reference'], x['gap_replay']):.3g}, "
+        f"more than the {x['score_moves']['max']:.3g} its scores move"
+    )
+
+
+def _replay_diff_notes(d: dict) -> list[str]:
+    """minionerec.replay diff: where each differing sample's two lists part, by how much, and
+    whether the paths' own rounding in that sample can explain it."""
+    n = d["samples_regenerated"]
+    rows = []
+    for x in d["differing"]:
+        moves = x.get("score_moves") or {}
+        rows.append(
+            [
+                f"{x['sample']:,}",
+                str(x["batch_samples"]),
+                str(x["position"]) if x["position"] else "the same lists",
+                f"`{x.get('reference_sid', '')}`",
+                f"`{x.get('replay_sid', '')}`",
+                _gap(x.get("gap_reference")),
+                _gap(x.get("gap_replay")),
+                f"{moves['median']:.3g} / {moves['max']:.3g}" if moves else "n/a",
+                "yes" if x["near_tie"] else "**no**",
+            ]
+        )
+    reproduced = d["per_beam_equals_reference"] == n and d["once_equals_replay"] == n
+    others = [x for x in d["differing"] if not x["near_tie"]]
+    k = len(d["differing"])
+    if not reproduced:
+        verdict = "the batches did not give their runs' SIDs again, so the cause is not known."
+    elif not others:
+        verdict = (
+            f"every swap is a near tie (the largest gap is {d['largest_gap']:.3g}): the "
+            "differences are consistent with rounding."
+        )
+    else:
+        verdict = (
+            f"{k - len(others)} of the {k} swaps are near ties, consistent with rounding; for the "
+            f"other {len(others)} the cause is not known ("
+            + "; ".join(_why_not_near_tie(x) for x in others)
+            + f"). The largest gap is {_gap(d['largest_gap'])}."
+        )
+    sd = d["score_differences"]
+    return [
+        f"  Neither run kept its beam scores, so `minionerec.replay diff` generated the "
+        f"{len(d['batches'])} batches that hold a differing sample once more both ways, with the "
+        f"beam scores (transformers' sequences_scores; {d['device']}, {d['dtype']}): per beam, "
+        f"{d['per_beam_equals_reference']} of {n} samples gave the reference's SIDs again; with "
+        f"the prompt once, {d['once_equals_replay']} of {n} the replay's. Over all {sd['count']:,} "
+        f"SIDs both paths returned for those {n} samples, the two paths move one SID's score by "
+        f"{sd['median']:.3g} (median), {sd['p90']:.3g} (P90), {sd['max']:.3g} (max). Per "
+        "differing sample: its batch size, the first beam position where the lists part, the SID "
+        "each has there, the gap between those two SIDs' scores on each path (the reference's "
+        "SID minus the replay's on the per-beam path, the other way round with the prompt once), "
+        "and how far the paths move that sample's shared SIDs (median / max). A near tie = both "
+        "gaps measured and neither larger than that max:",
+        "",
+        *_table(
+            [
+                "Test sample",
+                "Batch",
+                "First differing position",
+                "Reference's SID there",
+                "Replay's SID there",
+                "Gap, per beam",
+                "Gap, prompt once",
+                "Score moves",
+                "Near tie",
+            ],
+            rows,
+        ),
+        "",
+        f"  So {verdict}",
+    ]
+
+
 def _runs_section(out: dict) -> list[str]:
     rows = []
     for name, r in out["runs"].items():
@@ -700,7 +932,7 @@ def _runs_section(out: dict) -> list[str]:
             [
                 name + (" (main)" if name == out["main_run"] else ""),
                 f"{s['samples']:,} / {s['users']:,}",
-                f"{st['num_beams']} / {st['batch_size']}",
+                f"{st['num_beams']} / {st['batch_size']}" + _prefill(st),
                 st["dtype"],
                 s["started"][:16].replace("T", " "),
                 _hours(s["wall_seconds"]),

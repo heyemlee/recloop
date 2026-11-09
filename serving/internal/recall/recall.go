@@ -7,6 +7,7 @@ import (
 	"sort"
 
 	"github.com/heyemlee/recloop/serving/internal/bundle"
+	"github.com/heyemlee/recloop/serving/internal/userstate"
 )
 
 // Surfaces. Chat is the shopping assistant's personalisation signal (design §10.2): the home
@@ -40,6 +41,10 @@ type Request struct {
 	// AdItems are the ad items eligible so far; SASRec scores them with the same user vector
 	// (design §9.2 step 3).
 	AdItems []int32
+	// Gen is the user's nearline generation result read with the user context (nil: none, or
+	// the request's arm does not use it); GenVersion the generator version it was read for.
+	Gen        *userstate.Generated
+	GenVersion string
 }
 
 // Output of one source: candidates best first, and the model version that produced them.

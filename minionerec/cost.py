@@ -21,7 +21,10 @@ upstream.py), in bfloat16 unless --dtype says otherwise:
   * a prefill-only run: 50 beams, batch 1, one new token. Hugging Face's beam search copies the
     prompt once per beam before the first forward pass, so this is the cost of encoding the same
     prompt 50 times; the rest of a request is the 4 remaining decoding steps (an SID is three
-    tokens, then a newline and the end-of-sequence token).
+    tokens, then a newline and the end-of-sequence token);
+  * 50 beams at batch 1 and 8 with the prompt encoded once (minionerec.engine, the code the
+    nearline worker runs; `python -m minionerec.replay csv`, evaluate.py's interface and output
+    files) instead of evaluate.py.
 
 Each configuration's first calls include Metal kernel compilation; the report leaves them out.
 Writes artifacts/minionerec/cost/<config>/ (timing.json, result.json, evaluate.log, input.csv)
@@ -35,6 +38,7 @@ from __future__ import annotations
 import argparse
 import functools
 import json
+import sys
 import time
 from pathlib import Path
 
@@ -59,6 +63,16 @@ def configs() -> list[dict]:
         for b in BEAMS
         for s in BATCH_SIZES
     ]
+    out += [
+        {
+            "name": f"beam50_batch{s}_once",
+            "num_beams": 50,
+            "batch_size": s,
+            "max_new_tokens": 256,
+            "prefill": "once",
+        }
+        for s in BATCH_SIZES
+    ]
     out.append(
         {
             "name": "beam50_batch1_prefill",
@@ -69,6 +83,35 @@ def configs() -> list[dict]:
         }
     )
     return out
+
+
+def engine_command(cfg: dict, input_csv: Path, out_dir: Path, args) -> list[str]:
+    """minionerec.replay's csv mode: evaluate.py's inputs and output files, run by the engine."""
+    return [
+        sys.executable,
+        "-u",
+        "-m",
+        "minionerec.replay",
+        "csv",
+        "--test-data-path",
+        str(input_csv),
+        "--result-json",
+        str(out_dir / "result.json"),
+        "--timing-json",
+        str(out_dir / "timing.json"),
+        "--batch-size",
+        str(cfg["batch_size"]),
+        "--num-beams",
+        str(cfg["num_beams"]),
+        "--max-new-tokens",
+        str(cfg["max_new_tokens"]),
+        "--length-penalty",
+        str(upstream.EVALUATE_SH["length_penalty"]),
+        "--dtype",
+        args.dtype,
+        "--base-model",
+        str(args.base_model),
+    ]
 
 
 def one_sample_per_user(test_csv, users: int, seed: int = SEED) -> np.ndarray:
@@ -126,22 +169,28 @@ def main(argv: list[str] | None = None) -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
         cfg_rows = rows[: cfg.get("limit", len(rows))]
         input_csv = generate.write_subset(test_csv, cfg_rows, out_dir / "input.csv")
-        cmd = upstream.evaluate_command(
-            script,
-            input_csv,
-            out_dir / "result.json",
-            out_dir / "timing.json",
-            num_beams=cfg["num_beams"],
-            batch_size=cfg["batch_size"],
-            max_new_tokens=cfg["max_new_tokens"],
-            length_penalty=upstream.EVALUATE_SH["length_penalty"],
-            dtype=args.dtype,
-            base_model=args.base_model,
-        )
+        if cfg.get("prefill") == "once":
+            cmd, cwd = engine_command(cfg, input_csv, out_dir, args), paths.ROOT
+        else:
+            cmd, cwd = (
+                upstream.evaluate_command(
+                    script,
+                    input_csv,
+                    out_dir / "result.json",
+                    out_dir / "timing.json",
+                    num_beams=cfg["num_beams"],
+                    batch_size=cfg["batch_size"],
+                    max_new_tokens=cfg["max_new_tokens"],
+                    length_penalty=upstream.EVALUATE_SH["length_penalty"],
+                    dtype=args.dtype,
+                    base_model=args.base_model,
+                ),
+                script.parent,
+            )
         print(f"[{time.strftime('%H:%M:%S')}] {cfg['name']}: {len(cfg_rows)} users", flush=True)
         try:
             res, quiet = machine.measure_quietly(
-                functools.partial(upstream.run_logged, cmd, script.parent, out_dir / "evaluate.log")
+                functools.partial(upstream.run_logged, cmd, cwd, out_dir / "evaluate.log")
             )
         except machine.NotQuiet as e:
             rest = " ".join(c["name"] for c in todo[idx:])

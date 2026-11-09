@@ -26,7 +26,9 @@ write-ups in `docs/results/`.
   release-report` re-renders it from `artifacts/release/drill.json`; `make ab-report` writes
   `ab.md` from `artifacts/ab/` and the sample job's impressions; `make pctr-report` writes
   `pctr.md` from `artifacts/models/pctr/eval/`; `make deploy-runs` and `make deploy-drill` write
-  `deploy.md`, `make deploy-report` re-renders it from `artifacts/deploy/`); change the
+  `deploy.md`, `make deploy-report` re-renders it from `artifacts/deploy/`; `make minionerec`
+  writes `minionerec.md` from `artifacts/minionerec/`; `make nearline-report` writes
+  `nearline.md` from `artifacts/nearline/ab/` and the sample job's impressions); change the
   generator, not the file. The committed `offline.md` is `make setup`, then `make paper-sasrec`,
   then `make eval` (`make setup` includes `make train-ranker`). `make eval` re-runs give the same
   bytes; `make train` runs on the CPU with fixed seeds, and two runs with the same worker / thread
@@ -108,9 +110,12 @@ ml/                         Python 3.12 uv project (own .venv); run modules from
   bundle/                   build (+ faiss_index, run in a torch-free subprocess)
   ann/                      ANN benchmark (FAISS Flat / IVF / HNSW / IVF-PQ) and index updates
   experiment/               bucketing (Python twin of serving/internal/experiment)
+  nearline/                 keys, worker: the nearline generation worker (M7, Redis side)
   tests/
 minionerec/                 Python 3.12 uv project (own .venv, Apple Silicon only): MiniOneRec's
-                            evaluate.py + evaluate.py.patch on MPS (upstream, generate, cost)
+                            evaluate.py + evaluate.py.patch on MPS (upstream, generate, cost);
+                            engine (the same generation as a library, prompt encoded once),
+                            replay (checks it against a run), serve_gen (the worker's generator)
 web/                        Next.js 16 + shadcn/ui (:13000); /api/v1/* is proxied to the Go api
                             (/internal is not), /api/v1/chat to the agent service; e2e/;
                             /advertiser is the advertiser console, /chat the shopping assistant,
@@ -149,6 +154,7 @@ artifacts/   (ignored) models/sasrec, models/ranker, models/pctr, bundles/<versi
              release/, ab/,
              sim/ (world.json, run ledgers), latency/ (results.json),
              minionerec/ (runs/<name>/, cost/, upstream/ = the staged, patched evaluate.py),
+             nearline/ (ab/: run.json, worker/, traffic/, served_gen.jsonl),
              deploy/ (results.json, k6 summaries, drill/)
 ```
 
@@ -231,6 +237,11 @@ make minionerec-gen   # MiniOneRec on MPS over the test split, evaluate.sh's 8 s
                       # another (~5 h; resumable); MINIONEREC_ARGS="--name trial --users 200"
 make minionerec-cost  # latency / memory at 10, 20, 50 beams (MPS) + SASRec on the CPU (idle machine)
 make minionerec       # score the runs like make eval -> docs/results/minionerec.md (no GPU)
+make minionerec-replay   # the main run's batches with the prompt encoded once; every SID must match
+                         # (MPS; REPLAY_ARGS="--name once-trial --batches 25" first)
+make gen-worker       # nearline generation worker (MPS) on REDIS_URL; GEN_WORKER_ARGS="--out ..."
+make gen-ab           # simulated A/B: 3 recall sources vs 3 + gen (starts the worker; stack up)
+make nearline-report  # docs/results/nearline.md (after make gen-ab and make samples)
 make kind-up       # kind cluster + infrastructure + RecLoop's images, data, services (~15 min;
                    # needs the machine: compose stopped, ~8 GB of Docker's VM)
 make deploy        # rebuild + `kind load` RecLoop's images, helm upgrade its chart
@@ -730,3 +741,25 @@ interpreter at exit: `ORT_DISABLE_TELEMETRY=1` (Makefile, model-server image, `m
   (`ml.eval.machine.measure_quietly`; rerun the rest with `--only`). MPS is invisible inside the
   Claude Code sandbox (torch falls back to the CPU), so real runs go outside it. `--base-model`
   runs (tests, smoke checks with a tiny random Qwen2) are left out of the report.
+- Nearline (design §11 steps 5-6): apply.lua queues a user in `gen:queue` (state Redis) when
+  their history changes, only while a worker holds `gen:worker`; due after 30 s of quiet, at
+  most 120 s after the first unanswered change. `ml.nearline.worker` claims due users, reads
+  the last 10 items and hv in one MULTI, has `minionerec.serve_gen` generate (minionerec.engine:
+  evaluate.py's prompts, constraint and beam search, the prompt pass shared by the beams), and
+  writes `gen:{uid}:{ver}` (JSON: hv, at, items, scores; testdata/gen_payload.json pins it).
+  The api reads it in the user-context pipeline only for a recall variant with an `rrf_weights`
+  entry `gen` > 0 and a `gen_version`; that arm's candidate cache key carries the result's hv.
+- Prompt encoded once (`make minionerec-replay`, the main run's own batches): 4,861 of 4,866
+  samples give the same 50 SIDs, 4,864 the same top 10, the same HR / NDCG at 3, 5, 10.
+  `python -m minionerec.replay diff --name once` generates the batches of the differing samples
+  again both ways with beam scores (diff.json; `make minionerec` reports it). Batch 8 x 50 beams
+  peaks at 14.8 GiB even with the prompt once (the 400-row decoding steps), so the replay and the
+  batch-8 cost row need Docker Desktop quit; the worker runs batches of 2 under its 8 GB cap (4
+  run out of it).
+- The committed `minionerec.md` / `nearline.md`: `make minionerec-replay REPLAY_ARGS="--name
+  once-trial --batches 25 --mps-memory-gb 16"`, the cost rows (`minionerec.cost --only
+  beam50_batch1_once beam50_batch8_once`), `REPLAY_ARGS="--name once --mps-memory-gb 16"` and
+  `replay diff --name once` with Docker Desktop quit; then on a private stack from empty volumes
+  `sim.gen_ab --seconds 3600 --concurrency 4` (worker `--max-batch 2`), `make samples
+  SAMPLES_FLAGS="--complete-through <traffic end + 30 min>"`, `make nearline-report`, `make
+  minionerec`.

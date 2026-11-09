@@ -1,6 +1,7 @@
 """The patch applies to the pinned upstream files; subsets and workloads are deterministic."""
 
 import json
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -102,7 +103,13 @@ def test_cost_workload_is_one_sample_per_user(tmp_path):
     assert list(rows) == sorted(rows)
     np.testing.assert_array_equal(rows, cost.one_sample_per_user(csv, 3, seed=5))
     names = [c["name"] for c in cost.configs()]
-    assert len(names) == len(set(names)) == 7
+    assert len(names) == len(set(names)) == 9
+    once = [c for c in cost.configs() if c.get("prefill") == "once"]
+    assert [c["name"] for c in once] == ["beam50_batch1_once", "beam50_batch8_once"]
+    cmd = cost.engine_command(
+        once[0], tmp_path / "in.csv", tmp_path, SimpleNamespace(dtype="bfloat16", base_model="m")
+    )
+    assert cmd[1:5] == ["-u", "-m", "minionerec.replay", "csv"]  # the engine, not evaluate.py
     assert json.dumps(cost.configs())  # serializable into the manifest
 
 

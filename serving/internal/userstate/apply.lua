@@ -1,5 +1,6 @@
 -- Apply one event to a user's state, at most once (docs/design.md §7.3, §12.2).
 -- KEYS: 1 dedup:{group}:{event_id}  2 u:{uid}:hist  3 u:{uid}:hv  4 u:{uid}:bought  5 u:{uid}:seen
+--       6 gen:worker  7 gen:queue  8 gen:pending:{uid}
 --       then, when ARGV[9] = '1', fc:{uid}:{campaign_id}:{yyyymmdd} (the impression of a sponsored
 --       slot), then, when ARGV[10] is not empty, ictr:5m:{bucket} and ictr:1h:{bucket} (the item's
 --       CTR buckets of the event's receive time, package itemctr)
@@ -7,6 +8,7 @@
 --       5 history size  6 seen window (ms)  7 dedup TTL (ms)  8 frequency-cap TTL (ms)
 --       9 '1' when a frequency-cap key follows  10 CTR field (i:{item} | c:{item} | '')
 --       11, 12 when the 5-minute and the hourly bucket expire (ms)
+--       13 user id  14 generation debounce (ms)  15 generation max wait (ms)  16 pending TTL (ms)
 if not redis.call('SET', KEYS[1], '1', 'NX', 'PX', ARGV[7]) then
   return 0  -- already applied
 end
@@ -20,6 +22,18 @@ if kind == 'history' or kind == 'purchase' then
   if kind == 'purchase' then
     redis.call('SADD', KEYS[4], item)
   end
+  -- Nearline generation (design §11 step 5): while a generation worker is registered, the change
+  -- queues the user. The user is due once the history has been quiet for the debounce, at the
+  -- latest max wait after the first change the worker has not picked up yet. Without a worker
+  -- nothing is written.
+  if redis.call('EXISTS', KEYS[6]) == 1 then
+    local now = tonumber(ARGV[4])
+    redis.call('RPUSH', KEYS[8], ARGV[3] .. ':' .. ARGV[4])
+    redis.call('PEXPIRE', KEYS[8], ARGV[16])
+    local first = tonumber(string.match(redis.call('LINDEX', KEYS[8], 0), ':(%d+)$'))
+    local due = math.min(now + tonumber(ARGV[14]), first + tonumber(ARGV[15]))
+    redis.call('ZADD', KEYS[7], due, ARGV[13])
+  end
 end
 -- A click (or cart / purchase) means the item was seen, even if no impression was reported.
 if kind == 'impression' or kind == 'history' or kind == 'purchase' then
@@ -27,7 +41,7 @@ if kind == 'impression' or kind == 'history' or kind == 'purchase' then
   redis.call('ZREMRANGEBYSCORE', KEYS[5], '-inf', '(' .. (tonumber(ARGV[4]) - window))
   redis.call('PEXPIRE', KEYS[5], window)
 end
-local k = 6
+local k = 9
 if ARGV[9] == '1' then
   -- A sponsored impression counts towards the campaign's daily frequency cap (design §9.2).
   if kind == 'impression' then

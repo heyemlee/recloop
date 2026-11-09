@@ -472,6 +472,9 @@ func run(log *slog.Logger) error {
 				{Source: recall.SASRec{Client: ms}, Timeout: envMillis("SASREC_TIMEOUT_MS", 35), MinTimeout: 5 * time.Millisecond, K: 200, Breaker: msBreaker},
 				{Source: recall.ItemCF{B: b}, Timeout: 10 * time.Millisecond, K: 200},
 				{Source: recall.Pop{B: b}, Timeout: 10 * time.Millisecond, K: 200},
+				// M7: nearline MiniOneRec results, read with the user context; only arms whose
+				// recall params give "gen" a weight and a "gen_version" read them (design §11).
+				{Source: recall.Gen{}, Timeout: 10 * time.Millisecond, K: 50},
 			},
 			recall.SurfaceItem: {
 				{Source: recall.ItemCF{B: b}, Timeout: 10 * time.Millisecond, K: 100},
@@ -485,7 +488,7 @@ func run(log *slog.Logger) error {
 			},
 		},
 		Weights: map[string]map[string]float64{
-			recall.SurfaceHome: {"sasrec": 1.0, "itemcf": 1.0, "pop": 0.3},
+			recall.SurfaceHome: {"sasrec": 1.0, "itemcf": 1.0, "pop": 0.3, "gen": 0},
 			recall.SurfaceItem: {"itemcf": 1.0, "text": 1.0},
 			recall.SurfaceChat: {"sasrec": 1.0, "itemcf": 1.0, "pop": 0.3},
 		},
