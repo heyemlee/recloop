@@ -320,11 +320,15 @@ interpreter at exit: `ORT_DISABLE_TELEMETRY=1` (Makefile, model-server image, `m
   adds its own tail); k6 runs on the host; before every run the consumers catch up and Redis is
   reseeded (both instances). Each repeat opens with the cache comparison (its three runs in a
   seeded shuffled order, `SHUFFLE_SEED`), then the ladder, the breaker comparison at the top rate
-  (shuffled), the faults (the 30 %-slow row's design variants shuffled) and the onsets;
+  (shuffled), the warm runs (1000 and 1500/s after 30 s at 400/s: a ladder run starts with the
+  candidate cache empty), the faults (the 30 %-slow row's design variants shuffled) and the onsets;
   `results.json` records what was served (bundle, ranker, pCTR model, rank-layer experiments,
-  both Redis policies). Until 2026-11-08 one Redis had `maxmemory 384mb` + `volatile-ttl`
-  (`latency.md` was measured so); now pages and candidates have the cache instance to
-  themselves (see Redis below). Measurements need an idle machine and the coordinator's go-ahead.
+  both Redis policies). `latency.md` (2026-11-08 evening) was measured with both Redis
+  instances and M4's bundle, so the model server's Rank (Python, 2 CPUs) is on every cache miss: the
+  SLO holds up to 600/s; from 1000/s on, a run that starts with the cache empty never fills it (the
+  breakers keep reopening and a degraded list is not cached); with the cache filled first, 1000/s
+  meets it in 2 of 3 runs, 1500/s in none. Measurements need an idle machine and the coordinator's
+  go-ahead.
 - Simulator: `sim/world.py` (2,024 test-period users, targets = their test items, click model
   = examination x relevance by text similarity), `sim/run.py` (sessions, fault switches, ledger),
   `sim/verify.py` (events_raw / orders / Redis vs the ledger), `sim/drill.py`.

@@ -251,7 +251,7 @@ def test_a_rate_counts_its_worst_run_not_the_median():
     text = report.render(data)
     assert "**100 requests/s** is the largest offered load at which every run met the SLO" in text
     assert "At 200/s 2 of 3 runs met it; repeat 2 had P99 32.0 ms and 5.0 % degraded" in text
-    assert "a burst of timeouts reached the 10-failures-in-a-row rule" in text
+    assert "a burst of timeouts opened the breaker in front of" in text
     assert "| 200 ✗ | 2/3 |" in text and "| 100 | 3/3 |" in text
 
 
@@ -359,3 +359,71 @@ def test_report_compares_the_breaker_rules_and_names_the_setup():
     # Without the new records (results before 2026-11-08) none of it appears.
     old = report.render(results())
     assert "## 5. Breaker rule" not in old and "- Served:" not in old
+
+
+def test_plan_runs_the_warm_rates_after_a_lighter_start():
+    plan = run.PLANS["full"]
+    for rep in (1, 2, 3):
+        mine = [r for r in plan.runs() if r.rep == rep]
+        last = max(i for i, r in enumerate(mine) if r.experiment == "breaker")
+        warm = mine[last + 1 : last + 1 + len(plan.warm)]
+        assert [r.experiment for r in warm] == ["warm"] * len(plan.warm)
+        assert [r.rate for r in warm] == plan.warm
+        assert all(r.prewarm == plan.prewarm and r.config == run.ApiConfig() for r in warm)
+    assert all(r.prewarm is None for r in plan.runs() if r.experiment != "warm")
+
+
+def cold(r, hit, degraded, opened):
+    """Make a fake run look like a cold start that never filled the cache."""
+    r["k6"]["cache_hit_home"], r["k6"]["degraded"] = hit, degraded
+    r["server"]["degraded_reasons"] = {"rank_circuit_open": 40000.0, "sasrec_circuit_open": 38000.0}
+    r["server"]["breaker_transitions"] = {"open": opened}
+    r["server"]["model_server_calls"] = {"OK": 370.0, "DEADLINE_EXCEEDED": 340.0}
+    r["server"]["model_server_aborts"] = {"arrival": 280.0}
+    return r
+
+
+def test_report_explains_a_cold_start_and_shows_the_warm_runs():
+    data = results()
+    for rep in (1, 2, 3):
+        data["runs"] += [
+            cold(fake_run("ladder", 800, rep=rep, p99=25), 0.04, 0.92, 11.0),
+            fake_run("warm", 800, rep=rep, p99=9) | {"prewarm": [400, 30]},
+        ]
+        for r in data["runs"]:
+            if r["experiment"] == "ladder" and r["rate"] == 200 and r["rep"] == rep:
+                r["k6"]["cache_hit_home"] = 0.9  # the ladder's best
+    text = report.render(data)
+    assert text == report.render(data)
+    assert "- From 800/s on, the ladder's runs never filled the candidate cache (home hit rate 4.0 % " \
+        "there, 90.0 % at 200/s)" in text  # fmt: skip
+    assert "With the cache filled first (30 s at 400/s): 800/s 3/3 runs within the SLO" in text
+    assert "At 800/s the model server received 710 calls in the measured 60 s, 340 of which ran " \
+        "past their deadline (280 were already past it on arrival" in text  # fmt: skip
+    assert "opened 11 times per run in all" in text
+    assert (
+        "| 800 ✗ | empty cache (ladder) | 0/3 |" in text and "| 800 | cache filled | 3/3 |" in text
+    )
+    assert "in every repeat right after the breaker block" in text
+    for r in data["runs"]:
+        if r["experiment"] == "warm":
+            r["started"] += 10_000  # added by a restart: after every other run
+    assert (
+        "added to the plan by a restart (Setup), they ran after every other run"
+        in report.render(data)
+    )
+
+
+def test_a_breaker_open_from_the_warm_up_is_named_as_such():
+    data = results()
+    for r in data["runs"]:
+        if r["experiment"] == "ladder" and r["rate"] == 400:
+            r["server"]["degraded_reasons"] = {
+                "rank_circuit_open": 3800.0
+            }  # no transition measured
+    text = report.render(data)
+    assert ("the breaker in front of the model server's Rank had opened in the 10-s warm-up, which "
+            "starts with the candidate cache empty") in text  # fmt: skip
+    assert "was open in 3 of 3 runs at 400/s (the worst run 2.0 % degraded; in 3 of them it had " \
+        "opened in the warm-up)" in text  # fmt: skip
+    assert "never filled" not in text  # the hit rate is the same at every rate

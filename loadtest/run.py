@@ -3,7 +3,7 @@
 Runs against the bench profile (`make bench-up`): the api and the model server as containers
 with fixed CPU and memory limits, k6 on the host (outside the Docker VM, like a client). In the
 fault experiment the api reaches the model server and Redis through Toxiproxy (every row, the
-no-fault one included); elsewhere it connects directly. Three experiments:
+no-fault one included); elsewhere it connects directly. The experiments:
 
     ladder   offered load (open loop) vs latency: the largest rate that meets the SLO
     cache    the candidate cache on and off at one rate (and on, through Toxiproxy: the proxy's cost),
@@ -12,6 +12,8 @@ no-fault one included); elsewhere it connects directly. Three experiments:
     breaker  the breaker rule in force against a candidate (CANDIDATE_BREAKER: more failures in a
              row to open, fewer half-open probes) at the ladder's top rate, no fault, shuffled;
              the candidate also runs in the faults experiment's 30 %-slow row
+    warm     high rates of the ladder again, after 30 s at 400/s: the candidate cache has
+             filled (a ladder run starts with it empty and goes straight to its rate)
     onset    the model server is cut (or slowed by 50 ms) in the middle of steady traffic: how
              fast the breaker opens, how many calls failed first, how fast it closes afterwards
     faults   model server 30 % of calls +200 ms (its fault switch), every call +50 ms
@@ -21,7 +23,8 @@ no-fault one included); elsewhere it connects directly. Three experiments:
 
 Every run starts from the same state: the consumers have caught up, Redis is reseeded
 (`make seed`), Toxiproxy and the model server's fault switch are reset. Then k6 warms up at the
-run's rate, the fault is switched on, and k6 measures. Each configuration runs `repeats` times
+run's rate (a warm run first sends its lighter traffic), the fault is switched on, and k6
+measures. Each configuration runs `repeats` times
 (the report takes the median); repetitions are interleaved so drift spreads over all of them.
 
 The runner refuses to start while campaigns are active (--allow-active-campaigns overrides):
@@ -29,7 +32,7 @@ their sponsored slots would add the ads stage to the home requests, and the sess
 them (recs.js sends the slots' ad_tokens) would be billed for real. The ids it saw go into
 results.json (meta.active_campaigns, and each restart's).
 
-Usage: python -m loadtest.run [--plan full|smoke] [--only ladder,cache,breaker,faults,onset]
+Usage: python -m loadtest.run [--plan full|smoke] [--only ladder,cache,breaker,warm,faults,onset]
                               [--resume REASON [--redo KEY#REP ...]] [--note TEXT ...]
                               [--allow-active-campaigns]
        (--resume keeps the finished runs of --out and runs the rest; --redo runs one again)
@@ -125,6 +128,8 @@ class Run:
     config: ApiConfig
     fault: str = "none"
     rep: int = 1
+    # (rate /s, seconds) of lighter traffic before the warm-up: the warm experiment's head start
+    prewarm: tuple[int, int] | None = None
 
     @property
     def key(self) -> str:
@@ -160,14 +165,20 @@ class Plan:
     candidate_breaker: str | None = CANDIDATE_BREAKER
     # onset: seconds of healthy traffic, of fault, and after recovery (>= the 10 s open time)
     onset: tuple[float, float, float] = (5.0, 15.0, 15.0)
+    # warm: these rates again, after `prewarm` (rate /s, seconds) of lighter traffic. A ladder run
+    # starts with the candidate cache empty (Redis reseeded) and goes straight to its rate; here
+    # the cache has filled at a rate the cold start survives, so the run shows the steady state.
+    warm: list[int] = field(default_factory=lambda: [1000, 1500])
+    prewarm: tuple[int, int] = (400, 30)
     experiments: list[str] = field(
-        default_factory=lambda: ["ladder", "cache", "breaker", "faults", "onset"]
+        default_factory=lambda: ["ladder", "cache", "breaker", "warm", "faults", "onset"]
     )
 
     def runs(self) -> list[Run]:
         """Per repeat: the cache block (shuffled; after the previous repeat's light onset runs,
         or first of all), the ladder, the breaker block at the ladder's top rate (shuffled), the
-        faults (the 30 %-slow row's design variants shuffled), the breaker onsets."""
+        warm runs, the faults (the 30 %-slow row's design variants shuffled), the breaker
+        onsets."""
         out = []
         for rep in range(1, self.repeats + 1):
             if "cache" in self.experiments:
@@ -184,6 +195,10 @@ class Plan:
                 cfgs = [ApiConfig(), ApiConfig(breaker=self.candidate_breaker)]
                 for cfg in shuffled(cfgs, "breaker", rep):
                     out.append(Run("breaker", self.ladder[-1], cfg, rep=rep))
+            if "warm" in self.experiments:
+                out += [
+                    Run("warm", r, ApiConfig(), rep=rep, prewarm=self.prewarm) for r in self.warm
+                ]
             if "faults" in self.experiments:
                 naive = ApiConfig(resilience="naive", cache="off", proxied=True)
                 design = ApiConfig(cache="off", proxied=True)
@@ -207,7 +222,7 @@ PLANS = {
     "full": Plan(ladder=[100, 200, 400, 600, 800, 1000, 1200, 1500], cache_rate=400, fault_rate=200,
                  repeats=3, duration=60, warmup=10),
     "smoke": Plan(ladder=[100, 300], cache_rate=200, fault_rate=100, repeats=1, duration=15, warmup=5,
-                  onset=(3.0, 8.0, 14.0)),
+                  onset=(3.0, 8.0, 14.0), warm=[300], prewarm=(100, 5)),
 }  # fmt: skip
 
 
@@ -487,6 +502,8 @@ def run_one(bench: Bench, plan: Plan, run: Run, out: Path) -> dict:
     bench.configure(run.config)
     caught_up = bench.reset_state()
     tag = f"{run.key}#{run.rep}".replace("/", "_")
+    if run.prewarm:
+        k6(run.prewarm[0], run.prewarm[1], out / "prewarm.json", tag + "_prewarm")
     if plan.warmup:
         k6(run.rate, plan.warmup, out / "warmup.json", tag + "_warmup")
     bench.set_fault(run.fault)
@@ -518,6 +535,7 @@ def run_one(bench: Bench, plan: Plan, run: Run, out: Path) -> dict:
         "k6": k6_metrics(summary, plan.duration),
         "server": server_metrics(t0, t1),
         "containers_mid_run": cpu,
+        **({"prewarm": list(run.prewarm)} if run.prewarm else {}),
     }
 
 
@@ -719,7 +737,9 @@ def resume(
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--plan", choices=sorted(PLANS), default="full")
-    p.add_argument("--only", default="", help="comma-separated: ladder,cache,breaker,faults,onset")
+    p.add_argument(
+        "--only", default="", help="comma-separated: ladder,cache,breaker,warm,faults,onset"
+    )
     p.add_argument("--out", type=Path, default=OUT / "results.json")
     p.add_argument(
         "--resume",
