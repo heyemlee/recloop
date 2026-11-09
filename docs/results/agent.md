@@ -127,7 +127,7 @@ Graded by claude-sonnet-5-5: 167 calls, $0.97. Each (message, item) pair is grad
 | llm-claude-sonnet-5-5-r2 | 428 | 100.0% | 1.66 | 72.0% | 6.3% |
 | llm-claude-sonnet-5-5-r3 | 428 | 100.0% | 1.66 | 72.2% | 6.3% |
 
-Human check: not done yet (`judge.review_sample` writes 50 cases for a person, `judge.agreement` gives exact agreement and Cohen's kappa).
+Human check: not done yet (`make agent-review` writes 50 cases for a person to grade, `make agent-agreement` adds the agreement with the judge here).
 
 ## Latency (this machine, varies between runs)
 

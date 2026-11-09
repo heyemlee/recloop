@@ -93,14 +93,14 @@ TOOL_PKGS := github.com/bufbuild/buf/cmd/buf google.golang.org/protobuf/cmd/prot
 	test lint test-ml test-model-server test-minionerec test-agent test-go test-web test-props e2e \
 	fmt sim-world sim srm drill load load-smoke latency-report billing overdelivery billing-drill \
 	billing-report minionerec-gen minionerec-cost minionerec minionerec-replay gen-worker gen-ab \
-	nearline-report agent-cases agent-eval agent-eval-llm \
+	nearline-report agent-cases agent-eval agent-eval-llm agent-review agent-agreement \
 	agent-eval-llm-smoke serve-agent agent-latency train-ranker spark-image samples test-samples \
 	train-pctr pctr-report collect release-drill release-report ab ab-report clean-processed \
 	clean-artifacts kind-tools kind-up kind-images kind-data deploy kind-status deploy-runs \
 	deploy-rollout deploy-hpa deploy-keda deploy-drill deploy-report deploy-smoke kind-down lint-deploy
 
 help: ## List targets
-	@grep -E '^[a-z0-9-]+:.*## ' $(MAKEFILE_LIST) \
+	@grep -hE '^[a-z0-9-]+:.*## ' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*## "} {printf "  %-18s %s\n", $$1, $$2}'
 
 setup: up data ingest train train-ranker eval bundle seed web-install ## Everything from a clean checkout to a runnable demo
@@ -468,6 +468,15 @@ agent-eval-llm: ## Paid: 3 models x 3 runs (caps $12 / $6 / $1 per run) + Sonnet
 	$(AGE) python -m agent.eval.run --skip-offline $(foreach m,$(LLM_MODELS),--llm $(m)) \
 		--repeats $(or $(REPEATS),3) --max-cost-usd $(LLM_CAPS) \
 		--total-cap-usd $(or $(TOTAL_CAP_USD),60) --judge $(LLM_JUDGE)
+
+# The person's check of the judge (design §10.4): a sheet of 50 cases (fixed seed) to grade 0 / 1 /
+# 2 without the judge's grades, then the agreement into agent.md. No API calls.
+agent-review: ## Judge check: 50 cases for a person to grade -> artifacts/eval/agent/judge/review.csv (reads PostgreSQL)
+	$(AG) python -m agent.eval.review sheet $(REVIEW_FLAGS)
+
+agent-agreement: ## Judge check: the filled review.csv against the judge's grades -> agent.md
+	$(AG) python -m agent.eval.review agreement
+	$(AG) python -m agent.eval.run --report-only
 
 test: lint test-ml test-model-server test-minionerec test-agent test-go ## Lint and run the Python and Go tests (DB / Redis tests skip when the stack is down)
 

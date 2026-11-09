@@ -7,14 +7,13 @@ Not run by default: it needs an API key and a spending cap (`agent.eval.run --ju
   * `grade_runs` grades every (case, item) pair the runs showed that has no grade yet: one call
     per case over all its new items, in groups of ten, so an item shown by several agents gets
     one grade that all of them share; grades are kept in <runs dir>/judge/grades.json;
-  * `review_sample` draws the cases a person labels (50, fixed seed) into a JSONL file;
-  * `agreement` compares judge and human grades: exact agreement and Cohen's kappa.
+  * `agreement` compares judge and human grades: exact agreement and Cohen's kappa; the
+    person's grades come from agent.eval.review (`make agent-review`, `make agent-agreement`).
 """
 
 from __future__ import annotations
 
 import json
-import random
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -139,19 +138,12 @@ def grade_runs(
     return store | {"spent_now": spent}
 
 
-def review_sample(run: dict, out: Path, n: int = 50) -> None:
-    """Write n cases of a run (fixed seed) with their shown items, for human grading."""
-    cases = [c for c in run["cases"] if c["record"]["shown"]]
-    picked = random.Random(REVIEW_SEED).sample(cases, min(n, len(cases)))
-    with out.open("w") as f:
-        for c in sorted(picked, key=lambda c: c["case_id"]):
-            row = {
-                "case_id": c["case_id"],
-                "message": c["message"],
-                "items": c["record"]["shown"],
-                "human": {},
-            }
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+def kappa(a: Sequence[int], b: Sequence[int]) -> float | None:
+    """Cohen's kappa of two graders' grades (0 / 1 / 2) of the same pairs, in the same order;
+    None when chance agreement is 1 (both gave one and the same grade throughout)."""
+    po = sum(x == y for x, y in zip(a, b, strict=True)) / len(a)
+    pe = sum((a.count(g) / len(a)) * (b.count(g) / len(b)) for g in (0, 1, 2))
+    return None if pe == 1 else (po - pe) / (1 - pe)
 
 
 def agreement(judge: dict[tuple[str, int], int], human: dict[tuple[str, int], int]) -> dict:
@@ -162,6 +154,4 @@ def agreement(judge: dict[tuple[str, int], int], human: dict[tuple[str, int], in
     a = [judge[k] for k in keys]
     b = [human[k] for k in keys]
     po = sum(x == y for x, y in zip(a, b, strict=True)) / len(keys)
-    pe = sum((a.count(g) / len(a)) * (b.count(g) / len(b)) for g in (0, 1, 2))
-    kappa = None if pe == 1 else (po - pe) / (1 - pe)
-    return {"pairs": len(keys), "agreement": po, "kappa": kappa}
+    return {"pairs": len(keys), "agreement": po, "kappa": kappa(a, b)}

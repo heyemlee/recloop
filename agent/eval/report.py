@@ -419,12 +419,35 @@ def relevance_section(runs: list[dict[str, Any]], path: Path = JUDGE) -> list[st
         "",
     ]
     lines += _table(["agent", "items shown", "graded", "mean grade", "graded 2", "graded 0"], rows)
-    return lines + [
-        "",
-        "Human check: not done yet (`judge.review_sample` writes 50 cases for a person, "
-        "`judge.agreement` gives exact agreement and Cohen's kappa).",
+    return lines + [""] + human_check(path.parent / "human.json")
+
+
+def human_check(path: Path) -> list[str]:
+    """The person's grades against the judge's (agent.eval.review), when there are any."""
+    if not path.exists():
+        return [
+            "Human check: not done yet (`make agent-review` writes 50 cases for a person to "
+            "grade, `make agent-agreement` adds the agreement with the judge here).",
+            "",
+        ]
+    h = json.loads(path.read_text())
+
+    def ci(v: list[float] | None, fmt: str) -> str:
+        return f" [{format(v[0], fmt)}, {format(v[1], fmt)}]" if v else ""
+
+    kappa = "undefined" if h["kappa"] is None else f"{h['kappa']:.2f}"
+    lines = [
+        f"Human check: a person graded {h['pairs']} items of {h['cases']} cases (fixed seed; up "
+        "to 3 of the items the agents showed in each) from the same message and product data, "
+        "without seeing the judge's grades (`make agent-review`, `make agent-agreement`). Exact "
+        f"agreement {h['agreement']:.1%}{ci(h['agreement_ci'], '.1%')}, Cohen's kappa "
+        f"{kappa}{ci(h['kappa_ci'], '.2f')} (95 % intervals from {h['bootstrap']['b']:,} "
+        f"resamples of whole cases); mean grade {h['mean_judge']:.2f} by the judge, "
+        f"{h['mean_human']:.2f} by the person.",
         "",
     ]
+    rows = [[f"person {g}", *(str(n) for n in h["table"][g])] for g in (0, 1, 2)]
+    return lines + _table(["", "judge 0", "judge 1", "judge 2"], rows) + [""]
 
 
 def _llm_latency(case: dict) -> float:

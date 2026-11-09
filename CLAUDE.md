@@ -22,8 +22,9 @@ write-ups in `docs/results/`.
   `ann.md`, `make load` writes `latency.md`; `make latency-report` re-renders it from
   `artifacts/latency/results.json`; `make billing` writes `billing.md`, `make billing-report`
   re-renders it from `artifacts/billing/`; `make agent-eval` writes `agent.md`, `make
-  agent-latency` adds its chat-path section; `make release-drill` writes `release.md`, `make
-  release-report` re-renders it from `artifacts/release/drill.json`; `make ab-report` writes
+  agent-latency` adds its chat-path section, `make agent-agreement` its human check; `make
+  release-drill` writes `release.md`, `make release-report` re-renders it from
+  `artifacts/release/drill.json`; `make ab-report` writes
   `ab.md` from `artifacts/ab/` and the sample job's impressions; `make pctr-report` writes
   `pctr.md` from `artifacts/models/pctr/eval/`; `make deploy-runs` and `make deploy-drill` write
   `deploy.md`, `make deploy-report` re-renders it from `artifacts/deploy/`; `make minionerec`
@@ -229,6 +230,9 @@ make agent-latency # chat path through the running services -> agent.md's chat s
 make agent-eval-llm-smoke  # paid: 5 cases x 3 models + Sonnet judge, $1 in all (needs the key)
 make agent-eval-llm  # paid: Opus / Sonnet / Haiku 5.5 x 3 runs, caps $12 / $6 / $1 per run, $60
                      # in all, Sonnet judge -> agent.md (needs the user's ANTHROPIC_API_KEY)
+make agent-review  # the judge's human check: 50 cases (fixed seed), up to 3 judged items each ->
+                   # artifacts/eval/agent/judge/review.csv for a person (reads PostgreSQL; --force)
+make agent-agreement  # the filled review.csv against the judge: agreement, kappa -> agent.md
 make proto / sqlc  # regenerate gRPC / SQL code (tools built once into .cache/bin)
 make down          # stop the stack; `make down-volumes` also deletes its volumes
 make clean-processed / clean-artifacts   # rm data/processed / artifacts/{models,bundles,eval}
@@ -696,8 +700,11 @@ interpreter at exit: `ORT_DISABLE_TELEMETRY=1` (Makefile, model-server image, `m
   that could pass their cap: twice the dearest so far.
 - Evaluation: `agent/eval/cases.jsonl` (150 cases, 12 templates, gold constraints, purchase
   histories as fixtures, user ids from 900000); agents `baseline` (rules), `oracle` (gold
-  constraints) and search ablations; LLM agents and the Sonnet judge (grades per (case, item),
-  shared by every agent that showed it) wait for the user's key (design §19, 2026-11-08).
+  constraints) and search ablations; LLM agents (`make agent-eval-llm`) and the Sonnet judge
+  (grades per (case, item), shared by every agent that showed it). The judge's human check
+  (`agent/eval/review.py`): a sheet with what the judge saw and without its grades, a person's
+  0 / 1 / 2, then exact agreement and Cohen's kappa with case-level bootstrap intervals and the
+  3 x 3 table in agent.md (`human.json` next to `grades.json`).
 - Chat path latency (`make agent-latency`): the 150 messages x 3 through `/v1/chat`, one at a
   time, from a fixed sample of dataset users with history, after 30 warm-up replies; records
   load and the other projects' containers, and marks a busy start "indicative".
