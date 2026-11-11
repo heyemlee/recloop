@@ -48,7 +48,9 @@ test("clicking an item changes the next home feed", async ({ page }) => {
   await page.waitForLoadState("networkidle"); // product images
   await page.screenshot({ path: `${SHOTS}/1-home-before.png` });
 
-  // Impressions: tiles >= 50% visible for 1 s are reported, batched, within the next flush.
+  // Impressions: tiles >= 50% visible for 1 s are reported, batched, within the next flush. The
+  // feed starts below the hero (and the debug panel), so scroll to it first.
+  await page.getByTestId("rec-tile").first().scrollIntoViewIfNeeded();
   await expect.poll(() => seen24h(page), { timeout: 8000 }).toBeGreaterThan(seenBefore);
 
   const target = before.find((t) => !historyBefore.includes(t.id));

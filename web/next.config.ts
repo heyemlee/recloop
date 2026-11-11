@@ -14,7 +14,11 @@ const nextConfig: NextConfig = {
   // The container image (deploy/web.Dockerfile) builds with NEXT_OUTPUT=standalone: a minimal
   // server.js plus the traced dependencies. `next dev` and `next start` are unaffected.
   output: process.env.NEXT_OUTPUT === "standalone" ? "standalone" : undefined,
-  env: { NEXT_PUBLIC_CHAT_BACKEND: agentUrl ? "on" : "off" },
+  env: {
+    NEXT_PUBLIC_CHAT_BACKEND: agentUrl ? "on" : "off",
+    // The rail links to /admin only where the admin api is reachable (make serve-web ADMIN=1).
+    NEXT_PUBLIC_ADMIN: process.env.RECLOOP_ADMIN === "1" ? "on" : "off",
+  },
   cacheComponents: true,
   partialPrefetching: true,
   // The dev server only serves its scripts to localhost by default; tests may use 127.0.0.1.

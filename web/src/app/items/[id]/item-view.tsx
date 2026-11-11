@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
 
@@ -15,7 +14,7 @@ import { useUser } from "@/lib/user";
 export function ItemView() {
   const { id } = useParams<{ id: string }>();
   const itemId = Number(id);
-  const { userId } = useUser();
+  const { userId, debug } = useUser();
   const [loaded, setLoaded] = useState<{ id: number; item: Item | null; error: string | null }>({
     id: -1,
     item: null,
@@ -55,56 +54,68 @@ export function ItemView() {
   }
 
   return (
-    <main className="mx-auto w-full max-w-7xl space-y-10 px-4 py-6">
-      <Link href="/" className="text-sm text-muted-foreground hover:underline">
-        ← Back to your feed
-      </Link>
+    <main className="mt-9 flex flex-col gap-16">
       {error && <p className="text-sm text-destructive">{error}</p>}
-      {!item && !error && <Skeleton className="h-80 w-full rounded-xl" />}
+      {!item && !error && <Skeleton className="h-96 w-full rounded-[28px]" />}
       {item && (
-        <article className="grid gap-8 md:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
-          <div className="flex aspect-square items-center justify-center rounded-xl border bg-white p-6">
-            {item.image_url ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img src={item.image_url} alt="" className="max-h-full max-w-full object-contain" />
-            ) : (
-              <span className="text-sm text-muted-foreground">no image</span>
-            )}
+        <article className="flex flex-wrap items-start gap-x-12 gap-y-8">
+          <div className="max-w-[520px] min-w-0 flex-[1_1_340px] rounded-[28px] bg-card p-2 shadow-card">
+            <div className="relative flex aspect-square items-center justify-center rounded-[20px]">
+              {item.image_url ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={item.image_url} alt="" className="absolute inset-10 size-[calc(100%-5rem)] object-contain" />
+              ) : (
+                <span className="text-sm text-muted-foreground">no image</span>
+              )}
+            </div>
           </div>
-          <div className="space-y-4">
-            <div>
-              <p className="text-sm text-muted-foreground">{item.brand}</p>
-              <h1 data-testid="item-title" className="text-xl font-semibold leading-snug">
+          <div className="flex min-w-0 flex-[1.3_1_380px] flex-col gap-7 pt-4">
+            <div className="flex flex-col gap-2.5">
+              <p className="text-sm text-muted-foreground">
+                {[item.brand, (item.categories ?? []).slice(1).at(-1)].filter(Boolean).join(" · ")}
+              </p>
+              <h1 data-testid="item-title" className="text-[28px] leading-[1.14] font-semibold tracking-[-0.05em] text-balance">
                 {item.title}
               </h1>
-              <p className="mt-1 text-xs text-muted-foreground">
-                item {item.item_id} · {(item.categories ?? []).slice(1).join(" › ")}
-              </p>
+              {debug && (
+                <p className="font-mono text-[11px] tracking-normal text-muted-foreground">
+                  item {item.item_id} · {(item.categories ?? []).slice(1).join(" › ")}
+                </p>
+              )}
             </div>
-            <div className="flex items-baseline gap-4">
-              <span className="text-2xl font-semibold">{formatPrice(item.price_cents)}</span>
+            <div className="flex items-baseline gap-3.5">
+              <span className="text-[28px] leading-none font-semibold tracking-[-0.05em]">{formatPrice(item.price_cents)}</span>
               <span className={item.stock > 0 ? "text-sm text-muted-foreground" : "text-sm text-destructive"}>
                 {item.stock > 0 ? `${item.stock} in stock` : "Sold out"}
               </span>
             </div>
-            <div className="flex gap-2">
-              <Button variant="outline" onClick={() => act("add_to_cart")} disabled={item.stock <= 0}>
-                Add to cart
-              </Button>
-              <Button onClick={() => act("purchase")} disabled={item.stock <= 0}>
+            <div className="flex flex-wrap items-center gap-3">
+              <Button variant="brand" size="lg" onClick={() => act("purchase")} disabled={item.stock <= 0}>
                 Buy now
               </Button>
+              <Button variant="outline" size="lg" className="shadow-pill" onClick={() => act("add_to_cart")} disabled={item.stock <= 0}>
+                Add to cart
+              </Button>
             </div>
-            {message && <p className="text-sm text-muted-foreground">{message}</p>}
+            {message && (
+              <p role="status" className="text-sm text-muted-foreground">
+                {message}
+              </p>
+            )}
             {(item.features ?? []).length > 0 && (
-              <ul className="list-disc space-y-1 pl-5 text-sm">
+              <ul className="flex flex-col gap-2.5 text-sm leading-[1.38]">
                 {(item.features ?? []).slice(0, 6).map((f, i) => (
-                  <li key={i}>{f}</li>
+                  <li key={i} className="flex gap-2.5">
+                    <span aria-hidden="true" className="mt-[7px] size-[5px] shrink-0 rounded-full bg-foreground" />
+                    {f}
+                  </li>
                 ))}
               </ul>
             )}
             {item.description && (
-              <p className="line-clamp-6 whitespace-pre-line text-sm text-muted-foreground">{item.description}</p>
+              <p className="line-clamp-6 max-w-[560px] text-sm leading-[1.57] whitespace-pre-line text-muted-foreground">
+                {item.description}
+              </p>
             )}
           </div>
         </article>

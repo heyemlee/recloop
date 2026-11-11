@@ -13,17 +13,22 @@ import { useUser } from "@/lib/user";
 import { DebugPanel } from "./debug-panel";
 import { ItemTile } from "./item-tile";
 
+const GRID = "grid grid-cols-[repeat(auto-fill,minmax(150px,1fr))] gap-x-3 gap-y-7 sm:grid-cols-[repeat(auto-fill,minmax(190px,1fr))]";
+
 /** A recommendation list (home feed or "similar items"), with paging and the debug panel. */
 export function RecFeed({
   surface,
   itemId,
   limit = 20,
   title,
+  header,
 }: {
   surface: "home" | "item";
   itemId?: number;
   limit?: number;
   title: string;
+  /** Drawn above the list from its first page (the home page's hero). */
+  header?: (feed: { items: RecItem[]; onOpen: (rec: RecItem) => void }) => React.ReactNode;
 }) {
   const { userId, debug } = useUser();
   const router = useRouter();
@@ -95,46 +100,49 @@ export function RecFeed({
   }
 
   return (
-    <section className="space-y-4" data-testid={`feed-${surface}`} data-request-id={first?.request_id}>
-      <div className="flex items-baseline justify-between gap-4">
-        <h2 className="text-lg font-semibold tracking-tight">{title}</h2>
-        {first && (
-          <span className="text-xs text-muted-foreground">
-            {items.length} items · {first.surface} surface
-          </span>
+    <>
+      {header?.({ items: first?.items ?? [], onOpen: open })}
+      <section className="flex flex-col gap-6" data-testid={`feed-${surface}`} data-request-id={first?.request_id}>
+        <div className="flex items-baseline justify-between gap-4">
+          <h2 className="text-xl leading-tight font-semibold tracking-[-0.05em]">{title}</h2>
+          {debug && first && (
+            <span className="text-xs text-muted-foreground">
+              {items.length} items · {first.surface} surface
+            </span>
+          )}
+        </div>
+        {debug && first && <DebugPanel resp={first} />}
+        {error && <p className="text-sm text-destructive">Could not load recommendations: {error}</p>}
+        {!first && loading && (
+          <div className={GRID}>
+            {Array.from({ length: 10 }, (_, i) => (
+              <Skeleton key={i} className="aspect-square rounded-[20px]" />
+            ))}
+          </div>
         )}
-      </div>
-      {debug && first && <DebugPanel resp={first} />}
-      {error && <p className="text-sm text-destructive">Could not load recommendations: {error}</p>}
-      {!first && loading && (
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
-          {Array.from({ length: 10 }, (_, i) => (
-            <Skeleton key={i} className="aspect-[3/4] rounded-xl" />
-          ))}
-        </div>
-      )}
-      {first && (
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
-          {items.map((rec) => (
-            <ItemTile
-              key={rec.impression_id}
-              rec={rec}
-              userId={userId}
-              debug={debug}
-              titles={titles}
-              meta={meta}
-              onOpen={open}
-            />
-          ))}
-        </div>
-      )}
-      {last?.next_cursor && (
-        <div className="flex justify-center">
-          <Button variant="outline" onClick={loadMore} disabled={loading}>
-            {loading ? "Loading…" : "Load more"}
-          </Button>
-        </div>
-      )}
-    </section>
+        {first && (
+          <div className={GRID}>
+            {items.map((rec) => (
+              <ItemTile
+                key={rec.impression_id}
+                rec={rec}
+                userId={userId}
+                debug={debug}
+                titles={titles}
+                meta={meta}
+                onOpen={open}
+              />
+            ))}
+          </div>
+        )}
+        {last?.next_cursor && (
+          <div className="flex justify-center pt-4">
+            <Button variant="outline" className="h-12 px-7 text-base shadow-pill" onClick={loadMore} disabled={loading}>
+              {loading ? "Loading…" : "Load more"}
+            </Button>
+          </div>
+        )}
+      </section>
+    </>
   );
 }

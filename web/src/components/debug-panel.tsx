@@ -4,13 +4,11 @@ import { Badge } from "@/components/ui/badge";
 import type { RecResponse } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-import { SOURCE_STYLE } from "./item-tile";
-
 /** Request-level view: what the backend did for this page (design §22.1). */
 export function DebugPanel({ resp }: { resp: RecResponse }) {
   const d = resp.debug;
   return (
-    <section data-testid="debug-panel" className="rounded-xl border bg-muted/30 p-4 text-xs">
+    <section data-testid="debug-panel" className="rounded-[28px] bg-card p-6 text-xs tracking-normal shadow-card">
       <div className="flex flex-wrap items-center gap-x-6 gap-y-1">
         <Field label="request" value={resp.request_id} mono />
         <Field label="model_version" value={resp.model_version} mono testId="model-version" />
@@ -21,7 +19,7 @@ export function DebugPanel({ resp }: { resp: RecResponse }) {
       <div className="mt-2 flex flex-wrap items-center gap-2">
         <span className="text-muted-foreground">experiments</span>
         {Object.entries(resp.experiments).map(([layer, a]) => (
-          <Badge key={layer} variant="outline" className="rounded-md font-mono" data-testid={`exp-${layer}`}>
+          <Badge key={layer} variant="outline" className="font-mono" data-testid={`exp-${layer}`}>
             {layer}: {a.exp_id ? `${a.exp_id} / ${a.variant}` : a.variant} (bucket {a.bucket})
           </Badge>
         ))}
@@ -30,7 +28,7 @@ export function DebugPanel({ resp }: { resp: RecResponse }) {
           <span>none</span>
         ) : (
           resp.degraded.map((x) => (
-            <Badge key={x} variant="destructive" className="rounded-md">
+            <Badge key={x} variant="destructive">
               {x}
             </Badge>
           ))
@@ -53,7 +51,7 @@ export function DebugPanel({ resp }: { resp: RecResponse }) {
                 {(d.sources ?? []).map((s) => (
                   <tr key={s.source} className="border-t border-border/60">
                     <td className="py-1 pr-3">
-                      <span className={cn("rounded px-1.5 py-0.5", SOURCE_STYLE[s.source])}>{s.source}</span>
+                      {s.source}
                     </td>
                     <td className="py-1 pr-3">{s.weight}</td>
                     <td className="py-1 pr-3">{s.candidates}</td>

@@ -19,7 +19,7 @@ const STATUS_VARIANT: Record<ModelVersion["status"], "default" | "secondary" | "
   canary: "secondary",
   validated: "outline",
   built: "outline",
-  retired: "destructive",
+  retired: "secondary",
 };
 
 /** The internal admin page (design §22.1): experiments and their split, model versions with
@@ -78,8 +78,8 @@ export default function AdminPage() {
 
   if (off) {
     return (
-      <main className="mx-auto w-full max-w-3xl px-4 py-10">
-        <h1 className="text-2xl font-semibold tracking-tight">Admin</h1>
+      <main className="mt-9 max-w-3xl">
+        <h1 className="text-xl leading-tight font-semibold tracking-[-0.05em]">Admin</h1>
         <p className="mt-2 text-sm text-muted-foreground">
           The admin api is off. It is internal: start the web app with <code>RECLOOP_ADMIN=1</code> (
           <code>make serve-web ADMIN=1</code>) on a machine you control.
@@ -92,9 +92,9 @@ export default function AdminPage() {
   const canary = versions.find((v) => v.status === "canary");
 
   return (
-    <main className="mx-auto w-full max-w-7xl space-y-6 px-4 py-6">
+    <main className="mt-9 flex flex-col gap-6">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Admin</h1>
+        <h1 className="text-xl leading-tight font-semibold tracking-[-0.05em]">Admin</h1>
         <p className="mt-1 text-sm text-muted-foreground">
           Internal: model releases (design §6), experiments (§8) and fault injection (§5.2). Active bundle{" "}
           <span className="font-mono">{overview?.active ?? "…"}</span>; a replaced version stays loaded for{" "}
@@ -115,7 +115,7 @@ export default function AdminPage() {
           <div className="flex flex-wrap items-center gap-2 text-sm">
             <span className="text-muted-foreground">Canary share</span>
             <Input
-              className="h-8 w-20"
+              className="w-20"
               type="number"
               min={1}
               max={50}
@@ -125,7 +125,6 @@ export default function AdminPage() {
             />
             <span className="text-muted-foreground">%</span>
             <Button
-              size="sm"
               variant="outline"
               disabled={!canary || busy !== null}
               onClick={() => step("Abort canary", () => admin.abortCanary("aborted from the admin page"))}
@@ -133,7 +132,6 @@ export default function AdminPage() {
               Abort canary
             </Button>
             <Button
-              size="sm"
               variant="destructive"
               disabled={busy !== null}
               onClick={() => step("Rollback", () => admin.rollback("rollback from the admin page"))}
@@ -149,13 +147,13 @@ export default function AdminPage() {
               }}
             >
               <Input
-                className="h-8 w-80 font-mono"
+                className="w-80 font-mono text-xs"
                 placeholder="bundle version under artifacts/bundles"
                 value={register}
                 onChange={(e) => setRegister(e.target.value)}
                 aria-label="Register a bundle version"
               />
-              <Button size="sm" type="submit" disabled={!register || busy !== null}>
+              <Button type="submit" disabled={!register || busy !== null}>
                 Register
               </Button>
             </form>
@@ -317,7 +315,7 @@ export default function AdminPage() {
           </span>
           <span className="ml-4 text-muted-foreground">delay</span>
           <Input
-            className="h-8 w-24"
+            className="w-24"
             type="number"
             min={0}
             value={faultForm.delay_ms}
@@ -326,7 +324,7 @@ export default function AdminPage() {
           />
           <span className="text-muted-foreground">ms, share</span>
           <Input
-            className="h-8 w-24"
+            className="w-24"
             type="number"
             min={0}
             max={1}
@@ -335,10 +333,10 @@ export default function AdminPage() {
             onChange={(e) => setFaultForm({ ...faultForm, probability: Number(e.target.value) })}
             aria-label="Probability"
           />
-          <Button size="sm" disabled={busy !== null} onClick={() => step("Fault on", () => admin.setFault(faultForm))}>
+          <Button disabled={busy !== null} onClick={() => step("Fault on", () => admin.setFault(faultForm))}>
             Apply
           </Button>
-          <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => step("Fault off", () => admin.setFault({ delay_ms: 0, probability: 0 }))}>
+          <Button variant="outline" disabled={busy !== null} onClick={() => step("Fault off", () => admin.setFault({ delay_ms: 0, probability: 0 }))}>
             Off
           </Button>
         </CardContent>
@@ -360,7 +358,7 @@ function SplitEditor({ exp, disabled, onApply }: { exp: Experiment; disabled: bo
     >
       <span className="text-xs text-muted-foreground">{exp.variants[0].name}</span>
       <Input
-        className="h-6 w-16 text-xs"
+        className="h-7 w-16 px-2.5 text-xs"
         type="number"
         min={1}
         max={99}

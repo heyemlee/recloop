@@ -20,27 +20,29 @@ import {
 } from "@/lib/ads";
 import { cn } from "@/lib/utils";
 
+// No colour: running is solid, paused an outline, ended greyed out.
 const STATUS_STYLE: Record<string, string> = {
-  active: "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200",
-  paused: "bg-amber-100 text-amber-900 dark:bg-amber-900/40 dark:text-amber-200",
-  ended: "bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300",
+  active: "bg-foreground text-background",
+  paused: "border-[#cccccc] bg-transparent text-foreground",
+  ended: "bg-muted text-muted-foreground",
 };
 
 /** Today's spend against today's budget (the budget row is capped at the spend if lowered). */
 function SpendBar({ c }: { c: Campaign }) {
   const { spent_cents: spent, budget_cents: budget } = c.today;
   const pct = budget > 0 ? Math.min(100, (100 * spent) / budget) : 0;
+  const high = pct >= 90;
   return (
-    <div className="min-w-40 space-y-1" data-testid="spend">
+    <div className="flex min-w-[150px] flex-[0_1_200px] flex-col gap-1.5" data-testid="spend">
       <div className="flex justify-between text-xs tabular-nums">
-        <span>{formatPrice(spent)}</span>
-        <span className="text-muted-foreground">of {formatPrice(budget)}</span>
+        <span className={cn(high && "font-medium text-destructive")}>
+          {formatPrice(spent)}
+          {high && " · almost spent"}
+        </span>
+        <span className="text-muted-foreground">of {formatPrice(budget)} today</span>
       </div>
       <div className="h-1.5 overflow-hidden rounded-full bg-muted">
-        <div
-          className={cn("h-full rounded-full", pct >= 90 ? "bg-destructive" : "bg-primary")}
-          style={{ width: `${pct}%` }}
-        />
+        <div className={cn("h-full rounded-full", high ? "bg-destructive" : "bg-primary")} style={{ width: `${pct}%` }} />
       </div>
     </div>
   );
@@ -61,25 +63,26 @@ function ReportView({ report }: { report: Report }) {
     ["Not billed", formatPrice(t.unbilled_cents)],
   ];
   return (
-    <div className="space-y-3 rounded-lg bg-muted/50 p-3" data-testid="report">
-      <div className="text-xs text-muted-foreground">
-        {report.from} to {report.to} (UTC). Clicks are billed once per impression; &ldquo;not billed&rdquo; is
-        the auction price of clicks that came in after the budget ran out.
-      </div>
-      <dl className="grid grid-cols-3 gap-3 sm:grid-cols-6">
+    <div className="flex flex-col gap-3.5 rounded-[20px] bg-muted px-6 py-5" data-testid="report">
+      <dl className="grid grid-cols-[repeat(auto-fill,minmax(120px,1fr))] gap-4">
         {stats.map(([k, v]) => (
-          <div key={k}>
+          <div key={k} className="flex flex-col gap-1">
             <dt className="text-xs text-muted-foreground">{k}</dt>
-            <dd className="text-sm font-medium tabular-nums">{v}</dd>
+            <dd className="text-xl font-semibold tracking-[-0.05em] tabular-nums">{v}</dd>
           </div>
         ))}
       </dl>
-      {(t.repeat_clicks > 0 || t.expired_clicks > 0 || t.mismatch_clicks > 0) && (
-        <div className="text-xs text-muted-foreground">
-          Not charged: {t.repeat_clicks} repeat clicks, {t.expired_clicks} after the 30-minute token expiry,{" "}
-          {t.mismatch_clicks} with a token for another user or item.
-        </div>
-      )}
+      <div className="text-xs leading-[1.4] text-muted-foreground">
+        {report.from} to {report.to} (UTC). Clicks are billed once per impression; &ldquo;not billed&rdquo; is
+        the auction price of clicks that came in after the budget ran out.
+        {(t.repeat_clicks > 0 || t.expired_clicks > 0 || t.mismatch_clicks > 0) && (
+          <>
+            {" "}
+            Not charged: {t.repeat_clicks} repeat clicks, {t.expired_clicks} after the 30-minute token expiry,{" "}
+            {t.mismatch_clicks} with a token for another user or item.
+          </>
+        )}
+      </div>
     </div>
   );
 }
@@ -101,6 +104,7 @@ export function CampaignRow({
   const [bid, setBid] = useState("");
   const [busy, setBusy] = useState(false);
   const [report, setReport] = useState<Report | null>(null);
+  const [reportLoading, setReportLoading] = useState(false);
   const ended = c.status === "ended";
 
   async function run(action: () => Promise<Campaign>, done?: () => void) {
@@ -151,68 +155,61 @@ export function CampaignRow({
       setReport(null);
       return;
     }
+    // The report reads a week of events: it can take several seconds.
+    setReportLoading(true);
     try {
       setReport(await getReport(c.campaign_id));
     } catch (e) {
       onMessage(e instanceof Error ? e.message : String(e));
+    } finally {
+      setReportLoading(false);
     }
   }
 
   return (
-    <li className="space-y-3 py-4" data-testid="campaign" data-campaign-id={c.campaign_id}>
-      <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
-        <div className="min-w-48 flex-1">
-          <div className="flex items-center gap-2">
-            <span className="font-medium">{c.name}</span>
-            <Badge className={cn("rounded-md", STATUS_STYLE[c.status])}>{c.status}</Badge>
+    <li className="flex flex-col gap-4 py-5" data-testid="campaign" data-campaign-id={c.campaign_id}>
+      <div className="flex flex-wrap items-center gap-x-8 gap-y-4">
+        <div className="flex min-w-0 flex-[1_1_220px] flex-col gap-1">
+          <div className="flex items-center gap-2.5">
+            <span className="text-base font-medium tracking-[-0.031em]">{c.name}</span>
+            <Badge className={cn("tracking-normal", STATUS_STYLE[c.status])}>{c.status}</Badge>
           </div>
-          <div className="mt-0.5 text-xs text-muted-foreground">
-            #{c.campaign_id} · v{c.version} · items{" "}
+          <div className="text-xs text-muted-foreground" title={`version ${c.version} · at most ${c.freq_cap_per_day} impressions per user per day`}>
+            #{c.campaign_id} · items{" "}
             {c.item_ids.map((id, i) => (
               <span key={id}>
                 {i > 0 && ", "}
-                <Link href={`/items/${id}`} className="underline-offset-2 hover:underline">
+                <Link href={`/items/${id}`} className="underline underline-offset-2 hover:text-foreground">
                   {id}
                 </Link>
               </span>
             ))}{" "}
-            · cap {c.freq_cap_per_day}/day
+            · max CPC {formatPrice(c.bid_cpc_cents)}
           </div>
         </div>
         {editing ? (
           <div className="flex flex-wrap items-end gap-2">
-            <label className="text-xs text-muted-foreground">
+            <label className="flex flex-col gap-1.5 text-xs text-muted-foreground">
               Daily budget ($)
-              <Input className="mt-1 w-28" inputMode="decimal" value={budget} onChange={(e) => setBudget(e.target.value)} />
+              <Input className="w-28 border-0 bg-muted" inputMode="decimal" value={budget} onChange={(e) => setBudget(e.target.value)} />
             </label>
-            <label className="text-xs text-muted-foreground">
+            <label className="flex flex-col gap-1.5 text-xs text-muted-foreground">
               Max CPC ($)
-              <Input className="mt-1 w-24" inputMode="decimal" value={bid} onChange={(e) => setBid(e.target.value)} />
+              <Input className="w-24 border-0 bg-muted" inputMode="decimal" value={bid} onChange={(e) => setBid(e.target.value)} />
             </label>
-            <Button size="sm" disabled={busy} onClick={save}>
+            <Button disabled={busy} onClick={save}>
               Save
             </Button>
-            <Button size="sm" variant="ghost" disabled={busy} onClick={() => setEditing(null)}>
+            <Button variant="ghost" disabled={busy} onClick={() => setEditing(null)}>
               Cancel
             </Button>
           </div>
         ) : (
-          <div className="flex items-center gap-6 text-sm">
-            <div>
-              <div className="text-xs text-muted-foreground">Max CPC</div>
-              <div className="tabular-nums">{formatPrice(c.bid_cpc_cents)}</div>
-            </div>
-            <div>
-              <div className="text-xs text-muted-foreground">Daily budget</div>
-              <div className="tabular-nums">{formatPrice(c.daily_budget_cents)}</div>
-            </div>
-            <SpendBar c={c} />
-          </div>
+          <SpendBar c={c} />
         )}
-        <div className="flex gap-1">
+        <div className="flex flex-wrap gap-1.5">
           {!ended && !editing && (
             <Button
-              size="sm"
               variant="outline"
               disabled={busy}
               onClick={() => {
@@ -226,7 +223,6 @@ export function CampaignRow({
           )}
           {!ended && (
             <Button
-              size="sm"
               variant="outline"
               disabled={busy}
               onClick={() => run(() => patchCampaign(c, { status: c.status === "active" ? "paused" : "active" }))}
@@ -236,7 +232,6 @@ export function CampaignRow({
           )}
           {!ended && (
             <Button
-              size="sm"
               variant="destructive"
               disabled={busy}
               onClick={() => {
@@ -246,8 +241,8 @@ export function CampaignRow({
               End
             </Button>
           )}
-          <Button size="sm" variant="ghost" onClick={toggleReport}>
-            {report ? "Hide report" : "Report"}
+          <Button variant={report ? "secondary" : "ghost"} disabled={reportLoading} onClick={toggleReport}>
+            {reportLoading ? "Loading…" : report ? "Hide report" : "Report"}
           </Button>
         </div>
       </div>

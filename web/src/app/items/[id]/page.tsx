@@ -10,8 +10,8 @@ export default function ItemPage() {
   return (
     <Suspense
       fallback={
-        <main className="mx-auto w-full max-w-7xl px-4 py-6">
-          <Skeleton className="h-80 w-full rounded-xl" />
+        <main className="mt-9">
+          <Skeleton className="h-96 w-full rounded-[28px]" />
         </main>
       }
     >

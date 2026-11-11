@@ -120,7 +120,10 @@ minionerec/                 Python 3.12 uv project (own .venv, Apple Silicon onl
 web/                        Next.js 16 + shadcn/ui (:13000); /api/v1/* is proxied to the Go api
                             (/internal is not), /api/v1/chat to the agent service; e2e/;
                             /advertiser is the advertiser console, /chat the shopping assistant,
-                            /admin the internal admin page (only with RECLOOP_ADMIN=1)
+                            /admin the internal admin page (only with RECLOOP_ADMIN=1); the
+                            store pages' search pill has no keyword search: it sends its text
+                            to /chat?q=; the home hero shows the feed's first organic items and
+                            reports no impressions of its own (the tiles do)
 sim/                        traffic simulator (world, click model, sessions + fault switches, verify,
                             drill; ads, billing_drill, billing_verify, overdelivery; compose: this
                             checkout's compose project, redis_stats: both Redis instances; M4:

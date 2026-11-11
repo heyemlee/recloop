@@ -3,21 +3,9 @@
 import Link from "next/link";
 import { useEffect, useRef } from "react";
 
-import { Badge } from "@/components/ui/badge";
 import { formatPrice } from "@/lib/api";
 import { trackImpression } from "@/lib/events";
 import type { RecItem } from "@/lib/types";
-import { cn } from "@/lib/utils";
-
-// One colour per recall source, shared by the tiles and the debug panel.
-export const SOURCE_STYLE: Record<string, string> = {
-  sasrec: "bg-violet-100 text-violet-800 dark:bg-violet-900/40 dark:text-violet-200",
-  itemcf: "bg-sky-100 text-sky-800 dark:bg-sky-900/40 dark:text-sky-200",
-  pop: "bg-zinc-200 text-zinc-800 dark:bg-zinc-800 dark:text-zinc-200",
-  text: "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200",
-  backfill: "bg-amber-100 text-amber-900 dark:bg-amber-900/40 dark:text-amber-200",
-  ads: "bg-orange-100 text-orange-900 dark:bg-orange-900/40 dark:text-orange-200",
-};
 
 /** Reports an impression once the tile is at least 50% visible for 1 second (design §7.1). */
 export function useImpression(
@@ -90,7 +78,7 @@ export function ItemTile({
         .filter((h) => h.source === "itemcf" && h.via !== undefined)
         .map((h) => h.via)
         .join(",")}
-      className="flex flex-col"
+      className="flex min-w-0 flex-col"
     >
       <Link
         href={`/items/${rec.item_id}`}
@@ -98,51 +86,44 @@ export function ItemTile({
           e.preventDefault();
           onOpen(rec);
         }}
-        className={cn(
-          "group flex flex-1 flex-col overflow-hidden rounded-xl border bg-card transition-shadow hover:shadow-md",
-          sponsored && "border-orange-300 dark:border-orange-800",
-        )}
+        className="group flex flex-col gap-2.5"
       >
-        <div className="relative flex aspect-square items-center justify-center bg-white p-3">
+        <div className="relative flex aspect-square items-center justify-center overflow-hidden rounded-[20px] bg-card transition-shadow group-hover:shadow-card">
           {it?.image_url ? (
             // eslint-disable-next-line @next/next/no-img-element
-            <img src={it.image_url} alt="" loading="lazy" className="max-h-full max-w-full object-contain" />
+            <img
+              src={it.image_url}
+              alt=""
+              loading="lazy"
+              className="absolute inset-5 size-[calc(100%-2.5rem)] object-contain transition-transform duration-300 group-hover:scale-[1.04]"
+            />
           ) : (
             <span className="text-xs text-muted-foreground">no image</span>
           )}
-          <span className="absolute left-2 top-2 rounded-md bg-background/90 px-1.5 text-xs tabular-nums text-muted-foreground">
-            #{rec.position}
-          </span>
           {sponsored && (
             <span
               data-testid="sponsored-label"
-              className="absolute right-2 top-2 rounded-md bg-orange-100 px-1.5 text-xs font-medium text-orange-900 dark:bg-orange-900/60 dark:text-orange-100"
+              className="absolute top-2.5 left-2.5 rounded-xl border bg-card px-2.5 py-1 text-[11px] font-medium tracking-normal"
             >
               {rec.label ?? "Sponsored"}
             </span>
           )}
+          {debug && (
+            <span className="absolute bottom-2.5 left-2.5 rounded-xl bg-muted px-2 py-1 text-[11px] font-medium tracking-normal text-muted-foreground tabular-nums">
+              #{rec.position}
+            </span>
+          )}
         </div>
-        <div className="flex flex-1 flex-col gap-1.5 p-3">
-          <div className="line-clamp-2 text-sm font-medium leading-snug group-hover:underline">
-            {it?.title ?? `Item ${rec.item_id}`}
-          </div>
-          <div className="text-xs text-muted-foreground">
-            {it?.brand ?? "—"} · {formatPrice(it?.price_cents)}
-          </div>
-          <div className="mt-auto flex flex-wrap gap-1 pt-1">
-            <Badge className={cn("rounded-md", SOURCE_STYLE[rec.source])}>{sponsored ? "ad" : rec.source}</Badge>
-            {rec.sources
-              .filter((h) => h.source !== rec.source)
-              .map((h) => (
-                <Badge key={h.source} variant="outline" className="rounded-md text-muted-foreground">
-                  +{h.source}
-                </Badge>
-              ))}
+        <div className="flex flex-col gap-1 px-1">
+          <div className="line-clamp-2 text-sm leading-[1.29] font-medium">{it?.title ?? `Item ${rec.item_id}`}</div>
+          <div className="text-sm leading-[1.29] text-muted-foreground">
+            {it?.brand ? `${it.brand} · ` : ""}
+            <span className="text-foreground">{formatPrice(it?.price_cents)}</span>
           </div>
         </div>
       </Link>
       {debug && (
-        <div data-testid="tile-debug" className="mt-1 rounded-lg bg-muted/60 px-2 py-1.5 font-mono text-[11px] leading-relaxed text-muted-foreground">
+        <div data-testid="tile-debug" className="mt-2 px-1 font-mono text-[11px] leading-relaxed tracking-normal text-muted-foreground">
           <div>
             {sponsored
               ? `item ${rec.item_id} · campaign ${rec.campaign_id}${price !== undefined ? ` · ${price}¢/click` : ""}`
