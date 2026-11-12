@@ -1,0 +1,308 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 616" width="900" height="616" role="img" aria-labelledby="title desc">
+  <title id="title">RecLoop system architecture</title>
+  <desc id="desc">System architecture of RecLoop. The store (Next.js) and the shopping assistant (FastAPI, Claude) call the Go api. A recommendation request runs five stages inside one 100 ms budget: user context from Redis; recall from SASRec through the gRPC model server, ItemCF, popularity and generated items; weighted RRF fusion and filters; LightGBM ranking through the model server; and a second-price ad auction with budgets and frequency caps. The api reads and writes PostgreSQL with pgvector, a Redis instance for state and one for cache, and publishes events to Redpanda. Stream consumers apply each event once: the aggregator updates the user state, the log sink stores events in PostgreSQL and billing writes the charge ledger. A near-line worker runs MiniOneRec and writes generated items to Redis. Offline, a Spark job joins training samples from the event log, training produces a versioned bundle, and a release goes through validation and a 5 percent canary before the model server serves it. It runs on Docker Compose and on Kubernetes with Helm, HPA and KEDA, observed with Prometheus, Grafana and OpenTelemetry. A pulse follows a request, then a click event, then the offline loop.</desc>
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Helvetica, Arial, sans-serif; }
+    .eyebrow { font-size: 10.5px; font-weight: 600; letter-spacing: 0.08em; fill: #8e8e93; }
+    .title { font-size: 16px; font-weight: 650; fill: #1d1d1f; }
+    .name { font-size: 13.5px; font-weight: 600; fill: #1d1d1f; }
+    .stage { font-size: 12.5px; font-weight: 600; fill: #1d1d1f; }
+    .sub { font-size: 11.5px; fill: #6e6e73; }
+    .budget { font-size: 11px; font-weight: 600; fill: #8e8e93; }
+    .edge { font-size: 11px; fill: #8e8e93; }
+    .pilltext { font-size: 11.5px; font-weight: 600; fill: #6e6e73; }
+    .badgenum { font-size: 11px; font-weight: 700; fill: #ffffff; }
+    .legend { font-size: 11.5px; fill: #aeaeb2; }
+    .legend.on { fill: #1d1d1f; opacity: 0; animation: 20s linear infinite; }
+
+    .bg { fill: #fbfbfd; stroke: #e5e5ea; }
+    .card { fill: #ffffff; stroke: #e5e5ea; stroke-width: 1; }
+    .strong { stroke: #d1d1d6; }
+    .row { fill: #f5f5f7; }
+    .rowon { fill: #e8f0ff; stroke: #0a7cff; stroke-width: 1.5; opacity: 0; animation: 20s linear infinite; }
+    .badge { fill: #c7c7cc; }
+    .lit { opacity: 0; animation: 20s linear infinite; }
+    .ring { fill: none; stroke-width: 2; opacity: 0; animation: 20s linear infinite; }
+    .strip { fill: #f5f5f7; }
+    .pill { fill: #ffffff; stroke: #e5e5ea; }
+    .wire { fill: none; stroke: #d1d1d6; stroke-width: 1.5; }
+
+    /* A comet: a soft tail with a bright head. */
+    .tail, .head { fill: none; stroke-linecap: round; opacity: 0; animation: 20s linear infinite; }
+    .tail { stroke-width: 3; stroke-opacity: 0.35; stroke-dasharray: 0.3 3; stroke-dashoffset: 0.3; }
+    .head { stroke-width: 5; stroke-dasharray: 0.02 3; stroke-dashoffset: 0.02; }
+    @media (prefers-reduced-motion: reduce) {
+      .tail, .head, .ring, .lit, .rowon, .legend.on { animation: none; }
+    }
+    @keyframes w1 { 0%, 0.5% { opacity: 0; } 1.1%, 38.5% { opacity: 1; } 39.1%, 100% { opacity: 0; } }
+    @keyframes w2 { 0%, 39.5% { opacity: 0; } 40.1%, 68.5% { opacity: 1; } 69.1%, 100% { opacity: 0; } }
+    @keyframes w3 { 0%, 69.5% { opacity: 0; } 70.1%, 98.5% { opacity: 1; } 99.1%, 100% { opacity: 0; } }
+    @keyframes w4 { 0%, 4% { opacity: 0; } 4.6%, 9% { opacity: 1; } 9.6%, 100% { opacity: 0; } }
+    @keyframes w5 { 0%, 4% { opacity: 0; } 4.6%, 38% { opacity: 1; } 38.6%, 100% { opacity: 0; } }
+    @keyframes w6 { 0%, 9% { opacity: 0; } 9.6%, 16% { opacity: 1; } 16.6%, 100% { opacity: 0; } }
+    @keyframes w7 { 0%, 9% { opacity: 0; } 9.6%, 38% { opacity: 1; } 38.6%, 100% { opacity: 0; } }
+    @keyframes w8 { 0%, 16% { opacity: 0; } 16.6%, 20% { opacity: 1; } 20.6%, 100% { opacity: 0; } }
+    @keyframes w9 { 0%, 16% { opacity: 0; } 16.6%, 38% { opacity: 1; } 38.6%, 100% { opacity: 0; } }
+    @keyframes w10 { 0%, 20% { opacity: 0; } 20.6%, 26% { opacity: 1; } 26.6%, 100% { opacity: 0; } }
+    @keyframes w11 { 0%, 20% { opacity: 0; } 20.6%, 38% { opacity: 1; } 38.6%, 100% { opacity: 0; } }
+    @keyframes w12 { 0%, 26% { opacity: 0; } 26.6%, 32% { opacity: 1; } 32.6%, 100% { opacity: 0; } }
+    @keyframes w13 { 0%, 26% { opacity: 0; } 26.6%, 38% { opacity: 1; } 38.6%, 100% { opacity: 0; } }
+    @keyframes w14 { 0%, 12.5% { opacity: 0; } 13.1%, 16% { opacity: 1; } 16.6%, 100% { opacity: 0; } }
+    @keyframes w15 { 0%, 23.5% { opacity: 0; } 24.1%, 26.5% { opacity: 1; } 27.1%, 100% { opacity: 0; } }
+    @keyframes p16 { 0%, 1% { opacity: 0; stroke-dashoffset: 0.3; } 1.01% { opacity: 1; stroke-dashoffset: 0.3; } 4% { opacity: 1; stroke-dashoffset: -1.0; } 4.01%, 100% { opacity: 0; stroke-dashoffset: -1.0; } }
+    @keyframes p17 { 0%, 1% { opacity: 0; stroke-dashoffset: 0.02; } 1.01% { opacity: 1; stroke-dashoffset: 0.02; } 4% { opacity: 1; stroke-dashoffset: -1.28; } 4.01%, 100% { opacity: 0; stroke-dashoffset: -1.28; } }
+    @keyframes p18 { 0%, 5% { opacity: 0; stroke-dashoffset: 0.3; } 5.01% { opacity: 1; stroke-dashoffset: 0.3; } 8% { opacity: 1; stroke-dashoffset: -1.0; } 8.01%, 100% { opacity: 0; stroke-dashoffset: -1.0; } }
+    @keyframes p19 { 0%, 5% { opacity: 0; stroke-dashoffset: 0.02; } 5.01% { opacity: 1; stroke-dashoffset: 0.02; } 8% { opacity: 1; stroke-dashoffset: -1.28; } 8.01%, 100% { opacity: 0; stroke-dashoffset: -1.28; } }
+    @keyframes w20 { 0%, 7% { opacity: 0; } 7.6%, 10% { opacity: 1; } 10.6%, 100% { opacity: 0; } }
+    @keyframes w21 { 0%, 29% { opacity: 0; } 29.6%, 32% { opacity: 1; } 32.6%, 100% { opacity: 0; } }
+    @keyframes p22 { 0%, 10% { opacity: 0; stroke-dashoffset: 0.3; } 10.01% { opacity: 1; stroke-dashoffset: 0.3; } 13% { opacity: 1; stroke-dashoffset: -1.0; } 13.01%, 100% { opacity: 0; stroke-dashoffset: -1.0; } }
+    @keyframes p23 { 0%, 10% { opacity: 0; stroke-dashoffset: 0.02; } 10.01% { opacity: 1; stroke-dashoffset: 0.02; } 13% { opacity: 1; stroke-dashoffset: -1.28; } 13.01%, 100% { opacity: 0; stroke-dashoffset: -1.28; } }
+    @keyframes p24 { 0%, 21% { opacity: 0; stroke-dashoffset: 0.3; } 21.01% { opacity: 1; stroke-dashoffset: 0.3; } 24% { opacity: 1; stroke-dashoffset: -1.0; } 24.01%, 100% { opacity: 0; stroke-dashoffset: -1.0; } }
+    @keyframes p25 { 0%, 21% { opacity: 0; stroke-dashoffset: 0.02; } 21.01% { opacity: 1; stroke-dashoffset: 0.02; } 24% { opacity: 1; stroke-dashoffset: -1.28; } 24.01%, 100% { opacity: 0; stroke-dashoffset: -1.28; } }
+    @keyframes p26 { 0%, 27% { opacity: 0; stroke-dashoffset: 0.3; } 27.01% { opacity: 1; stroke-dashoffset: 0.3; } 30% { opacity: 1; stroke-dashoffset: -1.0; } 30.01%, 100% { opacity: 0; stroke-dashoffset: -1.0; } }
+    @keyframes p27 { 0%, 27% { opacity: 0; stroke-dashoffset: 0.02; } 27.01% { opacity: 1; stroke-dashoffset: 0.02; } 30% { opacity: 1; stroke-dashoffset: -1.28; } 30.01%, 100% { opacity: 0; stroke-dashoffset: -1.28; } }
+    @keyframes p28 { 0%, 32.5% { opacity: 0; stroke-dashoffset: 0.3; } 32.51% { opacity: 1; stroke-dashoffset: 0.3; } 36% { opacity: 1; stroke-dashoffset: -1.0; } 36.01%, 100% { opacity: 0; stroke-dashoffset: -1.0; } }
+    @keyframes p29 { 0%, 32.5% { opacity: 0; stroke-dashoffset: 0.02; } 32.51% { opacity: 1; stroke-dashoffset: 0.02; } 36% { opacity: 1; stroke-dashoffset: -1.28; } 36.01%, 100% { opacity: 0; stroke-dashoffset: -1.28; } }
+    @keyframes w30 { 0%, 0.5% { opacity: 0; } 1.1%, 2.5% { opacity: 1; } 3.1%, 100% { opacity: 0; } }
+    @keyframes w31 { 0%, 35.5% { opacity: 0; } 36.1%, 38.5% { opacity: 1; } 39.1%, 100% { opacity: 0; } }
+    @keyframes w32 { 0%, 39.5% { opacity: 0; } 40.1%, 41.5% { opacity: 1; } 42.1%, 100% { opacity: 0; } }
+    @keyframes p33 { 0%, 40% { opacity: 0; stroke-dashoffset: 0.3; } 40.01% { opacity: 1; stroke-dashoffset: 0.3; } 43% { opacity: 1; stroke-dashoffset: -1.0; } 43.01%, 100% { opacity: 0; stroke-dashoffset: -1.0; } }
+    @keyframes p34 { 0%, 40% { opacity: 0; stroke-dashoffset: 0.02; } 40.01% { opacity: 1; stroke-dashoffset: 0.02; } 43% { opacity: 1; stroke-dashoffset: -1.28; } 43.01%, 100% { opacity: 0; stroke-dashoffset: -1.28; } }
+    @keyframes p35 { 0%, 43.5% { opacity: 0; stroke-dashoffset: 0.3; } 43.51% { opacity: 1; stroke-dashoffset: 0.3; } 47% { opacity: 1; stroke-dashoffset: -1.0; } 47.01%, 100% { opacity: 0; stroke-dashoffset: -1.0; } }
+    @keyframes p36 { 0%, 43.5% { opacity: 0; stroke-dashoffset: 0.02; } 43.51% { opacity: 1; stroke-dashoffset: 0.02; } 47% { opacity: 1; stroke-dashoffset: -1.28; } 47.01%, 100% { opacity: 0; stroke-dashoffset: -1.28; } }
+    @keyframes w37 { 0%, 46.5% { opacity: 0; } 47.1%, 51% { opacity: 1; } 51.6%, 100% { opacity: 0; } }
+    @keyframes p38 { 0%, 48% { opacity: 0; stroke-dashoffset: 0.3; } 48.01% { opacity: 1; stroke-dashoffset: 0.3; } 51% { opacity: 1; stroke-dashoffset: -1.0; } 51.01%, 100% { opacity: 0; stroke-dashoffset: -1.0; } }
+    @keyframes p39 { 0%, 48% { opacity: 0; stroke-dashoffset: 0.02; } 48.01% { opacity: 1; stroke-dashoffset: 0.02; } 51% { opacity: 1; stroke-dashoffset: -1.28; } 51.01%, 100% { opacity: 0; stroke-dashoffset: -1.28; } }
+    @keyframes w40 { 0%, 50.5% { opacity: 0; } 51.1%, 58% { opacity: 1; } 58.6%, 100% { opacity: 0; } }
+    @keyframes p41 { 0%, 52% { opacity: 0; stroke-dashoffset: 0.3; } 52.01% { opacity: 1; stroke-dashoffset: 0.3; } 57% { opacity: 1; stroke-dashoffset: -1.0; } 57.01%, 100% { opacity: 0; stroke-dashoffset: -1.0; } }
+    @keyframes p42 { 0%, 52% { opacity: 0; stroke-dashoffset: 0.02; } 52.01% { opacity: 1; stroke-dashoffset: 0.02; } 57% { opacity: 1; stroke-dashoffset: -1.28; } 57.01%, 100% { opacity: 0; stroke-dashoffset: -1.28; } }
+    @keyframes p43 { 0%, 52% { opacity: 0; stroke-dashoffset: 0.3; } 52.01% { opacity: 1; stroke-dashoffset: 0.3; } 57% { opacity: 1; stroke-dashoffset: -1.0; } 57.01%, 100% { opacity: 0; stroke-dashoffset: -1.0; } }
+    @keyframes p44 { 0%, 52% { opacity: 0; stroke-dashoffset: 0.02; } 52.01% { opacity: 1; stroke-dashoffset: 0.02; } 57% { opacity: 1; stroke-dashoffset: -1.28; } 57.01%, 100% { opacity: 0; stroke-dashoffset: -1.28; } }
+    @keyframes w45 { 0%, 56.5% { opacity: 0; } 57.1%, 60% { opacity: 1; } 60.6%, 100% { opacity: 0; } }
+    @keyframes w46 { 0%, 56.5% { opacity: 0; } 57.1%, 60% { opacity: 1; } 60.6%, 100% { opacity: 0; } }
+    @keyframes w47 { 0%, 66% { opacity: 0; } 66.6%, 68.5% { opacity: 1; } 69.1%, 100% { opacity: 0; } }
+    @keyframes p48 { 0%, 59% { opacity: 0; stroke-dashoffset: 0.3; } 59.01% { opacity: 1; stroke-dashoffset: 0.3; } 62% { opacity: 1; stroke-dashoffset: -1.0; } 62.01%, 100% { opacity: 0; stroke-dashoffset: -1.0; } }
+    @keyframes p49 { 0%, 59% { opacity: 0; stroke-dashoffset: 0.02; } 59.01% { opacity: 1; stroke-dashoffset: 0.02; } 62% { opacity: 1; stroke-dashoffset: -1.28; } 62.01%, 100% { opacity: 0; stroke-dashoffset: -1.28; } }
+    @keyframes w50 { 0%, 61.5% { opacity: 0; } 62.1%, 66% { opacity: 1; } 66.6%, 100% { opacity: 0; } }
+    @keyframes p51 { 0%, 63.5% { opacity: 0; stroke-dashoffset: 0.3; } 63.51% { opacity: 1; stroke-dashoffset: 0.3; } 66.5% { opacity: 1; stroke-dashoffset: -1.0; } 66.51%, 100% { opacity: 0; stroke-dashoffset: -1.0; } }
+    @keyframes p52 { 0%, 63.5% { opacity: 0; stroke-dashoffset: 0.02; } 63.51% { opacity: 1; stroke-dashoffset: 0.02; } 66.5% { opacity: 1; stroke-dashoffset: -1.28; } 66.51%, 100% { opacity: 0; stroke-dashoffset: -1.28; } }
+    @keyframes w53 { 0%, 69.5% { opacity: 0; } 70.1%, 71.5% { opacity: 1; } 72.1%, 100% { opacity: 0; } }
+    @keyframes p54 { 0%, 70% { opacity: 0; stroke-dashoffset: 0.3; } 70.01% { opacity: 1; stroke-dashoffset: 0.3; } 74% { opacity: 1; stroke-dashoffset: -1.0; } 74.01%, 100% { opacity: 0; stroke-dashoffset: -1.0; } }
+    @keyframes p55 { 0%, 70% { opacity: 0; stroke-dashoffset: 0.02; } 70.01% { opacity: 1; stroke-dashoffset: 0.02; } 74% { opacity: 1; stroke-dashoffset: -1.28; } 74.01%, 100% { opacity: 0; stroke-dashoffset: -1.28; } }
+    @keyframes w56 { 0%, 73.5% { opacity: 0; } 74.1%, 77% { opacity: 1; } 77.6%, 100% { opacity: 0; } }
+    @keyframes p57 { 0%, 75.5% { opacity: 0; stroke-dashoffset: 0.3; } 75.51% { opacity: 1; stroke-dashoffset: 0.3; } 77.5% { opacity: 1; stroke-dashoffset: -1.0; } 77.51%, 100% { opacity: 0; stroke-dashoffset: -1.0; } }
+    @keyframes p58 { 0%, 75.5% { opacity: 0; stroke-dashoffset: 0.02; } 75.51% { opacity: 1; stroke-dashoffset: 0.02; } 77.5% { opacity: 1; stroke-dashoffset: -1.28; } 77.51%, 100% { opacity: 0; stroke-dashoffset: -1.28; } }
+    @keyframes w59 { 0%, 77% { opacity: 0; } 77.6%, 80.5% { opacity: 1; } 81.1%, 100% { opacity: 0; } }
+    @keyframes p60 { 0%, 79% { opacity: 0; stroke-dashoffset: 0.3; } 79.01% { opacity: 1; stroke-dashoffset: 0.3; } 81% { opacity: 1; stroke-dashoffset: -1.0; } 81.01%, 100% { opacity: 0; stroke-dashoffset: -1.0; } }
+    @keyframes p61 { 0%, 79% { opacity: 0; stroke-dashoffset: 0.02; } 79.01% { opacity: 1; stroke-dashoffset: 0.02; } 81% { opacity: 1; stroke-dashoffset: -1.28; } 81.01%, 100% { opacity: 0; stroke-dashoffset: -1.28; } }
+    @keyframes w62 { 0%, 80.5% { opacity: 0; } 81.1%, 84% { opacity: 1; } 84.6%, 100% { opacity: 0; } }
+    @keyframes p63 { 0%, 82.5% { opacity: 0; stroke-dashoffset: 0.3; } 82.51% { opacity: 1; stroke-dashoffset: 0.3; } 84.5% { opacity: 1; stroke-dashoffset: -1.0; } 84.51%, 100% { opacity: 0; stroke-dashoffset: -1.0; } }
+    @keyframes p64 { 0%, 82.5% { opacity: 0; stroke-dashoffset: 0.02; } 82.51% { opacity: 1; stroke-dashoffset: 0.02; } 84.5% { opacity: 1; stroke-dashoffset: -1.28; } 84.51%, 100% { opacity: 0; stroke-dashoffset: -1.28; } }
+    @keyframes w65 { 0%, 84% { opacity: 0; } 84.6%, 89% { opacity: 1; } 89.6%, 100% { opacity: 0; } }
+    @keyframes p66 { 0%, 86% { opacity: 0; stroke-dashoffset: 0.3; } 86.01% { opacity: 1; stroke-dashoffset: 0.3; } 93% { opacity: 1; stroke-dashoffset: -1.0; } 93.01%, 100% { opacity: 0; stroke-dashoffset: -1.0; } }
+    @keyframes p67 { 0%, 86% { opacity: 0; stroke-dashoffset: 0.02; } 86.01% { opacity: 1; stroke-dashoffset: 0.02; } 93% { opacity: 1; stroke-dashoffset: -1.28; } 93.01%, 100% { opacity: 0; stroke-dashoffset: -1.28; } }
+    @keyframes w68 { 0%, 92.5% { opacity: 0; } 93.1%, 98% { opacity: 1; } 98.6%, 100% { opacity: 0; } }
+  </style>
+  <defs><marker id="arrow" viewBox="0 0 6 6" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 L6 3 L0 6 z" fill="#c7c7cc"/></marker></defs>
+  <rect x="0.5" y="0.5" width="899" height="615" rx="16" class="bg"/>
+  <text x="20" y="28" class="eyebrow">RECLOOP · SYSTEM ARCHITECTURE</text>
+  <circle cx="640" cy="24" r="4" fill="#0a7cff"/>
+  <text x="649" y="28" class="legend">request</text>
+  <text x="649" y="28" class="legend on" style="animation-name:w1">request</text>
+  <circle cx="722" cy="24" r="4" fill="#0d9488"/>
+  <text x="731" y="28" class="legend">events</text>
+  <text x="731" y="28" class="legend on" style="animation-name:w2">events</text>
+  <circle cx="804" cy="24" r="4" fill="#7c5cff"/>
+  <text x="813" y="28" class="legend">offline loop</text>
+  <text x="813" y="28" class="legend on" style="animation-name:w3">offline loop</text>
+  <rect x="20" y="44" width="160" height="92" rx="12" class="card"/>
+  <text x="32" y="62" class="eyebrow">NEXT.JS 16</text>
+  <text x="32" y="80" class="name">Store</text>
+  <text x="32" y="96" class="sub">feed · item pages · debug</text>
+  <text x="32" y="112" class="sub">ad console · admin</text>
+  <rect x="20" y="152" width="160" height="84" rx="12" class="card"/>
+  <text x="32" y="170" class="eyebrow">FASTAPI · CLAUDE</text>
+  <text x="32" y="188" class="name">Shopping assistant</text>
+  <text x="32" y="204" class="sub">LLM parses, code checks</text>
+  <text x="32" y="220" class="sub">price, stock, devices</text>
+  <rect x="216" y="44" width="344" height="216" rx="12" class="card strong"/>
+  <text x="228" y="62" class="eyebrow">GO · serving/</text>
+  <text x="228" y="80" class="title">api</text>
+  <text x="548" y="80" class="sub" text-anchor="end">one 100 ms budget per request</text>
+  <rect x="228" y="92" width="320" height="26" rx="8" class="row"/>
+  <rect x="228" y="92" width="320" height="26" rx="8" class="rowon" style="animation-name:w4"/>
+  <circle cx="243" cy="105" r="8" class="badge"/>
+  <circle cx="243" cy="105" r="8" class="lit" fill="#0a7cff" style="animation-name:w5"/>
+  <text x="243" y="109" class="badgenum" text-anchor="middle">1</text>
+  <text x="259" y="109.5" class="stage">User context</text>
+  <text x="352" y="109.5" class="sub">history, purchases, seen</text>
+  <text x="540" y="109.5" class="budget" text-anchor="end">5 ms</text>
+  <rect x="228" y="122" width="320" height="26" rx="8" class="row"/>
+  <rect x="228" y="122" width="320" height="26" rx="8" class="rowon" style="animation-name:w6"/>
+  <circle cx="243" cy="135" r="8" class="badge"/>
+  <circle cx="243" cy="135" r="8" class="lit" fill="#0a7cff" style="animation-name:w7"/>
+  <text x="243" y="139" class="badgenum" text-anchor="middle">2</text>
+  <text x="259" y="139.5" class="stage">Recall</text>
+  <text x="352" y="139.5" class="sub">SASRec, ItemCF, Pop, gen</text>
+  <text x="540" y="139.5" class="budget" text-anchor="end">35 ms</text>
+  <rect x="228" y="152" width="320" height="26" rx="8" class="row"/>
+  <rect x="228" y="152" width="320" height="26" rx="8" class="rowon" style="animation-name:w8"/>
+  <circle cx="243" cy="165" r="8" class="badge"/>
+  <circle cx="243" cy="165" r="8" class="lit" fill="#0a7cff" style="animation-name:w9"/>
+  <text x="243" y="169" class="badgenum" text-anchor="middle">3</text>
+  <text x="259" y="169.5" class="stage">Fuse + filter</text>
+  <text x="352" y="169.5" class="sub">weighted RRF, stock, brand cap</text>
+  <rect x="228" y="182" width="320" height="26" rx="8" class="row"/>
+  <rect x="228" y="182" width="320" height="26" rx="8" class="rowon" style="animation-name:w10"/>
+  <circle cx="243" cy="195" r="8" class="badge"/>
+  <circle cx="243" cy="195" r="8" class="lit" fill="#0a7cff" style="animation-name:w11"/>
+  <text x="243" y="199" class="badgenum" text-anchor="middle">4</text>
+  <text x="259" y="199.5" class="stage">Rank</text>
+  <text x="352" y="199.5" class="sub">LightGBM, 300 candidates</text>
+  <text x="540" y="199.5" class="budget" text-anchor="end">25 ms</text>
+  <rect x="228" y="212" width="320" height="26" rx="8" class="row"/>
+  <rect x="228" y="212" width="320" height="26" rx="8" class="rowon" style="animation-name:w12"/>
+  <circle cx="243" cy="225" r="8" class="badge"/>
+  <circle cx="243" cy="225" r="8" class="lit" fill="#0a7cff" style="animation-name:w13"/>
+  <text x="243" y="229" class="badgenum" text-anchor="middle">5</text>
+  <text x="259" y="229.5" class="stage">Ads</text>
+  <text x="352" y="229.5" class="sub">GSP auction, budget, caps</text>
+  <text x="540" y="229.5" class="budget" text-anchor="end">10 ms</text>
+  <text x="388" y="253" class="edge" text-anchor="middle">gRPC deadlines · circuit breakers · degrade, never fail</text>
+  <rect x="596" y="44" width="284" height="112" rx="12" class="card"/>
+  <text x="608" y="62" class="eyebrow">PYTHON · gRPC</text>
+  <text x="608" y="80" class="name">Model server</text>
+  <text x="868" y="80" class="sub" text-anchor="end">several bundle versions</text>
+  <rect x="608" y="90" width="260" height="24" rx="8" class="row"/>
+  <rect x="608" y="90" width="260" height="24" rx="8" class="rowon" style="animation-name:w14"/>
+  <text x="620" y="106.5" class="stage">Retrieve</text>
+  <text x="690" y="106.5" class="sub">SASRec (ONNX) + FAISS</text>
+  <rect x="608" y="120" width="260" height="24" rx="8" class="row"/>
+  <rect x="608" y="120" width="260" height="24" rx="8" class="rowon" style="animation-name:w15"/>
+  <text x="620" y="136.5" class="stage">Rank</text>
+  <text x="690" y="136.5" class="sub">LightGBM (ONNX) + pCTR</text>
+  <rect x="596" y="172" width="284" height="64" rx="12" class="card"/>
+  <text x="608" y="190" class="eyebrow">MINIONEREC · NEAR-LINE</text>
+  <text x="608" y="208" class="name">Generative recall</text>
+  <text x="608" y="224" class="sub">Qwen2.5-1.5B emits semantic IDs</text>
+  <rect x="20" y="286" width="203" height="60" rx="12" class="card"/>
+  <text x="32" y="310" class="name">PostgreSQL 18 + pgvector</text>
+  <text x="32" y="326" class="sub">catalog, events, ledger, versions</text>
+  <rect x="239" y="286" width="203" height="60" rx="12" class="card"/>
+  <text x="251" y="310" class="name">Redpanda</text>
+  <text x="251" y="326" class="sub">event log, 6 partitions by user</text>
+  <rect x="458" y="286" width="203" height="60" rx="12" class="card"/>
+  <text x="470" y="310" class="name">Redis · cache</text>
+  <text x="470" y="326" class="sub">pages, candidate lists · LRU</text>
+  <rect x="677" y="286" width="203" height="60" rx="12" class="card"/>
+  <text x="689" y="310" class="name">Redis · state</text>
+  <text x="689" y="326" class="sub">context, caps, spend · no eviction</text>
+  <rect x="239" y="380" width="422" height="66" rx="12" class="card"/>
+  <text x="251" y="398" class="eyebrow">STREAM CONSUMERS · each event applied once</text>
+  <rect x="251" y="408" width="128" height="26" rx="13" class="pill"/>
+  <text x="315.0" y="425" class="pilltext" text-anchor="middle">aggregator → state</text>
+  <rect x="387" y="408" width="128" height="26" rx="13" class="pill"/>
+  <text x="451.0" y="425" class="pilltext" text-anchor="middle">log-sink → events</text>
+  <rect x="523" y="408" width="126" height="26" rx="13" class="pill"/>
+  <text x="586.0" y="425" class="pilltext" text-anchor="middle">billing → ledger</text>
+  <rect x="20" y="480" width="203" height="60" rx="12" class="card"/>
+  <text x="32" y="504" class="name">Spark sample job</text>
+  <text x="32" y="520" class="sub">attribution, delayed labels</text>
+  <rect x="239" y="480" width="203" height="60" rx="12" class="card"/>
+  <text x="251" y="504" class="name">Training</text>
+  <text x="251" y="520" class="sub">SASRec · LightGBM · pCTR</text>
+  <rect x="458" y="480" width="203" height="60" rx="12" class="card"/>
+  <text x="470" y="504" class="name">Versioned bundle</text>
+  <text x="470" y="520" class="sub">ONNX, FAISS, golden queries</text>
+  <rect x="677" y="480" width="203" height="60" rx="12" class="card"/>
+  <text x="689" y="504" class="name">Release</text>
+  <text x="689" y="520" class="sub">validate → canary 5% → active</text>
+  <rect x="20" y="562" width="860" height="34" rx="17" class="strip"/>
+  <text x="36" y="583.5" class="eyebrow">RUNS ON</text>
+  <rect x="100" y="567" width="106" height="24" rx="12" class="pill"/>
+  <text x="153.0" y="583" class="pilltext" text-anchor="middle">Docker Compose</text>
+  <rect x="212" y="567" width="118" height="24" rx="12" class="pill"/>
+  <text x="271.0" y="583" class="pilltext" text-anchor="middle">Kubernetes · Helm</text>
+  <rect x="336" y="567" width="80" height="24" rx="12" class="pill"/>
+  <text x="376.0" y="583" class="pilltext" text-anchor="middle">HPA · KEDA</text>
+  <rect x="422" y="567" width="136" height="24" rx="12" class="pill"/>
+  <text x="490.0" y="583" class="pilltext" text-anchor="middle">Prometheus · Grafana</text>
+  <rect x="564" y="567" width="98" height="24" rx="12" class="pill"/>
+  <text x="613.0" y="583" class="pilltext" text-anchor="middle">OpenTelemetry</text>
+  <rect x="668" y="567" width="98" height="24" rx="12" class="pill"/>
+  <text x="717.0" y="583" class="pilltext" text-anchor="middle">k6 + simulator</text>
+  <rect x="772" y="567" width="100" height="24" rx="12" class="pill"/>
+  <text x="822.0" y="583" class="pilltext" text-anchor="middle">GitHub Actions</text>
+  <path d="M180 90 H216" class="wire" marker-end="url(#arrow)"/>
+  <path d="M100 136 V152" class="wire" marker-end="url(#arrow)"/>
+  <path d="M180 194 H216" class="wire" marker-end="url(#arrow)"/>
+  <path d="M60 236 V286" class="wire" marker-end="url(#arrow)"/>
+  <path d="M560 135 H578 V102 H608" class="wire" marker-end="url(#arrow)"/>
+  <path d="M560 195 H586 V132 H608" class="wire" marker-end="url(#arrow)"/>
+  <path d="M240 260 V272 H121 V286" class="wire" marker-end="url(#arrow)"/>
+  <path d="M340 260 V286" class="wire" marker-end="url(#arrow)"/>
+  <path d="M520 260 V286" class="wire" marker-end="url(#arrow)"/>
+  <path d="M548 260 V272 H720 V286" class="wire" marker-end="url(#arrow)"/>
+  <path d="M340 346 V380" class="wire" marker-end="url(#arrow)"/>
+  <path d="M661 413 H778 V346" class="wire" marker-end="url(#arrow)"/>
+  <path d="M239 413 H121 V346" class="wire" marker-end="url(#arrow)"/>
+  <path d="M60 346 V480" class="wire" marker-end="url(#arrow)"/>
+  <path d="M223 510 H239" class="wire" marker-end="url(#arrow)"/>
+  <path d="M442 510 H458" class="wire" marker-end="url(#arrow)"/>
+  <path d="M661 510 H677" class="wire" marker-end="url(#arrow)"/>
+  <path d="M880 510 H890 V100 H880" class="wire" marker-end="url(#arrow)"/>
+  <path d="M778 236 V286" class="wire"/>
+  <rect x="677" y="286" width="203" height="60" rx="12" class="ring" stroke="#0a7cff" style="animation-name:w20"/>
+  <rect x="677" y="286" width="203" height="60" rx="12" class="ring" stroke="#0a7cff" style="animation-name:w21"/>
+  <rect x="20" y="44" width="160" height="92" rx="12" class="ring" stroke="#0a7cff" style="animation-name:w30"/>
+  <rect x="20" y="44" width="160" height="92" rx="12" class="ring" stroke="#0a7cff" style="animation-name:w31"/>
+  <rect x="20" y="44" width="160" height="92" rx="12" class="ring" stroke="#0d9488" style="animation-name:w32"/>
+  <rect x="239" y="286" width="203" height="60" rx="12" class="ring" stroke="#0d9488" style="animation-name:w37"/>
+  <rect x="239" y="380" width="422" height="66" rx="12" class="ring" stroke="#0d9488" style="animation-name:w40"/>
+  <rect x="20" y="286" width="203" height="60" rx="12" class="ring" stroke="#0d9488" style="animation-name:w45"/>
+  <rect x="677" y="286" width="203" height="60" rx="12" class="ring" stroke="#0d9488" style="animation-name:w46"/>
+  <rect x="677" y="286" width="203" height="60" rx="12" class="ring" stroke="#0d9488" style="animation-name:w47"/>
+  <rect x="596" y="172" width="284" height="64" rx="12" class="ring" stroke="#0d9488" style="animation-name:w50"/>
+  <rect x="20" y="286" width="203" height="60" rx="12" class="ring" stroke="#7c5cff" style="animation-name:w53"/>
+  <rect x="20" y="480" width="203" height="60" rx="12" class="ring" stroke="#7c5cff" style="animation-name:w56"/>
+  <rect x="239" y="480" width="203" height="60" rx="12" class="ring" stroke="#7c5cff" style="animation-name:w59"/>
+  <rect x="458" y="480" width="203" height="60" rx="12" class="ring" stroke="#7c5cff" style="animation-name:w62"/>
+  <rect x="677" y="480" width="203" height="60" rx="12" class="ring" stroke="#7c5cff" style="animation-name:w65"/>
+  <rect x="596" y="44" width="284" height="112" rx="12" class="ring" stroke="#7c5cff" style="animation-name:w68"/>
+  <path d="M180 90 H216" pathLength="1" class="tail" stroke="#0a7cff" style="animation-name:p16"/>
+  <path d="M180 90 H216" pathLength="1" class="head" stroke="#0a7cff" style="animation-name:p17"/>
+  <path d="M548 260 V272 H720 V286" pathLength="1" class="tail" stroke="#0a7cff" style="animation-name:p18"/>
+  <path d="M548 260 V272 H720 V286" pathLength="1" class="head" stroke="#0a7cff" style="animation-name:p19"/>
+  <path d="M560 135 H578 V102 H608" pathLength="1" class="tail" stroke="#0a7cff" style="animation-name:p22"/>
+  <path d="M560 135 H578 V102 H608" pathLength="1" class="head" stroke="#0a7cff" style="animation-name:p23"/>
+  <path d="M560 195 H586 V132 H608" pathLength="1" class="tail" stroke="#0a7cff" style="animation-name:p24"/>
+  <path d="M560 195 H586 V132 H608" pathLength="1" class="head" stroke="#0a7cff" style="animation-name:p25"/>
+  <path d="M548 260 V272 H720 V286" pathLength="1" class="tail" stroke="#0a7cff" style="animation-name:p26"/>
+  <path d="M548 260 V272 H720 V286" pathLength="1" class="head" stroke="#0a7cff" style="animation-name:p27"/>
+  <path d="M216 90 H180" pathLength="1" class="tail" stroke="#0a7cff" style="animation-name:p28"/>
+  <path d="M216 90 H180" pathLength="1" class="head" stroke="#0a7cff" style="animation-name:p29"/>
+  <path d="M180 90 H216" pathLength="1" class="tail" stroke="#0d9488" style="animation-name:p33"/>
+  <path d="M180 90 H216" pathLength="1" class="head" stroke="#0d9488" style="animation-name:p34"/>
+  <path d="M340 260 V286" pathLength="1" class="tail" stroke="#0d9488" style="animation-name:p35"/>
+  <path d="M340 260 V286" pathLength="1" class="head" stroke="#0d9488" style="animation-name:p36"/>
+  <path d="M340 346 V380" pathLength="1" class="tail" stroke="#0d9488" style="animation-name:p38"/>
+  <path d="M340 346 V380" pathLength="1" class="head" stroke="#0d9488" style="animation-name:p39"/>
+  <path d="M661 413 H778 V346" pathLength="1" class="tail" stroke="#0d9488" style="animation-name:p41"/>
+  <path d="M661 413 H778 V346" pathLength="1" class="head" stroke="#0d9488" style="animation-name:p42"/>
+  <path d="M239 413 H121 V346" pathLength="1" class="tail" stroke="#0d9488" style="animation-name:p43"/>
+  <path d="M239 413 H121 V346" pathLength="1" class="head" stroke="#0d9488" style="animation-name:p44"/>
+  <path d="M778 286 V236" pathLength="1" class="tail" stroke="#0d9488" style="animation-name:p48"/>
+  <path d="M778 286 V236" pathLength="1" class="head" stroke="#0d9488" style="animation-name:p49"/>
+  <path d="M778 236 V286" pathLength="1" class="tail" stroke="#0d9488" style="animation-name:p51"/>
+  <path d="M778 236 V286" pathLength="1" class="head" stroke="#0d9488" style="animation-name:p52"/>
+  <path d="M60 346 V480" pathLength="1" class="tail" stroke="#7c5cff" style="animation-name:p54"/>
+  <path d="M60 346 V480" pathLength="1" class="head" stroke="#7c5cff" style="animation-name:p55"/>
+  <path d="M223 510 H239" pathLength="1" class="tail" stroke="#7c5cff" style="animation-name:p57"/>
+  <path d="M223 510 H239" pathLength="1" class="head" stroke="#7c5cff" style="animation-name:p58"/>
+  <path d="M442 510 H458" pathLength="1" class="tail" stroke="#7c5cff" style="animation-name:p60"/>
+  <path d="M442 510 H458" pathLength="1" class="head" stroke="#7c5cff" style="animation-name:p61"/>
+  <path d="M661 510 H677" pathLength="1" class="tail" stroke="#7c5cff" style="animation-name:p63"/>
+  <path d="M661 510 H677" pathLength="1" class="head" stroke="#7c5cff" style="animation-name:p64"/>
+  <path d="M880 510 H890 V100 H880" pathLength="1" class="tail" stroke="#7c5cff" style="animation-name:p66"/>
+  <path d="M880 510 H890 V100 H880" pathLength="1" class="head" stroke="#7c5cff" style="animation-name:p67"/>
+</svg>

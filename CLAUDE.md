@@ -38,6 +38,9 @@ write-ups in `docs/results/`.
   agent-eval`, then `make agent-latency` with the services up; re-runs differ only in their
   latency sections, and the report says when the database had orders (each one took a unit of
   stock).
+- `docs/architecture.svg` (the README's animated diagram) is written by `python3
+  docs/render_architecture.py` (standard library only); change the script, not the SVG.
+  `docs/demo.gif` is a recording of the store, replaced when the pages change.
 - Generated code is committed: `serving/gen` and `model_server/gen` (`make proto`),
   `serving/internal/store/db` (`make sqlc`). Edit the `.proto` / SQL, then regenerate.
 - Adapted third-party code keeps its licence: `licenses/` (SASRec.pytorch, Apache-2.0).
