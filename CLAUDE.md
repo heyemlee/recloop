@@ -40,7 +40,7 @@ write-ups in `docs/results/`.
   stock).
 - `docs/architecture.svg` (the README's animated diagram) is written by `python3
   docs/render_architecture.py` (standard library only); change the script, not the SVG.
-  `docs/demo.gif` is a recording of the store, replaced when the pages change.
+  `docs/demo.webp` is a recording of the store (an animated WebP), replaced when the pages change.
 - Generated code is committed: `serving/gen` and `model_server/gen` (`make proto`),
   `serving/internal/store/db` (`make sqlc`). Edit the `.proto` / SQL, then regenerate.
 - Adapted third-party code keeps its licence: `licenses/` (SASRec.pytorch, Apache-2.0).

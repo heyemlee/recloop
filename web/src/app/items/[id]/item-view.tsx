@@ -32,6 +32,12 @@ export function ItemView() {
     };
   }, [itemId]);
 
+  // A client navigation scrolls only as far as this page's first element, which leaves the top
+  // bar above the window: start every item at the top of the page.
+  useEffect(() => {
+    window.scrollTo({ top: 0, behavior: "instant" });
+  }, [itemId]);
+
   const item = loaded.id === itemId ? loaded.item : null;
   const error = loaded.id === itemId ? loaded.error : null;
   const message = status?.id === itemId ? status.text : null;
