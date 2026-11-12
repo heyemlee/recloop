@@ -125,8 +125,10 @@ web/                        Next.js 16 + shadcn/ui (:13000); /api/v1/* is proxie
                             /advertiser is the advertiser console, /chat the shopping assistant,
                             /admin the internal admin page (only with RECLOOP_ADMIN=1); the
                             store pages' search pill has no keyword search: it sends its text
-                            to /chat?q=; the home hero shows the feed's first organic items and
-                            reports no impressions of its own (the tiles do)
+                            to /chat?q=; the home hero shows organic items of the feed's first
+                            page, the ones whose photo works as a cut-out (src/lib/cutout.ts
+                            judges each photo in the browser), and reports no impressions of its
+                            own (the tiles do)
 sim/                        traffic simulator (world, click model, sessions + fault switches, verify,
                             drill; ads, billing_drill, billing_verify, overdelivery; compose: this
                             checkout's compose project, redis_stats: both Redis instances; M4:

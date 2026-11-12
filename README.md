@@ -18,7 +18,7 @@
 </div>
 
 <p align="center">
-  <img src="docs/demo.webp" width="960" alt="The RecLoop store. The first items of a user's feed float above the wordmark and the search pill and take turns. Choosing another demo user changes the feed. With Debug on, a panel shows the request's recall sources, fusion weights, model version and experiment groups, and every item its ranks and scores. An item page shows similar items. A question typed into the search pill, ink cartridges for a Canon PIXMA MG3620 under 25 dollars, is answered by the shopping assistant with three cartridges whose compatibility is quoted from their listings" />
+  <img src="docs/demo.webp" width="960" alt="The RecLoop store. Items from a user's feed float above the wordmark and the search pill and take turns. Choosing another demo user changes the feed. With Debug on, a panel shows the request's recall sources, fusion weights, model version and experiment groups, and every item its ranks and scores. An item page shows similar items. A question typed into the search pill, ink cartridges for a Canon PIXMA MG3620 under 25 dollars, is answered by the shopping assistant with three cartridges whose compatibility is quoted from their listings" />
 </p>
 
 <p align="center"><sub>Office products from Amazon Review Data (2018). Shoppers, advertisers and budgets are simulated; every number below was measured on one laptop. The recording is sped up.</sub></p>

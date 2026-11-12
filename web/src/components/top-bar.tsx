@@ -30,7 +30,7 @@ function Controls() {
         }}
       >
         <input
-          className="h-11 w-24 rounded-full border bg-card px-4 text-sm outline-none placeholder:text-muted-foreground focus-visible:border-ring"
+          className="h-11 w-28 rounded-full border bg-card px-4 text-sm outline-none placeholder:text-muted-foreground focus-visible:border-ring"
           inputMode="numeric"
           placeholder={userId === null ? "user id" : `user ${userId}`}
           value={custom}
